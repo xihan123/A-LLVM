@@ -16,8 +16,10 @@ jobs:
         with:
           python-version: "3.11"
       - name: Python syntax
-        run: python -m py_compile scripts/*.py tests/discover/test_discover.py
+        run: python -m py_compile scripts/*.py tests/discover/test_discover.py tests/locate-llvm/test_locate_llvm.py
       - name: Discovery tests
         run: python tests/discover/test_discover.py
+      - name: LLVM location tests
+        run: python tests/locate-llvm/test_locate_llvm.py
       - name: Shell syntax
         run: bash -n scripts/*.sh tests/*/*.sh
