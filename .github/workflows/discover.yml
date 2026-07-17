@@ -1,0 +1,157 @@
+name: discover
+
+on:
+  schedule:
+  - cron: "17 3 * * *" # 每日 03:17 UTC 检查一次（避开整点）
+  workflow_dispatch:
+    inputs:
+      channels:
+        description: "覆盖启用通道（逗号分隔，如 stable,beta,rc,canary）；留空用 config"
+        required: false
+        default: ""
+      hosts:
+        description: "host 列表（逗号分隔）"
+        required: false
+        default: "linux-x86_64,windows-x86_64"
+      force:
+        description: "忽略去重并重建验证（既有 Release 不覆盖）"
+        type: boolean
+        default: false
+      mode:
+        description: "build=自建 clang 并混淆；repack=仅原样重打包（用于打通流水线）"
+        type: choice
+        options: [ "build", "repack" ]
+        default: "build"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discover
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.disc.outputs.matrix }}
+      release_matrix: ${{ steps.disc.outputs.release_matrix }}
+      has_work: ${{ steps.disc.outputs.has_work }}
+      has_release_work: ${{ steps.disc.outputs.has_release_work }}
+      count: ${{ steps.disc.outputs.count }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: 发现与去重逻辑单测
+        run: python tests/discover/test_discover.py
+      - name: 发现 NDK 版本
+        id: disc
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python scripts/discover_ndk.py \
+            ${{ inputs.channels && format('--channels {0}', inputs.channels) || '' }} \
+            --hosts "${{ inputs.hosts || 'linux-x86_64,windows-x86_64' }}" \
+            ${{ inputs.force && '--force' || '' }}
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.has_work == 'true'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    uses: ./.github/workflows/build.yml
+    with:
+      ndk_tag: ${{ matrix.ndk_tag }}
+      our_tag: ${{ matrix.our_tag }}
+      internal: ${{ matrix.internal }}
+      channel: ${{ matrix.channel }}
+      host: ${{ matrix.host }}
+      prerelease: ${{ matrix.prerelease }}
+      download_url: ${{ matrix.download_url }}
+      patchset: ${{ matrix.patchset }}
+      mode: ${{ inputs.mode || 'build' }}
+      publish: "false"
+    secrets: inherit
+
+  release:
+    needs: [ discover, build ]
+    if: needs.discover.outputs.has_release_work == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.release_matrix) }}
+    concurrency:
+      group: ndk-${{ matrix.ndk_tag }}-${{ matrix.internal }}-${{ matrix.patchset }}-release
+      cancel-in-progress: false
+    steps:
+      - name: 下载同一版本的全部 Host 产物
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ndk-${{ matrix.our_tag }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: 校验资产并生成总 SHA256SUMS
+        env:
+          OUR_TAG: ${{ matrix.our_tag }}
+          HOSTS: ${{ matrix.hosts }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra wanted_hosts <<< "$HOSTS"
+          for host in "${wanted_hosts[@]}"; do
+            file="dist/android-ndk-${OUR_TAG}-${host}.zip"
+            [ -f "$file" ] || { echo "::error::缺少 Host 产物：$file"; exit 1; }
+          done
+          zip_count="$(find dist -maxdepth 1 -type f -name '*.zip' | wc -l)"
+          [ "$zip_count" -eq "${#wanted_hosts[@]}" ] || {
+            echo "::error::Host 产物数量异常：expected=${#wanted_hosts[@]} actual=$zip_count"; exit 1;
+          }
+          (cd dist && sha256sum *.zip > SHA256SUMS)
+
+          status="$(curl -sS -o release.json -w '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$OUR_TAG")"
+          case "$status" in
+            404) ;;
+            200) echo "::error::Release $OUR_TAG 已存在，拒绝覆盖不可变发布"; exit 1 ;;
+            *)   echo "::error::查询 Release 失败，HTTP $status"; exit 1 ;;
+          esac
+
+      - name: 单次发布全部 Host 产物
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ matrix.our_tag }}
+          name: ${{ matrix.our_tag }}
+          prerelease: ${{ matrix.prerelease == true }}
+          fail_on_unmatched_files: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS
+          body: |
+            **第三方 Custom Android NDK —— 非 Google 官方构建。**
+
+            | 字段 | 值 |
+            | --- | --- |
+            | 上游 NDK | `${{ matrix.ndk_tag }}` |
+            | 内部版本 | `${{ matrix.internal }}` |
+            | 通道 | `${{ matrix.channel }}` |
+            | Host | `${{ matrix.hosts }}` |
+            | Patchset | `${{ matrix.patchset }}` |
+            | 模式 | `${{ inputs.mode || 'build' }}` |
+
+            `build` 产物支持仓库 README 中列出的 `-mllvm -irobf-*` 开关；
+            `repack` 产物仅用于验证重打包流水线，不含混淆 overlay。
+
+            校验：`sha256sum -c SHA256SUMS`。
