@@ -1,7 +1,7 @@
 name: patch-check
 
-# 非发布验证：以 publish=false 复用 build.yml（应用 overlay、编 clang、跑完整构建门槛），
-# 默认编四个主流 Android ABI 所需的 AArch64/ARM/X86 后端。正式发版走 discover.yml → build.yml。
+# 非发布验证：复用只读的 build.yml（应用 overlay、编 clang、跑完整构建门槛），
+# 默认编四个主流 Android ABI 所需的 AArch64/ARM/X86 后端。正式发版由 discover.yml 聚合产物后完成。
 on:
   workflow_dispatch:
     inputs:
@@ -21,7 +21,7 @@ on:
     - ".github/workflows/build.yml"
     - ".github/workflows/patch-check.yml"
 
-# 只需读权限：publish=false 会跳过发布步骤，不需要 contents:write。
+# PR 检查与可复用构建都只需要读取仓库内容。
 permissions:
   contents: read
 
@@ -44,6 +44,5 @@ jobs:
       channel: stable
       host: linux-x86_64
       mode: build
-      publish: "false"
       targets: ${{ github.event.inputs.targets || 'AArch64;ARM;X86' }}
       download_url: ""

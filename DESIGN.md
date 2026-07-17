@@ -111,7 +111,7 @@ artifact: android-ndk-<tag>-<host>.zip
 
 去重同时检查 tag 和资产。请求的 Host zip 与 `SHA256SUMS` 全部存在时才跳过。已有 Release 缺少资产时终止自动发布，并要求递增 patchset；`force` 只重建 artifact，不覆盖 Release。
 
-自动流程中，各 Host 的 `build.yml` 都使用 `publish=false`。只有聚合 job 拥有发布权限，并在全部 Host 成功后创建 Release。直接手动运行 `build.yml` 时也会先检查 tag 是否存在。
+`build.yml` 只读取仓库、构建并上传 artifact，不持有 Release 写权限。只有 `discover.yml` 的聚合 job 拥有发布权限，并在全部 Host 成功后检查 tag、生成总校验文件并创建 Release。手动运行 `build.yml` 也只生成 artifact。
 
 ## 7. 混淆 overlay
 

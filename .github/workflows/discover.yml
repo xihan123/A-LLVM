@@ -73,11 +73,9 @@ jobs:
       internal: ${{ matrix.internal }}
       channel: ${{ matrix.channel }}
       host: ${{ matrix.host }}
-      prerelease: ${{ matrix.prerelease }}
       download_url: ${{ matrix.download_url }}
       patchset: ${{ matrix.patchset }}
       mode: ${{ inputs.mode || 'build' }}
-      publish: "false"
     secrets: inherit
 
   release:
