@@ -11,6 +11,29 @@ SPEC.loader.exec_module(discover_ndk)
 
 
 class DiscoverReleaseTest(unittest.TestCase):
+    def test_latest_release_uses_requested_channel(self):
+        releases = [
+            {
+                "draft": False,
+                "tag_name": "r30-beta2",
+                "body": 'ndkVersion "30.0.15729638-beta2"',
+            },
+            {
+                "draft": False,
+                "tag_name": "r29",
+                "body": 'ndkVersion "29.0.14206865"',
+            },
+        ]
+        with mock.patch.object(discover_ndk, "gh_get", return_value=(200, releases)):
+            self.assertEqual(
+                discover_ndk.latest_release("stable"),
+                {
+                    "ndk_tag": "r29",
+                    "internal": "29.0.14206865",
+                    "channel": "stable",
+                },
+            )
+
     def test_hosts_are_validated_and_deduplicated(self):
         self.assertEqual(
             discover_ndk.parse_hosts("linux-x86_64,linux-x86_64,windows-x86_64"),

@@ -100,6 +100,27 @@ def classify_channel(tag):
     return "stable"
 
 
+def latest_release(channel, token=None):
+    top_n = load_config().get("top_n", 15)
+    status, releases = gh_get(f"{NDK_RELEASES_API}?per_page={top_n}", token=token)
+    if status != 200 or releases is None:
+        raise RuntimeError(f"拉取 NDK releases 失败 status={status}")
+    for rel in releases:
+        tag = rel.get("tag_name", "")
+        if rel.get("draft") or classify_channel(tag) != channel:
+            continue
+        match = NDK_VERSION_RE.search(rel.get("body") or "")
+        if match:
+            return {
+                "ndk_tag": tag,
+                "internal": re.sub(
+                    r"-(beta|rc|canary)\d*$", "", match.group(1)
+                ),
+                "channel": channel,
+            }
+    raise RuntimeError(f"最近 {top_n} 个 NDK release 中没有可用的 {channel} 版本")
+
+
 def compose_our_tag(tag, internal, patchset):
     """r30-beta2 + 30.0.15729638 + p1 -> r30-30.0.15729638-beta2-p1"""
     m = TAG_RE.match(tag)
@@ -247,6 +268,11 @@ def discover(args):
 def main():
     ap = argparse.ArgumentParser(description="发现待构建的 Android NDK 版本")
     ap.add_argument(
+        "--latest-channel",
+        choices=("stable", "beta", "rc", "canary"),
+        help="输出指定通道的最新版本，并写入 GITHUB_ENV",
+    )
+    ap.add_argument(
         "--top-n", type=int, default=0, help="遍历最近 N 个 release（默认取 config）"
     )
     ap.add_argument(
@@ -258,6 +284,23 @@ def main():
     )
     ap.add_argument("--dry-run", action="store_true", help="仅打印，不写 GITHUB_OUTPUT")
     args = ap.parse_args()
+
+    if args.latest_channel:
+        try:
+            latest = latest_release(
+                args.latest_channel,
+                token=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"),
+            )
+        except RuntimeError as e:
+            log(f"[error] {e}")
+            return 1
+        print(json.dumps(latest, ensure_ascii=False))
+        gh_env = os.environ.get("GITHUB_ENV")
+        if gh_env:
+            with open(gh_env, "a", encoding="utf-8") as f:
+                f.write(f"NDK_TAG={latest['ndk_tag']}\n")
+                f.write(f"INTERNAL={latest['internal']}\n")
+        return 0
 
     try:
         rc, entries, release_entries = discover(args)
