@@ -1,0 +1,29 @@
+# 构建产物 / 临时目录
+/work/
+/dist/
+/out/
+*.zip
+*.tar.*
+*.dmg
+
+# 下载的官方 NDK 与 LLVM 源码（构建期拉取，不入库）
+/ndk/
+/llvm-project/
+android-ndk-*/
+
+# 混淆 overlay 移植期的参考源码暂存
+/.obf-recon/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 本地 discover 干跑输出
+matrix.json
