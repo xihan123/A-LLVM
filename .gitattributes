@@ -1,0 +1,6 @@
+# 混淆 overlay 面向 Linux LLVM 构建机：源码统一 LF；registration.patch 按二进制保真
+# （避免 Windows autocrlf 把补丁/上下文改成 CRLF 导致 git apply 失败）。
+obfuscation/**/*.cpp text eol=lf
+obfuscation/**/*.h text eol=lf
+obfuscation/**/CMakeLists.txt text eol=lf
+obfuscation/**/registration.patch -text

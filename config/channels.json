@@ -1,0 +1,9 @@
+{
+  "top_n": 15,
+  "channels": {
+    "stable": { "enabled": true,  "prerelease": false },
+    "rc":     { "enabled": true,  "prerelease": true  },
+    "beta":   { "enabled": true,  "prerelease": true  },
+    "canary": { "enabled": false, "prerelease": true  }
+  }
+}
