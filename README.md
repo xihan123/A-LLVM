@@ -60,7 +60,7 @@ NDKP_STR_ENCRYPT void secret() { const char* k = "token"; /* ... */ }
 - 手动：Actions → `discover` → Run workflow，可覆盖 `channels` / `hosts` / `force` / `mode`。
   - `mode=repack`：仅原样重打包官方 NDK（快速打通流水线，阶段 1a）。
   - `mode=build`：自建 patched clang 覆盖（默认）；缺少对应 LLVM major overlay 时失败。
-- 单版本：直接跑 `build` workflow（`workflow_dispatch`），填 `ndk_tag`（如 `r27d`）与 `internal`（如 `27.3.13750724`）。
+- 单版本验证：直接跑 `build` workflow（`workflow_dispatch`），填 `ndk_tag`（如 `r27d`）与 `internal`（如 `27.3.13750724`）；该流程只生成 artifact，不发布 Release。
 
 本地干跑发现逻辑（仅需 Python 3，无第三方依赖）：
 

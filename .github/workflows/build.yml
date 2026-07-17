@@ -8,11 +8,9 @@ on:
       internal: { type: string, required: true } # 内部版本号 30.0.15729638
       channel: { type: string, required: true } # stable/beta/rc/canary
       host: { type: string, default: "linux-x86_64" }
-      prerelease: { type: string, default: "false" }
       download_url: { type: string, required: true }
       patchset: { type: string, default: "p2" }
       mode: { type: string, default: "build" } # build=自建clang并混淆; repack=原样重打包
-      publish: { type: string, default: "true" } # false=仅构建+测试，不发布 Release（patch-check）
       targets: { type: string, default: "AArch64;ARM;X86" } # 四个主流 Android ABI 所需后端
   workflow_dispatch:
     inputs:
@@ -21,18 +19,16 @@ on:
       internal: { description: "内部版本号，如 27.3.13750724", required: true }
       channel: { description: "通道", required: false, default: "stable" }
       host: { description: "host", required: false, default: "linux-x86_64" }
-      prerelease: { description: "标记为预发布", required: false, default: "false" }
       download_url: { description: "官方 NDK 下载 URL（留空自动拼 linux.zip）", required: false, default: "" }
       patchset: { description: "patchset", required: false, default: "p2" }
       mode: { description: "build / repack", required: false, default: "build" }
-      publish: { description: "发布 Release（false=仅验证不发布）", required: false, default: "true" }
       targets: { description: "LLVM_TARGETS_TO_BUILD（默认覆盖四个主流 Android ABI）", required: false, default: "AArch64;ARM;X86" }
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: ndk-${{ inputs.ndk_tag }}-${{ inputs.internal }}-${{ inputs.patchset }}-${{ inputs.publish == 'true' && 'release' || inputs.host }}
+  group: ndk-${{ inputs.ndk_tag }}-${{ inputs.internal }}-${{ inputs.patchset }}-${{ inputs.host }}
   cancel-in-progress: false
 
 jobs:
@@ -213,7 +209,7 @@ jobs:
           bash scripts/overlay_ndk.sh --built "$PWD/build" --ndk "$NDK_DIR" \
             --host "$HOST" --major "${{ steps.loc.outputs.llvm_major }}"
 
-      # ---------------- 公共：元数据 / 测试 / 打包 / 发布 ----------------
+      # ---------------- 公共：元数据 / 测试 / 打包 ----------------
       - name: 写入可追溯元数据
         run: |
           python scripts/make_release_meta.py --ndk-dir "$NDK_DIR" \
@@ -258,48 +254,3 @@ jobs:
           name: ndk-${{ steps.vars.outputs.our_tag }}-${{ inputs.host }}
           path: dist/*.zip
           retention-days: 7
-
-      - name: 确认 Release 不存在
-        if: ${{ inputs.publish == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          status="$(curl -sS -o release.json -w '%{http_code}' \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$OUR_TAG")"
-          case "$status" in
-            404) ;;
-            200) echo "::error::Release $OUR_TAG 已存在，拒绝覆盖不可变发布"; exit 1 ;;
-            *)   echo "::error::查询 Release 失败，HTTP $status"; exit 1 ;;
-          esac
-
-      - name: 发布 Release（测试通过 + publish=true）
-        if: ${{ success() && inputs.publish == 'true' }}
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: ${{ steps.vars.outputs.our_tag }}
-          name: ${{ steps.vars.outputs.our_tag }}
-          prerelease: ${{ inputs.prerelease == 'true' }}
-          fail_on_unmatched_files: true
-          token: ${{ secrets.GITHUB_TOKEN }}
-          files: |
-            dist/*.zip
-            dist/SHA256SUMS
-          body: |
-            **第三方 Custom Android NDK —— 非 Google 官方构建。**
-
-            | 字段 | 值 |
-            | --- | --- |
-            | 上游 NDK | `${{ inputs.ndk_tag }}` |
-            | 内部版本 | `${{ inputs.internal }}` |
-            | 通道 | `${{ inputs.channel }}` |
-            | Host | `${{ inputs.host }}` |
-            | Patchset | `${{ inputs.patchset }}` |
-            | 模式 | `${{ inputs.mode }}` |
-
-            `build` 产物支持仓库 README 中列出的 `-mllvm -irobf-*` 开关；
-            `repack` 产物仅用于验证重打包流水线，不含混淆 overlay。
-
-            校验：`sha256sum -c SHA256SUMS`。

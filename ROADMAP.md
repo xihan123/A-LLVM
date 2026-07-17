@@ -78,7 +78,7 @@
 
 ## 发版前必做
 
-- [ ] 跑一次 `patch-check.yml`（`mode=build` / `publish=false` / AArch64+ARM+X86），验证 overlay、四 ABI、构建系统与字符串测试全绿
+- [ ] 跑一次 `patch-check.yml`（`mode=build` / AArch64+ARM+X86），验证 overlay、四 ABI、构建系统与字符串测试全绿
 - [ ] Linux `mode=build` 全量（四 ABI）端到端跑通一次
 - [ ] Windows host 在 `windows-latest` 上跑通一次（先验证 repack，再验证 build）
 - [x] `LICENSE` 换成完整 GPL-3.0 文本
