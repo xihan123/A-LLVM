@@ -19,7 +19,7 @@ import os
 import re
 import sys
 
-BASE_REV_RE = re.compile(r"Base revision:\s*([0-9a-fA-F]{7,40})")
+BASE_REV_RE = re.compile(r"Base revision:\s*\[?([0-9a-fA-F]{7,40})")
 BASED_ON_RE = re.compile(r"based on\s+(r\S+)", re.IGNORECASE)
 
 
