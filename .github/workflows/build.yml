@@ -14,10 +14,15 @@ on:
       targets: { type: string, default: "AArch64;ARM;X86" } # 四个主流 Android ABI 所需后端
   workflow_dispatch:
     inputs:
-      ndk_tag: { description: "上游 tag，如 r27d / r30-beta2", required: true }
+      ndk_tag: { description: "上游 tag；与 internal 同时留空则自动取所选通道最新版", required: false, default: "" }
       our_tag: { description: "本项目 tag（留空则自动 <ndk_tag>-<internal>-p1）", required: false, default: "" }
-      internal: { description: "内部版本号，如 27.3.13750724", required: true }
-      channel: { description: "通道", required: false, default: "stable" }
+      internal: { description: "内部版本号；与 ndk_tag 同时留空则自动获取", required: false, default: "" }
+      channel:
+        description: "通道（自动获取版本时使用）"
+        required: false
+        type: choice
+        options: [ "stable", "beta", "rc", "canary" ]
+        default: "stable"
       host: { description: "host", required: false, default: "linux-x86_64" }
       download_url: { description: "官方 NDK 下载 URL（留空自动拼 linux.zip）", required: false, default: "" }
       patchset: { description: "patchset", required: false, default: "p2" }
@@ -28,7 +33,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ndk-${{ inputs.ndk_tag }}-${{ inputs.internal }}-${{ inputs.patchset }}-${{ inputs.host }}
+  group: ndk-${{ inputs.ndk_tag || 'latest' }}-${{ inputs.internal || 'auto' }}-${{ inputs.patchset }}-${{ inputs.host }}
   cancel-in-progress: false
 
 jobs:
@@ -50,10 +55,19 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: 自动获取所选通道的最新 NDK
+        if: ${{ inputs.ndk_tag == '' && inputs.internal == '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/discover_ndk.py --latest-channel "$CHANNEL"
+
       - name: 计算 our_tag / download_url 默认值
         id: vars
         run: |
           set -euo pipefail
+          [ -n "$NDK_TAG" ] && [ -n "$INTERNAL" ] || {
+            echo "::error::ndk_tag 与 internal 必须同时填写，或同时留空自动获取最新版"; exit 1;
+          }
           OUR_TAG="${{ inputs.our_tag }}"
           if [ -z "$OUR_TAG" ]; then
             BASE="${NDK_TAG%%-*}"
