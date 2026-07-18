@@ -187,6 +187,7 @@ jobs:
         if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
         env:
           SCCACHE_GHA_ENABLED: "true"
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
         run: |
           set -euo pipefail
           cmake -S llvm-project/llvm -B build -G Ninja \
