@@ -15,6 +15,7 @@ add_llvm_pass_plugin(Obfuscation
   IndirectGlobalVariable.cpp
   ConstantIntEncryption.cpp
   ConstantFPEncryption.cpp
+  aVMP/aVMP.cpp
 
   DEPENDS
   intrinsics_gen
@@ -25,4 +26,8 @@ add_llvm_pass_plugin(Obfuscation
   Analysis
   IPO
   TransformUtils
+  BitReader
+  IRReader
+  BitWriter
+  Linker
   )
