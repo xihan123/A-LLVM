@@ -4880,8 +4880,33 @@ void GOVMInterpreter::run() {
                                 if (TargetCallee) {
                                     VMap[Callee] = TargetCallee;
                                 }
+                            } else {
+                                // 外部声明（如 _Unwind_Resume / libc 运行时）：在目标模块建
+                                // 同名声明并映射，否则 CloneFunctionInto(DifferentModule) 会留下
+                                // 跨模块函数引用（verifier: "Referencing function in another
+                                // module"）。同名声明在最终链接时解析到真实运行时符号。
+                                Function *ExtDecl = Mod->getFunction(Callee->getName());
+                                if (!ExtDecl)
+                                    ExtDecl = Function::Create(Callee->getFunctionType(),
+                                        Function::ExternalLinkage, Callee->getName(), Mod);
+                                VMap[Callee] = ExtDecl;
                             }
-                            // 如果是声明（外部函数），不添加到VMap，保持原样
+                        }
+                    }
+                }
+
+                // personality 函数（带 EH 的函数会设置）也须映射到目标模块的同名声明，
+                // 否则克隆后残留跨模块 personality 引用（verifier: "Referencing personality
+                // function in another module"）。
+                if (fun->hasPersonalityFn()) {
+                    if (auto *PF = dyn_cast<Function>(
+                            fun->getPersonalityFn()->stripPointerCasts())) {
+                        if (VMap.find(PF) == VMap.end()) {
+                            Function *TP = Mod->getFunction(PF->getName());
+                            if (!TP)
+                                TP = Function::Create(PF->getFunctionType(),
+                                    Function::ExternalLinkage, PF->getName(), Mod);
+                            VMap[PF] = TP;
                         }
                     }
                 }
