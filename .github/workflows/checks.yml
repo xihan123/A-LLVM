@@ -21,5 +21,7 @@ jobs:
         run: python tests/discover/test_discover.py
       - name: LLVM location tests
         run: python tests/locate-llvm/test_locate_llvm.py
+      - name: Build-system smoke runner tests
+        run: bash tests/build-system-smoke/test_run.sh
       - name: Shell syntax
         run: bash -n scripts/*.sh tests/*/*.sh

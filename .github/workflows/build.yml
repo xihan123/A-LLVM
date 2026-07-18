@@ -125,6 +125,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then 7z x -y ndk.zip >/dev/null; else unzip -q ndk.zip; fi
           NDK_DIR="$(find . -maxdepth 1 -type d -name 'android-ndk-*' | head -n1)"
           [ -n "$NDK_DIR" ] || { echo "::error::未找到解压后的 NDK 目录"; exit 1; }
+          NDK_DIR="$(cd "$NDK_DIR" && pwd -P)"
           echo "NDK_DIR=$NDK_DIR" >> "$GITHUB_ENV"
           echo "解压得到：$NDK_DIR"
 
