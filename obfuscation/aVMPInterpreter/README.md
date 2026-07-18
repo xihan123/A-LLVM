@@ -16,8 +16,12 @@
     scripts/gen_vm_bitcode.sh <ndk_clang> aarch64
 产出并覆盖 `obfuscation/llvm-{20,21}/include/aVMP/vm.h`（垂直切片只需 aarch64）。
 
-## ⚠ 当前提交的 vm.h 状态（WIP）
-仓库现提交的 `vm.h` 是**上游 ALLVM 的 aarch64 bitcode**（本地 Windows 无交叉 clang，未重生成）。
-其反篡改 kill 路径仍内嵌上游 "A-Protector" 横幅字节（**仅篡改检测时触发** `write(2,...)+SIGKILL`，
-正常执行 / roundtrip 测试不会打印，不影响 stdout/rc 语义等价）。**合入 main / 发版前必须**用本
-目录去品牌后的源码经 `gen_vm_bitcode.sh` 重生成、替换该 `vm.h`。
+## vm.h 生成状态（已本地重生成，去品牌）
+仓库提交的 `vm.h` 已用本目录**去品牌后的解释器源**、经 NDK r29 的 clang 21
+（`--target=aarch64-linux-android21 -frtti -fexceptions -O2 -fno-inline -emit-llvm`）
+本地重新生成（157904 字节 bitcode）。已确认 "A-Protector" 横幅**不在** bitcode 内；
+入口 `vm_interpreter` / `vmp_resume_unwind` 齐全，VM 状态全局（`vm_block_chain_state`
+等）为 extern、由 pass 创建。仅 aarch64；其余 ABI 待 Slice 3 用 `gen_vm_bitcode.sh` 生成。
+
+> 注：解释器自身实现 Itanium 异常模型（含 `try/catch`），**必须用 `-fexceptions`** 编译；
+> `-fno-exceptions` 只针对被虚拟化的用户代码。`gen_vm_bitcode.sh` 已按此设置。

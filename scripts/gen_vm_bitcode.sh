@@ -27,7 +27,9 @@ case "$ABI" in
 esac
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-"$CLANG" --target="$TRIPLE" -frtti -fno-exceptions -Os -fno-inline \
+# 解释器自身实现 Itanium 异常模型（含 try/catch），必须用 -fexceptions 编译；
+# -fno-exceptions 只针对被虚拟化的用户代码，不适用于解释器本体。
+"$CLANG" --target="$TRIPLE" -frtti -fexceptions -O2 -fno-inline \
   -emit-llvm -c "$SRC" -o "$tmp/vm.bc"
 
 len=$(wc -c < "$tmp/vm.bc")
