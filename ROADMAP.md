@@ -22,7 +22,7 @@
 ## 阶段 1b — 自建 clang（无混淆）
 
 - [x] 浅克隆 `llvm-project@base_commit`
-- [x] cmake + ninja 编 `clang;lld`（Linux：sccache + free-disk-space）
+- [x] cmake + ninja 编 `clang;lld`（Linux：free-disk-space）
 - [x] `overlay_ndk.sh` 白名单覆盖官方 NDK 的 `bin/` + resource include
 - [x] 四 ABI、CMake toolchain、ndk-build 冒烟接入 `build.yml`
 - [x] `mode=build` 缺少对应 LLVM major overlay 时 fail closed
