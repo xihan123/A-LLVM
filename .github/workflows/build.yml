@@ -39,7 +39,7 @@ concurrency:
 jobs:
   build:
     # linux host 在 ubuntu 上编，windows host（windows-x86_64）在 windows runner 上原生编。
-    runs-on: ${{ inputs.host == 'windows-x86_64' && 'windows-latest' || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.host == 'windows-x86_64' && 'windows-latest' || 'self-hosted' }}
     defaults:
       run:
         shell: bash # windows runner 用 Git Bash 跑同一套 POSIX 步骤
@@ -107,7 +107,7 @@ jobs:
           esac
 
       - name: 清理磁盘空间
-        if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
+        if: ${{ inputs.mode == 'build' && runner.os == 'Linux' && runner.environment == 'github-hosted' }}
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
         with:
           tool-cache: true
