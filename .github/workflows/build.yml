@@ -59,7 +59,7 @@ jobs:
         if: ${{ inputs.ndk_tag == '' && inputs.internal == '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/discover_ndk.py --latest-channel "$CHANNEL"
+        run: python3 scripts/discover_ndk.py --latest-channel "$CHANNEL"
 
       - name: 计算 our_tag / download_url 默认值
         id: vars
@@ -113,7 +113,8 @@ jobs:
           tool-cache: true
           large-packages: false
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - if: ${{ runner.environment == 'github-hosted' }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -149,7 +150,7 @@ jobs:
         if: ${{ inputs.mode == 'build' }}
         id: loc
         run: |
-          python scripts/locate_llvm.py --ndk-dir "$NDK_DIR" --host "$HOST"
+          python3 scripts/locate_llvm.py --ndk-dir "$NDK_DIR" --host "$HOST"
 
       - name: 浅克隆 llvm-project @ base commit
         if: ${{ inputs.mode == 'build' }}
@@ -218,7 +219,7 @@ jobs:
       # ---------------- 公共：元数据 / 测试 / 打包 ----------------
       - name: 写入可追溯元数据
         run: |
-          python scripts/make_release_meta.py --ndk-dir "$NDK_DIR" \
+          python3 scripts/make_release_meta.py --ndk-dir "$NDK_DIR" \
             --our-tag "$OUR_TAG" --ndk-tag "$NDK_TAG" --internal "$INTERNAL" \
             --channel "$CHANNEL" --host "$HOST" --patchset "$PATCHSET_VERSION" \
             --llvm-major "${{ steps.loc.outputs.llvm_major }}" \
