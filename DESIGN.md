@@ -90,7 +90,7 @@ ROADMAP.md             实现状态和待办
 - `repack`：不编译工具链，只写元数据并重新打包官方 NDK。
 - `build`：定位上游 LLVM 基线、应用 overlay、构建并覆盖工具链。缺少 overlay 时失败。
 
-Linux 使用 runner 自带 clang/lld 作为宿主编译器，并启用 sccache。Windows 使用 MSVC。默认构建 `AArch64;ARM;X86`，覆盖 arm64-v8a、armeabi-v7a、x86 和 x86_64。
+Linux 使用 runner 自带 clang/lld 作为宿主编译器。Windows 使用 MSVC。默认构建 `AArch64;ARM;X86`，覆盖 arm64-v8a、armeabi-v7a、x86 和 x86_64。
 
 构建只替换白名单中的 clang/lld/strip/objcopy 及 `lib/clang/<major>/include`。官方 NDK 的 sysroot、libc++、compiler-rt 和构建脚本保持不变。
 
@@ -190,7 +190,7 @@ AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 | 风险 | 处理 |
 | --- | --- |
 | LLVM 更新导致 overlay 失效 | 按 major 维护，`git apply --check` 和构建测试 |
-| 免费 runner 超时或磁盘不足 | sccache、单链接任务，必要时使用 larger/self-hosted runner |
+| 免费 runner 超时或磁盘不足 | 单链接任务，必要时使用 larger/self-hosted runner |
 | 缺少 Android 下游补丁 | 在文档和元数据中明确第三方构建，不承诺官方行为一致 |
 | 优化后重新出现明文 | 多优化级别扫描最终 ELF |
 | Release 只包含部分 Host | 聚合发布；残缺 Release 不覆盖 |

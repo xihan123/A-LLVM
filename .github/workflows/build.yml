@@ -151,10 +151,6 @@ jobs:
         run: |
           python scripts/locate_llvm.py --ndk-dir "$NDK_DIR" --host "$HOST"
 
-      - name: sccache
-        if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
-        uses: mozilla-actions/sccache-action@676c0e67b665684f17941acf5cc3af83bcf10228 # v0.0.6
-
       - name: 浅克隆 llvm-project @ base commit
         if: ${{ inputs.mode == 'build' }}
         run: |
@@ -183,11 +179,8 @@ jobs:
           bash scripts/apply_overlay.sh --llvm-src "$PWD/llvm-project" --major "$MAJOR"
           echo "overlay_applied=true" >> "$GITHUB_OUTPUT"
 
-      - name: 配置并编译 clang + lld（Linux）
+      - name: 配置并编译 clang（Linux）
         if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
         run: |
           set -euo pipefail
           cmake -S llvm-project/llvm -B build -G Ninja \
@@ -196,28 +189,25 @@ jobs:
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
             -DLLVM_USE_LINKER=lld \
             -DLLVM_PARALLEL_LINK_JOBS=1 \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
             -DLLVM_OBFUSCATION_LINK_INTO_TOOLS=ON \
-            -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DLLVM_ENABLE_PROJECTS="clang" \
             -DLLVM_TARGETS_TO_BUILD="$LLVM_TARGETS"
-          ninja -C build clang clang-resource-headers lld llvm-strip llvm-objcopy
-          echo "SCCACHE STATS:"; sccache --show-stats || true
+          ninja -C build clang clang-resource-headers
 
-      - name: 配置并编译 clang + lld（Windows / MSVC）
+      - name: 配置并编译 clang（Windows / MSVC）
         if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
         run: |
           set -euo pipefail
-          # 用 MSVC cl 原生编 Windows clang.exe/lld.exe；不启用 lld 链接器与 sccache
+          # 用 MSVC cl 原生编 Windows clang.exe；不启用 lld 链接器与 sccache
           # （cl + sccache 在 PDB 分离下不稳，Release 无调试信息，暂以稳定性优先）。
           cmake -S llvm-project/llvm -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_ASSERTIONS=OFF \
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl \
             -DLLVM_OBFUSCATION_LINK_INTO_TOOLS=ON \
-            -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DLLVM_ENABLE_PROJECTS="clang" \
             -DLLVM_TARGETS_TO_BUILD="$LLVM_TARGETS"
-          ninja -C build clang clang-resource-headers lld llvm-strip llvm-objcopy
+          ninja -C build clang clang-resource-headers
 
       - name: 用自建二进制覆盖 NDK
         if: ${{ inputs.mode == 'build' }}
