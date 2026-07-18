@@ -1,6 +1,13 @@
 set(LLVM_OBFUSCATION_LINK_INTO_TOOLS ON CACHE BOOL
     "Statically link the obfuscation plugin into clang" FORCE)
 
+# 混淆源文件为 UTF-8（含中文注释/字符串）。MSVC 默认按本地代码页解析源文件，会把
+# 多字节 UTF-8 序列误读为乱码，导致 "newline in constant" 等一连串解析错误；故对本
+# 插件源强制 /utf-8。GCC/Clang 默认即按 UTF-8 处理，无需此项。
+if(MSVC)
+  add_compile_options(/utf-8)
+endif()
+
 add_llvm_pass_plugin(Obfuscation
   CryptoUtils.cpp
   Utils.cpp
@@ -33,8 +40,3 @@ add_llvm_pass_plugin(Obfuscation
   BitWriter
   Linker
   )
-
-# aVMP.cpp 的 VMProtect 实现体在 #ifdef ENABLE_VMP 内（上游约定）；仅对该源
-# 文件打开此宏，其余混淆源不受影响。
-set_source_files_properties(aVMP/aVMP.cpp
-  PROPERTIES COMPILE_DEFINITIONS "ENABLE_VMP")

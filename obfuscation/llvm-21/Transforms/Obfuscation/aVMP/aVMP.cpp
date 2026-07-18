@@ -3301,8 +3301,8 @@ void GOVMTranslator::handle_inst(Instruction *ins) {
             case AtomicRMWInst::FSub: op_val = 12; break;
             case AtomicRMWInst::FMax: op_val = 13; break;
             case AtomicRMWInst::FMin: op_val = 14; break;
-            case AtomicRMWInst::FMaximum: op_val = 15; break;
-            case AtomicRMWInst::FMinimum: op_val = 16; break;
+            // FMaximum/FMinimum（op_val 15/16）在 r29 基线 LLVM 的 AtomicRMWInst 中尚未引入，
+            // 移除以适配基线；atomicrmw fmaximum/fminimum 将走 default（不支持则跳过虚拟化）。
             case AtomicRMWInst::UIncWrap: op_val = 17; break;
             case AtomicRMWInst::UDecWrap: op_val = 18; break;
             case AtomicRMWInst::USubCond: op_val = 19; break;

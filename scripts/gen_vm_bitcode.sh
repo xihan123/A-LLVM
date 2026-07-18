@@ -42,6 +42,10 @@ out="$tmp/vm.h"
   echo 'static const char binary_ir_data[] ='
   od -An -v -tx1 "$tmp/vm.bc" | awk 'NF{printf "\""; for(i=1;i<=NF;i++)printf "\\x%s",$i; printf "\"\n"}'
   echo ';'
+  echo
+  echo 'static std::vector<char> get_binary_ir() {'
+  echo '    return std::vector<char>(binary_ir_data, binary_ir_data + binary_ir_length);'
+  echo '}'
 } > "$out"
 
 for major in 20 21; do

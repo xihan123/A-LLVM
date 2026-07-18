@@ -9873,3 +9873,7 @@ static const char binary_ir_data[] =
 "\x73\x74\x72\x2e\x32\x34\x2e\x4c\x2e\x73\x74\x72\x2e\x32\x35\x6c"
 "\x6c\x76\x6d\x2e\x6d\x65\x74\x61\x64\x61\x74\x61\x00\x00\x00\x00"
 ;
+
+static std::vector<char> get_binary_ir() {
+    return std::vector<char>(binary_ir_data, binary_ir_data + binary_ir_length);
+}
