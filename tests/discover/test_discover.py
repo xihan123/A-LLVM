@@ -114,6 +114,81 @@ class DiscoverReleaseTest(unittest.TestCase):
         self.assertEqual(len(releases), 1)
         self.assertEqual(releases[0]["our_tag"], "r29-29.0.14206865-p2")
 
+    def test_discovery_takes_only_latest_per_channel(self):
+        args = types.SimpleNamespace(
+            top_n=0,
+            channels="stable,beta",
+            hosts="linux-x86_64",
+            force=False,
+            dry_run=False,
+        )
+        # 倒序：每个通道首个命中即最新；同通道更旧的 r28c / r29-beta3 必须被跳过。
+        upstream = [
+            {
+                "draft": False,
+                "tag_name": "r30-beta2",
+                "prerelease": True,
+                "body": 'ndkVersion "30.0.15729638"',
+            },
+            {
+                "draft": False,
+                "tag_name": "r29",
+                "prerelease": False,
+                "body": 'ndkVersion "29.0.14206865"',
+            },
+            {
+                "draft": False,
+                "tag_name": "r29-beta3",
+                "prerelease": True,
+                "body": 'ndkVersion "29.0.13846066"',
+            },
+            {
+                "draft": False,
+                "tag_name": "r28c",
+                "prerelease": False,
+                "body": 'ndkVersion "28.2.13676358"',
+            },
+        ]
+        with (
+            mock.patch.object(
+                discover_ndk,
+                "load_config",
+                return_value={
+                    "top_n": 15,
+                    "channels": {
+                        "stable": {"enabled": True},
+                        "beta": {"enabled": True},
+                    },
+                },
+            ),
+            mock.patch.object(discover_ndk, "load_patchset", return_value="p2"),
+            mock.patch.object(
+                discover_ndk,
+                "gh_get",
+                side_effect=[
+                    (200, upstream),
+                    (404, None),  # 去重查询：r30-beta2 未发布
+                    (404, None),  # 去重查询：r29 未发布
+                ],
+            ),
+            mock.patch.dict(
+                discover_ndk.os.environ,
+                {
+                    "GITHUB_TOKEN": "token",
+                    "GITHUB_REPOSITORY": "owner/repo",
+                },
+                clear=True,
+            ),
+        ):
+            rc, builds, releases = discover_ndk.discover(args)
+
+        self.assertEqual(rc, 0)
+        # 每通道仅最新一版：beta=r30-beta2、stable=r29；旧版被跳过。
+        self.assertEqual([entry["ndk_tag"] for entry in builds], ["r30-beta2", "r29"])
+        self.assertEqual(
+            {entry["ndk_tag"] for entry in releases}, {"r30-beta2", "r29"}
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
