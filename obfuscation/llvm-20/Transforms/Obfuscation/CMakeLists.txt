@@ -16,6 +16,8 @@ add_llvm_pass_plugin(Obfuscation
   ConstantIntEncryption.cpp
   ConstantFPEncryption.cpp
   aVMP/aVMP.cpp
+  aVMP/aVMPCrypto.cpp
+  aVMP/aVMPDispatcher.cpp
 
   DEPENDS
   intrinsics_gen
@@ -31,3 +33,8 @@ add_llvm_pass_plugin(Obfuscation
   BitWriter
   Linker
   )
+
+# aVMP.cpp 的 VMProtect 实现体在 #ifdef ENABLE_VMP 内（上游约定）；仅对该源
+# 文件打开此宏，其余混淆源不受影响。
+set_source_files_properties(aVMP/aVMP.cpp
+  PROPERTIES COMPILE_DEFINITIONS "ENABLE_VMP")
