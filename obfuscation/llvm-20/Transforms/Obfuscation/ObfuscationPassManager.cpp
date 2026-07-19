@@ -94,13 +94,40 @@ EnableTimeDetect("irobf-timedetect", cl::init(false), cl::NotHidden,
                  cl::desc("Enable IR Time-based Debugger Detection Injection."),
                  cl::ZeroOrMore);
 
+static cl::opt<bool>
+EnableRootDetect("irobf-rootdetect", cl::init(false), cl::NotHidden,
+                 cl::desc("Enable IR Root Detection Injection."),
+                 cl::ZeroOrMore);
+
+static cl::opt<bool>
+EnableVmProtectDetect("irobf-vmdetect", cl::init(false), cl::NotHidden,
+                      cl::desc("Enable IR Emulator/VM Detection Injection."),
+                      cl::ZeroOrMore);
+
+static cl::opt<bool>
+EnableBanDump("irobf-bandump", cl::init(false), cl::NotHidden,
+              cl::desc("Enable IR Anti-Dump Injection."),
+              cl::ZeroOrMore);
+
+static cl::opt<bool>
+EnableHideMaps("irobf-hidemaps", cl::init(false), cl::NotHidden,
+               cl::desc("Enable IR /proc/self/maps Hiding Injection."),
+               cl::ZeroOrMore);
+
+static cl::opt<bool>
+EnableFakeMaps("irobf-fakemaps", cl::init(false), cl::NotHidden,
+               cl::desc("Enable IR Fake /proc maps Injection."),
+               cl::ZeroOrMore);
+
 bool llvm::isIRObfuscationDebugEnabled() { return EnableIRObfuscationDebug; }
 
 bool llvm::isIRObfuscationEnabled() {
   return EnableIRObfuscation || EnableIndirectBr || EnableIndirectCall ||
          EnableIndirectGV || EnableIRFlattening || EnableIRStringEncryption ||
          EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
-         EnableIdaDetect || EnableTimeDetect;
+         EnableIdaDetect || EnableTimeDetect || EnableRootDetect ||
+         EnableVmProtectDetect || EnableBanDump || EnableHideMaps ||
+         EnableFakeMaps;
 }
 
 namespace llvm {
@@ -174,7 +201,9 @@ struct ObfuscationPassManager : public ModulePass {
     bool hasObf = EnableIndirectBr || EnableIndirectCall || EnableIndirectGV ||
                   EnableIRFlattening || EnableIRStringEncryption ||
                   EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
-                  EnableIdaDetect || EnableTimeDetect;
+                  EnableIdaDetect || EnableTimeDetect || EnableRootDetect ||
+                  EnableVmProtectDetect || EnableBanDump || EnableHideMaps ||
+                  EnableFakeMaps;
     if (hasObf)
       EnableIRObfuscation = true;
 
@@ -215,6 +244,16 @@ struct ObfuscationPassManager : public ModulePass {
       add(llvm::createIdaDetectPass());
     if (EnableTimeDetect)
       add(llvm::createTimeDetectPass());
+    if (EnableRootDetect)
+      add(llvm::createRootDetectPass());
+    if (EnableVmProtectDetect)
+      add(llvm::createVmProtectDetectPass());
+    if (EnableBanDump)
+      add(llvm::createBanDumpPass());
+    if (EnableHideMaps)
+      add(llvm::createHideMapsPass());
+    if (EnableFakeMaps)
+      add(llvm::createFakeMapsPass());
 
     return run(M);
   }
