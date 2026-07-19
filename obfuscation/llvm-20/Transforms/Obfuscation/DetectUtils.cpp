@@ -11,6 +11,7 @@
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 
 #define DEBUG_TYPE "detectutils"
 
@@ -106,7 +107,9 @@ Function* DetectUtils::createReportAndKillFunc(Module &M, const std::string &det
 
     // 使用内联汇编确保终止（根据架构选择正确的指令）
     FunctionType *AsmTy = FunctionType::get(VoidTy, {}, false);
-    std::string Triple = M.getTargetTriple().getTriple();
+    // getTargetTriple() 在 LLVM 20 返回 std::string、在较新 21 返回 Triple；
+    // 用 llvm::Triple(...) 构造后取 str()，两种返回类型都能编译。
+    std::string Triple = llvm::Triple(M.getTargetTriple()).str();
     std::string AsmInst;
     if (Triple.find("aarch64") != std::string::npos || Triple.find("arm64") != std::string::npos) {
         AsmInst = "brk #0";
