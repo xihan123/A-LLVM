@@ -4,18 +4,18 @@ on:
   workflow_call:
     inputs:
       ndk_tag: { type: string, required: true } # 上游 tag，如 r30-beta2
-      our_tag: { type: string, required: true } # 本项目 tag，如 r30-30.0.15729638-beta2-p1
+      our_tag: { type: string, required: true } # 本项目 tag，如 r30-30.0.15729638-beta2
       internal: { type: string, required: true } # 内部版本号 30.0.15729638
       channel: { type: string, required: true } # stable/beta/rc/canary
       host: { type: string, default: "linux-x86_64" }
       download_url: { type: string, required: true }
-      patchset: { type: string, default: "p2" }
+      patchset: { type: string, default: "" }
       mode: { type: string, default: "build" } # build=自建clang并混淆; repack=原样重打包
       targets: { type: string, default: "AArch64;ARM;X86" } # 四个主流 Android ABI 所需后端
   workflow_dispatch:
     inputs:
       ndk_tag: { description: "上游 tag；与 internal 同时留空则自动取所选通道最新版", required: false, default: "" }
-      our_tag: { description: "本项目 tag（留空则自动 <ndk_tag>-<internal>-p1）", required: false, default: "" }
+      our_tag: { description: "本项目 tag（留空则自动 <ndk_tag>-<internal>[-patchset]）", required: false, default: "" }
       internal: { description: "内部版本号；与 ndk_tag 同时留空则自动获取", required: false, default: "" }
       channel:
         description: "通道（自动获取版本时使用）"
@@ -25,7 +25,7 @@ on:
         default: "stable"
       host: { description: "host", required: false, default: "linux-x86_64" }
       download_url: { description: "官方 NDK 下载 URL（留空自动拼 linux.zip）", required: false, default: "" }
-      patchset: { description: "patchset", required: false, default: "p2" }
+      patchset: { description: "patchset（留空则 tag 不含后缀）", required: false, default: "" }
       mode: { description: "build / repack", required: false, default: "build" }
       targets: { description: "LLVM_TARGETS_TO_BUILD（默认覆盖四个主流 Android ABI）", required: false, default: "AArch64;ARM;X86" }
 
@@ -73,7 +73,7 @@ jobs:
             BASE="${NDK_TAG%%-*}"
             SUFFIX="${NDK_TAG#"$BASE"}"
             SUFFIX="${SUFFIX#-}"
-            OUR_TAG="${BASE}-${INTERNAL}${SUFFIX:+-$SUFFIX}-${PATCHSET_VERSION}"
+            OUR_TAG="${BASE}-${INTERNAL}${SUFFIX:+-$SUFFIX}${PATCHSET_VERSION:+-$PATCHSET_VERSION}"
           fi
           URL="${DOWNLOAD_URL}"
           if [ -z "$URL" ]; then

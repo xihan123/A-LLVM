@@ -91,7 +91,9 @@ def load_patchset():
                     return val.strip()
     except FileNotFoundError:
         pass
-    return "p2"
+    # 默认不带 patchset 后缀：our_tag 直接对应 NDK 版本（如 r30-30.0.15729638-beta2）。
+    # 仅当需要就同一 NDK 版本、以变化的 overlay 重新发布时，才设 PATCHSET_VERSION=p1/p2…
+    return ""
 
 
 def classify_channel(tag):
@@ -126,16 +128,19 @@ def latest_release(channel, token=None):
 
 
 def compose_our_tag(tag, internal, patchset):
-    """r30-beta2 + 30.0.15729638 + p1 -> r30-30.0.15729638-beta2-p1"""
+    """r30-beta2 + 30.0.15729638 [+ p1] -> r30-30.0.15729638-beta2[-p1]
+
+    patchset 为空（默认）时不追加后缀，our_tag 直接对应 NDK 版本。"""
     m = TAG_RE.match(tag)
     if not m:
         # 兜底：直接拼
-        return f"{tag}-{internal}-{patchset}"
+        return f"{tag}-{internal}-{patchset}" if patchset else f"{tag}-{internal}"
     base, suffix = m.group(1), m.group(2)
     parts = [base, internal]
     if suffix:
         parts.append(suffix)
-    parts.append(patchset)
+    if patchset:
+        parts.append(patchset)
     return "-".join(parts)
 
 
