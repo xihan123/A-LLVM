@@ -46,9 +46,21 @@ Transforms/Obfuscation/
   ConstantFPEncryption.cpp
   Utils.cpp
   LegacyLowerSwitch.cpp
+  DetectUtils.cpp            # 反分析检测公共模块（report/kill、注入 main）
+  IdaDetect.cpp             # 反调试
+  TimeDetect.cpp            # 时间差反调试
+  RootDetect.cpp            # Root 检测
+  VmProtectDetect.cpp       # 模拟器/VM 检测
+  BanDump.cpp               # 反内存转储
+  HideMaps.cpp              # /proc/self/maps 隐藏
+  FakeMaps.cpp              # 伪造 /proc maps
+  aVMP/
+    aVMP.cpp                # 函数级虚拟化（VMP）：IR→字节码 + 解释器链入
+    aVMPCrypto.cpp
+    aVMPDispatcher.cpp
 ```
 
-各 pass 仍使用 legacy `ModulePass`，由 `ObfuscationPassManagerPass` 接入 new PM。
+各 pass 仍使用 legacy `ModulePass`，由 `ObfuscationPassManagerPass` 接入 new PM。VMP（`-irobf-vmp`）在流水线最前运行，其注入的解释器（段 `.AProtect.text`）被后续 CFG pass 按段名/函数名跳过。
 
 ## 开关
 
@@ -64,9 +76,21 @@ Transforms/Obfuscation/
 | `-irobf-indbr` | 间接跳转 |
 | `-irobf-icall` | 间接调用 |
 | `-irobf-indgv` | 间接全局变量访问 |
+| `-irobf-vmp` | 函数级虚拟化（VMP） |
+| `-irobf-vm_functions=` | 指定 VMP 保护的函数，分号分隔（也可用 `annotate("vmp")` 注解） |
+| `-irobf-vmp-noinline` | VMP 下强制禁用内联 |
+| `-irobf-idadetect` | 调试器检测注入 |
+| `-irobf-timedetect` | 时间差反调试注入 |
+| `-irobf-rootdetect` | Root 检测注入 |
+| `-irobf-vmdetect` | 模拟器/VM 检测注入 |
+| `-irobf-bandump` | 反内存转储注入 |
+| `-irobf-hidemaps` | `/proc/self/maps` 隐藏注入 |
+| `-irobf-fakemaps` | 伪造 `/proc` maps 注入 |
 | `-level-*` | 强度，范围 1 到 3 |
 
 没有开关时不得执行 IR 变换。函数注解定义在 `include/ndkp.h`；当前注解仍需配合对应总开关。
+
+VMP 已实现并本地验证（IR + clang codegen → 原生 aarch64 `.so`），设备语义等价验证前不发布（见 `DESIGN.md`）。检测类 pass（`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`）注入到 `main`；构建为可执行文件时生效，构建为 `.so`（无 `main`）时自动跳过。
 
 AArch64 后端混淆和对应的 Driver 参数尚未实现。
 

@@ -248,6 +248,17 @@ bool Flattening::runOnFunction(Function &F) {
 	if (F.isIntrinsic()) {
 		return false;
 	}
+	// 跳过 VMP 注入的解释器函数（段名 .AProtect.* / 名称 vm_interpreter 等）。
+	// 其 CFG 极其庞大（VM 调度大 switch），扁平化耗时近乎无限——
+	// -irobf-vmp 与 -irobf-fla 同开时会挂死；且对已虚拟化的解释器再扁平无意义。
+	if (F.hasSection() && F.getSection().starts_with(".AProtect")) {
+		return false;
+	}
+	if (F.getName().contains("vm_interpreter") ||
+	    F.getName().contains("scase_interpreter") ||
+	    F.getName().ends_with("_original")) {
+		return false;
+	}
 	Function *tmp = &F;
 	bool      result = false;
 	const auto opt = ArgsOptions->toObfuscate(ArgsOptions->flaOpt(), &F);
