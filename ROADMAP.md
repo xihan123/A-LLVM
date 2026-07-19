@@ -30,14 +30,14 @@
 
 ## 阶段 1c — 混淆一期
 
-- [x] overlay `obfuscation/llvm-20/` 与 `llvm-21/`（各 27 文件，逐字节相同）
+- [x] overlay `obfuscation/llvm-20/` 与 `llvm-21/`（各 50 文件，逐字节相同）
 - [x] `registration.patch`（静态 pass-plugin，仅追加一行 `add_subdirectory(Obfuscation)`）
 - [x] new-PM 插件注册 `ObfuscationPlugin.cpp` + legacy 适配器
 - [x] 命令行开关：`-irobf` / `-irobf-cse` / `-irobf-cie` / `-irobf-cfe` / `-irobf-fla` / `-irobf-indbr` / `-irobf-icall` / `-irobf-indgv` + `level-*`
 - [x] `apply_overlay.sh` 用 `git apply --check` 门控 registration.patch
 - [x] Pass 实现（字符串加密 / 平坦化 / 间接化 / 常量加密），本地验证：WSL/clang-20 编译 13 个 pass 0 错误；真实 r29 NDK 的 aarch64-android21 上 `tests/string-enc` rc=0
 - [~] 读 `llvm.global.annotations`：`readAnnotate` 把 `ndkp.string_encrypt`→`+cse`、`ndkp.fla`→`+fla` 折叠；但注解无法独立开启混淆（见「已知缺陷」#3）
-- [ ] 在 GitHub Actions 端到端跑通（本地已验证，`patch-check.yml` 从未在 CI 实跑；overlay 文件尚未提交）
+- [ ] 在 GitHub Actions 端到端跑通（overlay 已提交，本地已验证；`patch-check.yml` 尚未在 CI 实跑）
 
 ## 阶段 2 — VMP（函数级虚拟化）
 
@@ -52,7 +52,6 @@
 - [ ] 代码完整性自校验 `-irobf-selfcheck` / `NDKP_SELFCHECK`
 - [ ] 字符串加密强化 `-irobf-cse-perkey` / `-irobf-cse-bind` / `NDKP_STR_BIND`
 - [ ] 函数级 SO 自加密 `-irobf-pack` / `NDKP_PACK` + `tools/ndkp-postlink` + `runtime/ndkp_rt.c`
-- [ ] `include/ndkp.h` 增加扩展宏；新增 `tests/anti-tamper`、`tests/pack-roundtrip`
 - [ ] `include/ndkp.h` 增加扩展宏；新增 `tests/anti-tamper`、`tests/pack-roundtrip`
 
 ## 阶段 3 — 后端扩展 / macOS

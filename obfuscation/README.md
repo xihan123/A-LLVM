@@ -77,7 +77,7 @@ Transforms/Obfuscation/
 | `-irobf-icall` | 间接调用 |
 | `-irobf-indgv` | 间接全局变量访问 |
 | `-irobf-vmp` | 函数级虚拟化（VMP） |
-| `-irobf-vm_functions=` | 指定 VMP 保护的函数，分号分隔（也可用 `annotate("vmp")` 注解） |
+| `-irobf-vm_functions=` | 指定 VMP 保护的函数，分号分隔（也可用 `NDKP_VMP` 注解，标签 `ndkp.vmp`） |
 | `-irobf-vmp-noinline` | VMP 下强制禁用内联 |
 | `-irobf-idadetect` | 调试器检测注入 |
 | `-irobf-timedetect` | 时间差反调试注入 |
