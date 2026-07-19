@@ -18,6 +18,11 @@ add_llvm_pass_plugin(Obfuscation
   DetectUtils.cpp
   IdaDetect.cpp
   TimeDetect.cpp
+  RootDetect.cpp
+  VmProtectDetect.cpp
+  BanDump.cpp
+  HideMaps.cpp
+  FakeMaps.cpp
 
   DEPENDS
   intrinsics_gen

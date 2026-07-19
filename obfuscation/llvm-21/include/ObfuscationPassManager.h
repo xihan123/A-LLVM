@@ -19,6 +19,11 @@
 #include "llvm/Transforms/Obfuscation/ConstantFPEncryption.h"
 #include "llvm/Transforms/Obfuscation/IdaDetect.h"
 #include "llvm/Transforms/Obfuscation/TimeDetect.h"
+#include "llvm/Transforms/Obfuscation/RootDetect.h"
+#include "llvm/Transforms/Obfuscation/VmProtectDetect.h"
+#include "llvm/Transforms/Obfuscation/BanDump.h"
+#include "llvm/Transforms/Obfuscation/HideMaps.h"
+#include "llvm/Transforms/Obfuscation/FakeMaps.h"
 #include "llvm/Passes/PassBuilder.h"
 
 namespace llvm {
