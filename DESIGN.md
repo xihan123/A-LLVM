@@ -132,9 +132,11 @@ obfuscation/llvm-<major>/
 - `-irobf-cse`；
 - `-irobf-cie`、`-irobf-cfe`；
 - `-irobf-fla`；
-- `-irobf-indbr`、`-irobf-icall`、`-irobf-indgv`。
+- `-irobf-indbr`、`-irobf-icall`、`-irobf-indgv`；
+- `-irobf-vmp`、`-irobf-vm_functions=`、`-irobf-vmp-noinline`（函数级虚拟化）；
+- `-irobf-idadetect`、`-irobf-timedetect`、`-irobf-rootdetect`、`-irobf-vmdetect`、`-irobf-bandump`、`-irobf-hidemaps`、`-irobf-fakemaps`（反分析检测注入，注入到 `main`）。
 
-`include/ndkp.h` 提供 `NDKP_STR_ENCRYPT`、`NDKP_FLATTEN` 和预留的 `NDKP_VMP`。当前注解仍需配合对应的命令行总开关。
+`include/ndkp.h` 提供 `NDKP_STR_ENCRYPT`、`NDKP_FLATTEN` 和 `NDKP_VMP`（`annotate("vmp")`，VMP 选择被虚拟化函数）。当前注解仍需配合对应的命令行总开关（VMP 除外：注解即可选中）。
 
 AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 
@@ -165,14 +167,14 @@ AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 
 ## 10. 后续工作
 
-实现顺序以 [ROADMAP.md](./ROADMAP.md) 为准。以下功能尚未进入发布工具链：
+实现顺序以 [ROADMAP.md](./ROADMAP.md) 为准。以下功能已实现于 overlay，但在满足前置条件（设备验证）前不进入自动发布：
 
-| 功能 | 前置条件 |
+| 功能 | 发布前置条件 |
 | --- | --- |
 | 字符串 per-key / 包名绑定 | 运行时开销和多进程行为测试 |
-| 反分析探针 | 误报测试，默认非致命 |
+| 反分析探针（`-irobf-*detect`/`bandump`/`*maps`） | 已实现（注入 `main`）；待误报测试 + `.so` 场景改注入 `.init_array` |
 | 代码自校验 | 动态重定位归一化和篡改测试 |
-| VMP | 函数 eligibility、各 ABI 解释器和语义测试 |
+| VMP（`-irobf-vmp`） | 已实现，本地 IR/clang codegen 验证；待各 ABI 解释器扩展与真机语义等价测试 |
 | AArch64 后端混淆 | 独立补丁和机器码测试 |
 | macOS Host | runner、dmg 打包和签名处理 |
 

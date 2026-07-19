@@ -41,16 +41,18 @@
 
 ## 阶段 2 — VMP（函数级虚拟化）
 
-- [ ] `-irobf-vmp` / `NDKP_VMP` pass
-- [ ] `-frtti -fno-exceptions` 约束校验
-- [ ] VMP roundtrip 测试
+- [x] `-irobf-vmp` / `NDKP_VMP` pass（移植 aVMP：IR→字节码 + aarch64 解释器 `Linker::linkModules` 链入）
+- [x] translator eligibility 校验（拒绝向量/token/异常处理函数，fail-safe 跳过）
+- [x] 本地 IR + clang codegen 验证（trivial/scalar-loop/全 flag 同开；产出原生 aarch64 `.so`）
+- [ ] 真机语义等价测试；多函数切片；各 ABI 解释器扩展
 
 ## 阶段 1d / 2b — 编译期扩展保护
 
-- [ ] 反分析探针 `-irobf-antidebug` / `NDKP_ANTIDEBUG`
+- [x] 反分析检测注入 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`（注入 `main`，编译验证；待 `.so` 场景 `.init_array` 改造 + 误报测试）
 - [ ] 代码完整性自校验 `-irobf-selfcheck` / `NDKP_SELFCHECK`
 - [ ] 字符串加密强化 `-irobf-cse-perkey` / `-irobf-cse-bind` / `NDKP_STR_BIND`
 - [ ] 函数级 SO 自加密 `-irobf-pack` / `NDKP_PACK` + `tools/ndkp-postlink` + `runtime/ndkp_rt.c`
+- [ ] `include/ndkp.h` 增加扩展宏；新增 `tests/anti-tamper`、`tests/pack-roundtrip`
 - [ ] `include/ndkp.h` 增加扩展宏；新增 `tests/anti-tamper`、`tests/pack-roundtrip`
 
 ## 阶段 3 — 后端扩展 / macOS
