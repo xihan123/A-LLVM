@@ -58,6 +58,22 @@ class DiscoverReleaseTest(unittest.TestCase):
             {"android-ndk-r29-p1-linux-x86_64.zip", "SHA256SUMS"},
         )
 
+    def test_compose_our_tag_patchset_optional(self):
+        # 默认（空 patchset）：tag 直接对应 NDK 版本，无后缀。
+        self.assertEqual(
+            discover_ndk.compose_our_tag("r30-beta2", "30.0.15729638", ""),
+            "r30-30.0.15729638-beta2",
+        )
+        self.assertEqual(
+            discover_ndk.compose_our_tag("r29", "29.0.14206865", ""),
+            "r29-29.0.14206865",
+        )
+        # 机制仍在：显式设 patchset 时追加后缀。
+        self.assertEqual(
+            discover_ndk.compose_our_tag("r30-beta2", "30.0.15729638", "p2"),
+            "r30-30.0.15729638-beta2-p2",
+        )
+
     def test_discovery_emits_host_builds_and_one_release(self):
         args = types.SimpleNamespace(
             top_n=0,
@@ -83,7 +99,7 @@ class DiscoverReleaseTest(unittest.TestCase):
                     "channels": {"stable": {"enabled": True}},
                 },
             ),
-            mock.patch.object(discover_ndk, "load_patchset", return_value="p2"),
+            mock.patch.object(discover_ndk, "load_patchset", return_value=""),
             mock.patch.object(
                 discover_ndk,
                 "gh_get",
@@ -112,7 +128,8 @@ class DiscoverReleaseTest(unittest.TestCase):
             ],
         )
         self.assertEqual(len(releases), 1)
-        self.assertEqual(releases[0]["our_tag"], "r29-29.0.14206865-p2")
+        # 默认无 patchset：our_tag 直接对应 NDK 版本，不带 -p2 后缀。
+        self.assertEqual(releases[0]["our_tag"], "r29-29.0.14206865")
 
     def test_discovery_takes_only_latest_per_channel(self):
         args = types.SimpleNamespace(
