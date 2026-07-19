@@ -16,6 +16,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
+#include "llvm/Transforms/Obfuscation/aVMP/aVMP.h"
 
 using namespace llvm;
 
@@ -33,6 +34,12 @@ llvm::PassPluginLibraryInfo getObfuscationPluginInfo() {
                    ArrayRef<PassBuilder::PipelineElement>) {
                   if (Name == "obfuscation") {
                     MPM.addPass(ObfuscationPassManagerPass());
+                    return true;
+                  }
+                  // 纯 new-PM 的 VMProtect 入口：供 opt -passes=vmprotect 单独运行
+                  // VMP（不经 legacy 适配器）。
+                  if (Name == "vmprotect") {
+                    MPM.addPass(VMProtectPass(true));
                     return true;
                   }
                   return false;
