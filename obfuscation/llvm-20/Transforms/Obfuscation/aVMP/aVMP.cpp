@@ -1930,6 +1930,15 @@ bool GOVMTranslator::prescan_supported_ir() {
     int bb_count = 0;
     int total_instructions = 0;
 
+    // 切片期不虚拟化带异常处理的函数：EH 虚拟化路径（Itanium invoke/landingpad/
+    // resume + personality）尚未做设备语义验证，保守拒绝、函数保持原样（fail-safe）。
+    // hasPersonalityFn 覆盖 Android(Itanium) 上几乎所有 EH 函数；下方指令级检查兜底。
+    if (F->hasPersonalityFn()) {
+        errs() << "[VMP Warning] Function '" << F->getName()
+               << "' has a personality function (exception handling); skipping VMP.\n";
+        return false;
+    }
+
     for (BasicBlock &BB : *F) {
         if (bb_count >= MAX_BASIC_BLOCKS) {
             errs() << "[VMP Warning] Function '" << F->getName()
@@ -1945,6 +1954,17 @@ bool GOVMTranslator::prescan_supported_ir() {
                 return false;
             }
             total_instructions++;
+
+            // EH 指令（含 funclet 变体）→ 拒绝该函数（见上，切片期不做 EH 虚拟化）。
+            if (isa<InvokeInst>(&I) || isa<LandingPadInst>(&I) || isa<ResumeInst>(&I) ||
+                isa<CatchSwitchInst>(&I) || isa<CatchPadInst>(&I) ||
+                isa<CleanupPadInst>(&I) || isa<CatchReturnInst>(&I) ||
+                isa<CleanupReturnInst>(&I)) {
+                errs() << "[VMP Warning] Function '" << F->getName()
+                       << "' uses exception handling (" << I.getOpcodeName()
+                       << "); skipping VMP protection for this function.\n";
+                return false;
+            }
 
             if (!is_supported_instruction(&I)) {
                 errs() << "[VMP Warning] Unsupported instruction in function '" << F->getName() << "':\n";
