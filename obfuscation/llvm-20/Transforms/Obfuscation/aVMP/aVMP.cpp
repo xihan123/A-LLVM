@@ -3782,6 +3782,11 @@ void GOVMModifier::run() {
     // 第二步改为强制内联，让 wrapper 尽量并回调用点。
     F->removeFnAttr(Attribute::NoInline);
     F->addFnAttr(Attribute::AlwaysInline);
+    // 标记为 VMP 成果物，供后续 pass（如 Flattening）精确跳过：wrapper 仅是设置 VM
+    // 环境并调用 vm_interpreter 的 trampoline，真正逻辑已在字节码中，对其再扁平化无
+    // 保护价值，且因 AlwaysInline 会在每个调用点膨胀。解释器/派发/anchor 另有
+    // .AProtect.* 段名兜底，唯独 wrapper 保留原段名，故必须在此显式打标。
+    F->addFnAttr("aproc-vmp-artifact");
 
     if (isIRObfuscationDebugEnabled()) {
         errs() << "[GOVMModifier]   Added alwaysinline attribute for wrapper folding\n";
