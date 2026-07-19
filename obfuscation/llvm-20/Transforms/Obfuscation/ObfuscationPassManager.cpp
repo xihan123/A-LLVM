@@ -84,12 +84,23 @@ LevelIRConstantFPEncryption("level-cfe", cl::init(0), cl::NotHidden,
                             cl::desc("Set IR Constant FP Encryption Level."),
                             cl::ZeroOrMore);
 
+static cl::opt<bool>
+EnableIdaDetect("irobf-idadetect", cl::init(false), cl::NotHidden,
+                cl::desc("Enable IR Debugger Detection Injection."),
+                cl::ZeroOrMore);
+
+static cl::opt<bool>
+EnableTimeDetect("irobf-timedetect", cl::init(false), cl::NotHidden,
+                 cl::desc("Enable IR Time-based Debugger Detection Injection."),
+                 cl::ZeroOrMore);
+
 bool llvm::isIRObfuscationDebugEnabled() { return EnableIRObfuscationDebug; }
 
 bool llvm::isIRObfuscationEnabled() {
   return EnableIRObfuscation || EnableIndirectBr || EnableIndirectCall ||
          EnableIndirectGV || EnableIRFlattening || EnableIRStringEncryption ||
-         EnableIRConstantIntEncryption || EnableIRConstantFPEncryption;
+         EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
+         EnableIdaDetect || EnableTimeDetect;
 }
 
 namespace llvm {
@@ -162,7 +173,8 @@ struct ObfuscationPassManager : public ModulePass {
   bool runOnModule(Module &M) override {
     bool hasObf = EnableIndirectBr || EnableIndirectCall || EnableIndirectGV ||
                   EnableIRFlattening || EnableIRStringEncryption ||
-                  EnableIRConstantIntEncryption || EnableIRConstantFPEncryption;
+                  EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
+                  EnableIdaDetect || EnableTimeDetect;
     if (hasObf)
       EnableIRObfuscation = true;
 
@@ -198,6 +210,11 @@ struct ObfuscationPassManager : public ModulePass {
       add(llvm::createFlatteningPass(pointerSize, Options.get()));
     if (EnableIndirectBr || Options->indBrOpt()->isEnabled())
       add(llvm::createIndirectBranchPass(Options.get()));
+
+    if (EnableIdaDetect)
+      add(llvm::createIdaDetectPass());
+    if (EnableTimeDetect)
+      add(llvm::createTimeDetectPass());
 
     return run(M);
   }
