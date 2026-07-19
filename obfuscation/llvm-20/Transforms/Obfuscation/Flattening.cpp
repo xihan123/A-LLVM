@@ -248,15 +248,17 @@ bool Flattening::runOnFunction(Function &F) {
 	if (F.isIntrinsic()) {
 		return false;
 	}
-	// 跳过 VMP 注入的解释器函数（段名 .AProtect.* / 名称 vm_interpreter 等）。
-	// 其 CFG 极其庞大（VM 调度大 switch），扁平化耗时近乎无限——
-	// -irobf-vmp 与 -irobf-fla 同开时会挂死；且对已虚拟化的解释器再扁平无意义。
-	if (F.hasSection() && F.getSection().starts_with(".AProtect")) {
+	// 跳过 VMP 成果物，避免与函数级虚拟化冲突：
+	//  - wrapper（原函数虚拟化后重建的 trampoline）由 VMP 打上 "aproc-vmp-artifact"；
+	//    它 AlwaysInline 且逻辑已在字节码中，扁平化只会在每个调用点膨胀、无保护价值。
+	//  - interpreter / dispatch / anchor / *_shared 等庞大函数统一归入 .AProtect.* 段
+	//    （见 aVMP.cpp construct_gv / cloneVmInterpreterForFunction / GOVMInterpreter），
+	//    其 VM 调度巨型 switch 一旦扁平化会耗时近乎无限——-irobf-vmp 与 -irobf-fla
+	//    同开时挂死。属性为主、段名为兜底，二者覆盖全部 VMP 生成物。
+	if (F.hasFnAttribute("aproc-vmp-artifact")) {
 		return false;
 	}
-	if (F.getName().contains("vm_interpreter") ||
-	    F.getName().contains("scase_interpreter") ||
-	    F.getName().ends_with("_original")) {
+	if (F.hasSection() && F.getSection().starts_with(".AProtect")) {
 		return false;
 	}
 	Function *tmp = &F;
