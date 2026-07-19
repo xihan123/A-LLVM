@@ -53,7 +53,7 @@ jobs:
       DOWNLOAD_URL: ${{ inputs.download_url }}
       LLVM_TARGETS: ${{ inputs.targets }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@v7
 
       - name: 自动获取所选通道的最新 NDK
         if: ${{ inputs.ndk_tag == '' && inputs.internal == '' }}
@@ -108,12 +108,12 @@ jobs:
 
       - name: 清理磁盘空间
         if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: true
           large-packages: false
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -139,11 +139,11 @@ jobs:
 
       - name: 配置 MSVC 环境（Windows）
         if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: 安装 ninja（Windows）
         if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
-        uses: seanmiddleditch/gha-setup-ninja@7e868db0f3406270dd46e1dac26c65f621456723 # master
+        uses: seanmiddleditch/gha-setup-ninja@v6
 
       - name: 解析官方编译器的上游 LLVM 基线
         if: ${{ inputs.mode == 'build' }}
@@ -255,7 +255,7 @@ jobs:
           ( cd dist && sha256sum *.zip > SHA256SUMS )
           ls -lh dist/
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ndk-${{ steps.vars.outputs.our_tag }}-${{ inputs.host }}
           path: dist/*.zip
