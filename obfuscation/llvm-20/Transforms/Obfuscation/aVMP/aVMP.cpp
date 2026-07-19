@@ -30,6 +30,7 @@
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IRReader/IRReader.h"
+#include "llvm/Linker/Linker.h"
 #include "llvm/Pass.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
 #include "llvm/Support/CommandLine.h"
@@ -4614,370 +4615,143 @@ static Function *cloneVmInterpreterForFunction(Module *M,
     return Clone;
 }
 
+// 将预编译的解释器 bitcode 合并进用户模块。
+//
+// 历史实现（见下方 #if 0 的 legacy 版本）用一份按名字白名单（is_interpreter_function）
+// 的手工 CloneFunctionInto 逐个克隆解释器函数。它在 LLVM 21 上根本性 fragile：
+// 白名单外、但被解释器传递调用的函数（如 C++ 静态初始化 __cxx_global_var_init、
+// EH 收尾 __clang_call_terminate 等）只得到"internal 链接 + 无函数体"的悬空声明，
+// verifier 报 "Global is external, but doesn't have external or weak linkage"；带 EH 的
+// 简单函数则因跨模块 personality/_Unwind_Resume 引用而崩溃。增量补丁跨 4 层不收敛。
+//
+// 现改用 Linker::linkModules 全量链入解释器模块：Linker 自动带入完整调用闭包
+// （helper/EH/静态初始化）为合法定义，运行时外部符号（memcpy/_Unwind_Resume/
+// personality）保持为合法的 external 声明（链接期解析到 libc/libc++/libunwind）。
+// 链入后再把解释器自带的共享全局 RAUW 到 pass 侧（每函数/共享）全局，并把两个下游
+// 按名引用的入口重命名为 *_shared。
 void GOVMInterpreter::run() {
 
     if (isIRObfuscationDebugEnabled()) {
         errs() << "[GOVMInterpreter] Starting run() for function: " << F->getName() << "\n";
-        errs() << "[GOVMInterpreter] Step 1: Parsing bitcode...\n";
+        errs() << "[GOVMInterpreter] Step 1: Parsing interpreter bitcode...\n";
     }
-    Module *interpreter_module = llvm_parse_bitcode_from_string();
-    if (!interpreter_module) {
+    Module *interpreter_raw = llvm_parse_bitcode_from_string();
+    if (!interpreter_raw) {
         if (isIRObfuscationDebugEnabled()) {
             errs() << "[GOVMInterpreter] ERROR: Failed to parse bitcode\n";
         }
         return;
     }
-    if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 1: Bitcode parsed successfully\n";
+    std::unique_ptr<Module> interpreter_module_ptr(interpreter_raw);
+
+    // 记录：① Mod 中链入前已有的函数名（用于链入后甄别哪些函数来自解释器）；
+    //       ② 解释器模块里"有函数体"的函数数量（仅调试用）。
+    std::set<std::string> pre_link_functions;
+    for (Function &EF : *Mod) {
+        pre_link_functions.insert(EF.getName().str());
+    }
+    unsigned interpreter_defined_count = 0;
+    for (Function &IF : *interpreter_module_ptr) {
+        if (!IF.isDeclaration())
+            ++interpreter_defined_count;
     }
 
     if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 2: Creating debug function...\n";
-    }
-    // 为每个VMP函数创建一个唯一的debug函数名
-    std::string debugFuncName = "vmp_debug_id_" + F->getName().str();
-    Function *DebugIdFunc = createVmpDebugId(Mod, isIRObfuscationDebugEnabled(), debugFuncName);
-    if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 2: Debug function created: " << debugFuncName << "\n";
+        errs() << "[GOVMInterpreter] Step 1: Bitcode parsed ("
+               << interpreter_defined_count << " defined fns)\n";
+        errs() << "[GOVMInterpreter] Step 2: Linking interpreter module into target...\n";
     }
 
-    if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 3: Replacing debug function...\n";
+    // ***核心***：全量链入。失败即中止（不产坏 IR）。
+    if (Linker::linkModules(*Mod, std::move(interpreter_module_ptr))) {
+        errs() << "[GOVMInterpreter] ERROR: Linker::linkModules failed; skipping VMP for this module\n";
+        return;
     }
-    if (Function *OldDebugId = interpreter_module->getFunction("vmp_debug_id")) {
-        OldDebugId->replaceAllUsesWith(DebugIdFunc);
-    }
-    if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 3: Debug function replaced\n";
-    }
+    // interpreter_module_ptr 已被 Linker 消费；以下均在 Mod 中按名字操作。
 
     if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 4: Replacing global variables...\n";
-        errs() << "[GOVMInterpreter]   gv_data_seg = " << (void*)gv_data_seg << "\n";
-        errs() << "[GOVMInterpreter]   gv_code_seg = " << (void*)gv_code_seg << "\n";
-        errs() << "[GOVMInterpreter]   ip = " << (void*)ip << "\n";
-        errs() << "[GOVMInterpreter]   data_seg_addr = " << (void*)data_seg_addr << "\n";
-        errs() << "[GOVMInterpreter]   code_seg_addr = " << (void*)code_seg_addr << "\n";
-    }
-    
-    std::vector<std::string> gv_list = {"gv_data_seg", "gv_code_seg", "ip", "data_seg_addr", "code_seg_addr", "dispatch_code_seg_addr", "pointer_size", "opcode_xorshift32_state", "vm_code_state", "vm_function_key", "vm_block_chain_state", "expected_bb_token", "exception_thrown", "exception_ptr", "exception_selector", "last_br_from_bb_id", "current_bb_id", "vmp_debug_enabled"};
-    std::vector<GlobalVariable *> new_gv_list = {gv_data_seg, gv_code_seg, ip, data_seg_addr, code_seg_addr, dispatch_code_seg_addr, pointer_size_gv, opcode_xorshift32_state, vm_code_state, vm_function_key_gv, vm_block_chain_state_gv, expected_bb_token_gv, exc_thrown_gv, exc_ptr_gv, exc_sel_gv, last_bb_gv, curr_bb_gv, vmp_debug_enabled_gv};
-    
-    std::map<GlobalVariable*, GlobalVariable*> gv_remap;
-    for (unsigned i = 0; i < gv_list.size(); i++) {
-        GlobalVariable *old_gv = interpreter_module->getGlobalVariable(gv_list[i]);
-        if (!old_gv) {
-            if (isIRObfuscationDebugEnabled()) {
-                errs() << "[GOVMInterpreter]   WARNING: old_gv '" << gv_list[i] << "' not found in interpreter module\n";
-            }
-            continue;
-        }
-        GlobalVariable *new_gv = new_gv_list[i];
-        if (!new_gv) {
-            if (isIRObfuscationDebugEnabled()) {
-                errs() << "[GOVMInterpreter]   WARNING: new_gv '" << gv_list[i] << "' is null\n";
-            }
-            continue;
-        }
-        
-        if (isIRObfuscationDebugEnabled()) {
-            errs() << "[GOVMInterpreter]   Replacing " << gv_list[i] << ": old type=" << *old_gv->getValueType() << ", new type=" << *new_gv->getValueType() << "\n";
-        }
-        gv_remap[old_gv] = new_gv;
-    }
-    if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 4: Global variables mapped, gv_remap size=" << gv_remap.size() << "\n";
+        errs() << "[GOVMInterpreter] Step 2: Link complete\n";
+        errs() << "[GOVMInterpreter] Step 3: Remapping shared globals...\n";
     }
 
-    if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 5: Replacing call_handler...\n";
-    }
-    Function *old_func = interpreter_module->getFunction("call_handler");
-    if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 5: call_handler replaced\n";
-    }
-
-    if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 6: Collecting function declarations...\n";
-    }
-    for(auto Func = interpreter_module->begin(); Func != interpreter_module->end(); ++Func) {
-        Function *fun = &*Func;
-        if(fun->isDeclaration()) {
-            if (fun->getName() == "call_handler") {
+    // 3. 把解释器自带的 18 个共享全局重定向到 pass 侧全局，删除解释器原全局。
+    //    opaque pointer 下两侧全局值类型均为 ptr，RAUW 类型安全。
+    {
+        std::vector<std::string> gv_list = {"gv_data_seg", "gv_code_seg", "ip", "data_seg_addr", "code_seg_addr", "dispatch_code_seg_addr", "pointer_size", "opcode_xorshift32_state", "vm_code_state", "vm_function_key", "vm_block_chain_state", "expected_bb_token", "exception_thrown", "exception_ptr", "exception_selector", "last_br_from_bb_id", "current_bb_id", "vmp_debug_enabled"};
+        std::vector<GlobalVariable *> new_gv_list = {gv_data_seg, gv_code_seg, ip, data_seg_addr, code_seg_addr, dispatch_code_seg_addr, pointer_size_gv, opcode_xorshift32_state, vm_code_state, vm_function_key_gv, vm_block_chain_state_gv, expected_bb_token_gv, exc_thrown_gv, exc_ptr_gv, exc_sel_gv, last_bb_gv, curr_bb_gv, vmp_debug_enabled_gv};
+        for (unsigned i = 0; i < gv_list.size(); ++i) {
+            GlobalVariable *old_gv = Mod->getGlobalVariable(gv_list[i], /*AllowInternal=*/true);
+            GlobalVariable *new_gv = new_gv_list[i];
+            if (!old_gv || !new_gv || old_gv == new_gv)
+                continue;
+            if (old_gv->getType() != new_gv->getType()) {
+                if (isIRObfuscationDebugEnabled())
+                    errs() << "[GOVMInterpreter]   WARNING: type mismatch remapping '"
+                           << gv_list[i] << "', skipped\n";
                 continue;
             }
-            if(!Mod->getFunction(fun->getName())) {
-                FunctionCallee FC = Mod->getOrInsertFunction(fun->getName().str(), fun->getFunctionType());
-                Function *NewF = cast<Function>(FC.getCallee());
-                NewF->setLinkage(fun->getLinkage());
-            }
+            old_gv->replaceAllUsesWith(new_gv);
+            old_gv->eraseFromParent();
         }
-    }
-    if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 6: Function declarations collected\n";
-    }
-    
-    if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 7: Creating interpreter function declarations...\n";
-    }
-    
-    // 步骤7a: 先创建所有解释器函数的声明，避免克隆时找不到目标函数
-    std::map<Function*, Function*> interpreter_func_map;  // 原函数 -> 新函数
-    for(auto Func = interpreter_module->begin(); Func != interpreter_module->end(); ++Func) {
-        Function *fun = &*Func;
-        if(is_interpreter_function(fun)) {
-            std::string funcName = fun->getName().str();
-            std::string newFuncName;
-            
-            newFuncName = funcName + "_shared";
-            
-            Function *NewF = Mod->getFunction(newFuncName);
-            if (!NewF) {
-                NewF = Function::Create(fun->getFunctionType(),
-                    llvm::GlobalValue::LinkageTypes::InternalLinkage,
-                    newFuncName, Mod);
-            }
-            normalizeLocalDefaultVisibility(NewF);
-            interpreter_func_map[fun] = NewF;
-        }
-    }
-    
-    if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 8: Cloning interpreter functions...\n";
-    }
-    int func_idx = 0;
-    for(auto Func = interpreter_module->begin();Func!=interpreter_module->end();++Func)
-        {
-            
-            Function *fun = &*Func;
-
-            if(is_interpreter_function(fun)) {
-                // 使用带函数名后缀的名称，避免多个VMP函数之间的冲突
-                // 但是如果函数名已经包含了当前VMP函数名，就不要再添加后缀
-                std::string funcName = fun->getName().str();
-                std::string newFuncName;
-                
-                newFuncName = funcName + "_shared";
-                
-                if (isIRObfuscationDebugEnabled()) {
-                    errs() << "[GOVMInterpreter]   Cloning function: " << fun->getName() << " -> " << newFuncName << " (idx=" << func_idx++ << ")\n";
-                }
-                
-                Function *NewF = interpreter_func_map[fun];
-                if (!NewF->empty()) {
-                    continue;
-                }
-
-                ValueToValueMapTy VMap;
-                SmallVector<ReturnInst*, 8> returns;
-
-                if (DebugIdFunc) {
-                    VMap[interpreter_module->getFunction("vmp_debug_id")] = DebugIdFunc;
-                }
-                if (old_func && callinst_handler) {
-                    VMap[old_func] = callinst_handler;
-                }
-
-                for (auto &gv_pair : gv_remap) {
-                    VMap[gv_pair.first] = gv_pair.second;
-                }
-
-                // 处理所有全局变量（包括字符串常量）
-                if (isIRObfuscationDebugEnabled()) {
-                    errs() << "[GOVMInterpreter]     Processing global variables...\n";
-                }
-                for (auto it = interpreter_module->global_begin(); it != interpreter_module->global_end(); ++it) {
-                    GlobalVariable &GV = *it;
-                    if (GV.hasAppendingLinkage() || GV.getName().starts_with("llvm.")) {
-                        continue;
-                    }
-                    if (VMap.find(&GV) == VMap.end()) {
-                        // 如果这个全局变量还没有被映射，创建一个新的
-                        Constant *Init = nullptr;
-                        if (GV.hasInitializer()) {
-                            Init = GV.getInitializer();
-                        } else {
-                            Init = Constant::getNullValue(GV.getValueType());
-                        }
-
-                        GlobalVariable *NewGV = new GlobalVariable(
-                            *Mod,
-                            GV.getValueType(),
-                            GV.isConstant(),
-                            GV.getLinkage(),
-                            Init,
-                            GV.getName().str() + "_shared"
-                        );
-                        normalizeLocalDefaultVisibility(NewGV);
-                        if (GV.hasInitializer()) {
-                            NewGV->setInitializer(Init);
-                        }
-                        if (GV.hasGlobalUnnamedAddr()) {
-                            NewGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-                        } else if (GV.hasAtLeastLocalUnnamedAddr()) {
-                            NewGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
-                        }
-                        if (GV.hasComdat()) {
-                            NewGV->setComdat(Mod->getOrInsertComdat(NewGV->getName()));
-                        }
-                        NewGV->setThreadLocalMode(GV.getThreadLocalMode());
-                        NewGV->setDSOLocal(GV.isDSOLocal());
-                        if (GV.getAlign()) {
-                            NewGV->setAlignment(GV.getAlign());
-                        }
-                        NewGV->setSection(GV.getSection());
-                        VMap[&GV] = NewGV;
-
-                        if (isIRObfuscationDebugEnabled()) {
-                            errs() << "[GOVMInterpreter]       Cloned global: " << GV.getName() << " -> " << NewGV->getName() << "\n";
-                        }
-                    }
-                }
-
-                if (isIRObfuscationDebugEnabled()) {
-                    errs() << "[GOVMInterpreter]     Processing instructions...\n";
-                }
-                for (Instruction &I : instructions(fun)) {
-                    if (CallBase *CB = dyn_cast<CallBase>(&I)) {
-                        Function *Callee = CB->getCalledFunction();
-                        if (Callee && Callee != fun) {
-                            // 首先检查是否是解释器函数
-                            auto it = interpreter_func_map.find(Callee);
-                            if (it != interpreter_func_map.end()) {
-                                // 是解释器函数，使用映射的新函数
-                                VMap[Callee] = it->second;
-                            } else if (is_interpreter_function(Callee)) {
-                                std::string calleeFuncName = Callee->getName().str();
-                                std::string mappedName = calleeFuncName + "_shared";
-                                Function *TargetCallee = Mod->getFunction(mappedName);
-                                if (TargetCallee) {
-                                    VMap[Callee] = TargetCallee;
-                                }
-                            } else if (!Callee->isDeclaration()) {
-                                // 不是解释器函数，也不是声明
-                                // 检查是否是callinst_dispatch函数，如果是，不要重命名
-                                if (Callee->getName().find("vm_interpreter_callinst_dispatch") != std::string::npos) {
-                                    // callinst_dispatch函数，不添加到VMap，保持原样
-                                    continue;
-                                }
-                                
-                                // 检查是否是vmp_debug_id函数，如果是，不要重命名
-                                if (Callee->getName().find("vmp_debug_id") != std::string::npos) {
-                                    // vmp_debug_id函数，不添加到VMap，保持原样
-                                    continue;
-                                }
-                                
-                                // 其他非声明函数，查找或创建声明
-                                std::string calleeFuncName = Callee->getName().str();
-                                std::string calleeNewName = calleeFuncName + "_shared";
-                                Function *TargetCallee = Mod->getFunction(calleeNewName);
-                                
-                                if (!TargetCallee) {
-                                    TargetCallee = Function::Create(Callee->getFunctionType(), 
-                                        Callee->getLinkage(), calleeNewName, Mod);
-                                }
-                                
-                                if (TargetCallee) {
-                                    VMap[Callee] = TargetCallee;
-                                }
-                            } else {
-                                // 外部声明（如 _Unwind_Resume / libc 运行时）：在目标模块建
-                                // 同名声明并映射，否则 CloneFunctionInto(DifferentModule) 会留下
-                                // 跨模块函数引用（verifier: "Referencing function in another
-                                // module"）。同名声明在最终链接时解析到真实运行时符号。
-                                Function *ExtDecl = Mod->getFunction(Callee->getName());
-                                if (!ExtDecl)
-                                    ExtDecl = Function::Create(Callee->getFunctionType(),
-                                        Function::ExternalLinkage, Callee->getName(), Mod);
-                                VMap[Callee] = ExtDecl;
-                            }
-                        }
-                    }
-                }
-
-                // personality 函数（带 EH 的函数会设置）也须映射到目标模块的同名声明，
-                // 否则克隆后残留跨模块 personality 引用（verifier: "Referencing personality
-                // function in another module"）。
-                if (fun->hasPersonalityFn()) {
-                    if (auto *PF = dyn_cast<Function>(
-                            fun->getPersonalityFn()->stripPointerCasts())) {
-                        if (VMap.find(PF) == VMap.end()) {
-                            Function *TP = Mod->getFunction(PF->getName());
-                            if (!TP)
-                                TP = Function::Create(PF->getFunctionType(),
-                                    Function::ExternalLinkage, PF->getName(), Mod);
-                            VMap[PF] = TP;
-                        }
-                    }
-                }
-
-                if (isIRObfuscationDebugEnabled()) {
-                    errs() << "[GOVMInterpreter]     Setting up arguments...\n";
-                }
-                Function::arg_iterator DestI = NewF->arg_begin();
-
-                for (const Argument & I : fun->args())
-                    if (VMap.count(&I) == 0) {
-                        DestI->setName(I.getName());
-                        VMap[&I] = &*DestI++;
-                    }
-
-                if (isIRObfuscationDebugEnabled()) {
-                    errs() << "[GOVMInterpreter]     Calling CloneFunctionInto...\n";
-                }
-                CloneFunctionInto(NewF, fun, VMap, CloneFunctionChangeType::DifferentModule, returns);
-                if (isIRObfuscationDebugEnabled()) {
-                    errs() << "[GOVMInterpreter]     CloneFunctionInto completed\n";
-                }
-                normalizeLocalDefaultVisibility(NewF);
-
-                // 设置段名为 .AProtect.text
-                NewF->setSection(".AProtect.text");
-                normalizeLocalDefaultVisibility(NewF);
-
-                // 函数名已经在创建时设置，这里不需要再设置
-
-                std::vector<CallInst *> F_users;
-                for (User *U : fun->users()) {
-                    if (CallInst *CI = dyn_cast<CallInst>(U)) {
-                        F_users.push_back(CI);
-                    }
-                }
-
-                // replace references
-                for (CallInst *CI: F_users) {
-                    // errs() << "[*] Replacing references: " << *CI << "\n";
-                    CI->setCalledFunction(NewF);
-                }
-                
-            }
-
-            
-        }
-    
-    
-    // remove all function of interpreter_module
-    while(true) {
-        bool flag = true;
-        for(auto Func = interpreter_module->begin(), Funcend = interpreter_module->end();Func!=Funcend;++Func) {
-
-            Function *fun = dyn_cast<Function>(&*Func);
-            
-            if(fun->use_empty()) {
-                // errs() << "[*] Removing function: " << fun->getName().str() << "\n";
-                flag = false;
-                fun->eraseFromParent();
-                break;
-            }
-        }
-        if (flag)
-            break;
     }
 
     if (isIRObfuscationDebugEnabled()) {
-        errs() << "[GOVMInterpreter] Step 7: All interpreter functions cloned\n";
+        errs() << "[GOVMInterpreter] Step 4: Wiring call_handler + vmp_debug_id...\n";
+    }
+
+    // 4. call_handler（解释器里的外部声明）→ 共享调用分发器（callinst_handler）。
+    if (Function *ch = Mod->getFunction("call_handler")) {
+        if (callinst_handler && ch != callinst_handler) {
+            ch->replaceAllUsesWith(callinst_handler);
+            ch->eraseFromParent();
+        }
+    }
+
+    // 5. vmp_debug_id（外部声明）→ 每函数 debug 桩（debug 关闭时为 no-op）。
+    std::string debugFuncName = "vmp_debug_id_" + F->getName().str();
+    Function *DebugIdFunc = createVmpDebugId(Mod, isIRObfuscationDebugEnabled(), debugFuncName);
+    if (Function *dbg = Mod->getFunction("vmp_debug_id")) {
+        if (DebugIdFunc && dbg != DebugIdFunc) {
+            dbg->replaceAllUsesWith(DebugIdFunc);
+            dbg->eraseFromParent();
+        }
+    }
+
+    if (isIRObfuscationDebugEnabled()) {
+        errs() << "[GOVMInterpreter] Step 5: Internalizing interpreter functions...\n";
+    }
+
+    // 6. 把所有"链入后新增且有函数体"的函数（即来自解释器的定义）内部化并归入
+    //    .AProtect.text，避免最终链接期符号泄漏/冲突。运行时外部声明
+    //    （memcpy/_Unwind_Resume/personality 等）为无体的 external 声明——合法，
+    //    不在此集合内，保持不动。用"链入前已有的名字集"甄别，避免误伤用户函数。
+    for (Function &Fn : *Mod) {
+        if (Fn.isDeclaration())
+            continue;
+        if (pre_link_functions.count(Fn.getName().str()))
+            continue;
+        Fn.setLinkage(GlobalValue::InternalLinkage);
+        Fn.setDSOLocal(true);
+        Fn.setSection(".AProtect.text");
+        normalizeLocalDefaultVisibility(&Fn);
+    }
+
+    // 7. 把下游按名引用的两个入口改成 *_shared 名（cloneVmInterpreterForFunction /
+    //    modifier 依赖）。其余 helper 仍以原名互相调用，无需改名。
+    if (Function *vi = Mod->getFunction("vm_interpreter")) {
+        if (!Mod->getFunction("vm_interpreter_shared"))
+            vi->setName("vm_interpreter_shared");
+    }
+    if (Function *ru = Mod->getFunction("vmp_resume_unwind")) {
+        if (!Mod->getFunction("vmp_resume_unwind_shared"))
+            ru->setName("vmp_resume_unwind_shared");
+    }
+
+    if (isIRObfuscationDebugEnabled()) {
+        errs() << "[GOVMInterpreter] run() complete (Linker path)\n";
     }
 }
+
 namespace {
 
     std::string readAnnotate(Function *f) {
