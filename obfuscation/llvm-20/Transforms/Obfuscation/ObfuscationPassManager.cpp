@@ -12,6 +12,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationOptions.h"
+#include "llvm/Transforms/Obfuscation/aVMP/aVMP.h"
 
 #define DEBUG_TYPE "ir-obfuscation"
 
@@ -119,15 +120,34 @@ EnableFakeMaps("irobf-fakemaps", cl::init(false), cl::NotHidden,
                cl::desc("Enable IR Fake /proc maps Injection."),
                cl::ZeroOrMore);
 
+// 阶段 2 VMP（函数级虚拟化）。被虚拟化的函数通过注解（ndkp.vmp / "vmp"）或
+// -irobf-vm_functions= 指定；VMP 要求 -frtti -fno-exceptions（见 include/ndkp.h）。
+static cl::opt<std::string>
+VMFunctions("irobf-vm_functions", cl::init(""), cl::NotHidden,
+            cl::desc("Specify VMP protected functions, separated by semicolon "
+                     "(e.g., func1;func2;func3)."),
+            cl::ZeroOrMore);
+static cl::opt<bool>
+EnableVMProtect("irobf-vmp", cl::init(false), cl::NotHidden,
+                cl::desc("Enable VMProtect (function-level virtualization)."),
+                cl::ZeroOrMore);
+static cl::opt<bool>
+ForceNoInline("irobf-vmp-noinline", cl::init(false), cl::NotHidden,
+              cl::desc("Force disable inlining for all functions in VMP."),
+              cl::ZeroOrMore);
+
 bool llvm::isIRObfuscationDebugEnabled() { return EnableIRObfuscationDebug; }
+
+std::string llvm::getVMFunctionsList() { return VMFunctions; }
+bool llvm::isForceNoInlineEnabled() { return ForceNoInline; }
 
 bool llvm::isIRObfuscationEnabled() {
   return EnableIRObfuscation || EnableIndirectBr || EnableIndirectCall ||
          EnableIndirectGV || EnableIRFlattening || EnableIRStringEncryption ||
          EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
-         EnableIdaDetect || EnableTimeDetect || EnableRootDetect ||
-         EnableVmProtectDetect || EnableBanDump || EnableHideMaps ||
-         EnableFakeMaps;
+         EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
+         EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
+         EnableHideMaps || EnableFakeMaps;
 }
 
 namespace llvm {
@@ -201,9 +221,9 @@ struct ObfuscationPassManager : public ModulePass {
     bool hasObf = EnableIndirectBr || EnableIndirectCall || EnableIndirectGV ||
                   EnableIRFlattening || EnableIRStringEncryption ||
                   EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
-                  EnableIdaDetect || EnableTimeDetect || EnableRootDetect ||
-                  EnableVmProtectDetect || EnableBanDump || EnableHideMaps ||
-                  EnableFakeMaps;
+                  EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
+                  EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
+                  EnableHideMaps || EnableFakeMaps;
     if (hasObf)
       EnableIRObfuscation = true;
 
@@ -216,6 +236,7 @@ struct ObfuscationPassManager : public ModulePass {
 
     if (isIRObfuscationDebugEnabled()) {
       errs() << "[NDKP] IR obfuscation enabled:\n";
+      if (EnableVMProtect)               errs() << "  + VMProtect\n";
       if (EnableIRConstantIntEncryption) errs() << "  + ConstantIntEncryption\n";
       if (EnableIRConstantFPEncryption)  errs() << "  + ConstantFPEncryption\n";
       if (EnableIRStringEncryption)      errs() << "  + StringEncryption\n";
@@ -224,6 +245,11 @@ struct ObfuscationPassManager : public ModulePass {
       if (EnableIRFlattening)            errs() << "  + Flattening\n";
       if (EnableIndirectBr)              errs() << "  + IndirectBranch\n";
     }
+
+    // VMP 最先：在常量/字符串/CFG pass 改写 IR 之前，对干净 IR 做虚拟化；其产物
+    // （vm_interpreter / *_original / vm_*_seg）被后续 pass 按名跳过。
+    if (EnableVMProtect)
+      add(llvm::createVMProtectPass(true));
 
     if (EnableIRConstantIntEncryption || Options->cieOpt()->isEnabled())
       add(llvm::createConstantIntEncryptionPass(Options.get()));

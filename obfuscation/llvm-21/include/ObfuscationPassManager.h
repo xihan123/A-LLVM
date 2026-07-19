@@ -25,6 +25,7 @@
 #include "llvm/Transforms/Obfuscation/HideMaps.h"
 #include "llvm/Transforms/Obfuscation/FakeMaps.h"
 #include "llvm/Passes/PassBuilder.h"
+#include <string>
 
 namespace llvm {
 class ModulePass;
@@ -32,6 +33,10 @@ class PassRegistry;
 
 bool isIRObfuscationEnabled();
 bool isIRObfuscationDebugEnabled();
+
+// VMP（-irobf-vmp）辅助开关读取，供 aVMP pass 使用。
+std::string getVMFunctionsList();
+bool isForceNoInlineEnabled();
 
 ModulePass *createObfuscationPassManager();
 void initializeObfuscationPassManagerPass(PassRegistry &Registry);
