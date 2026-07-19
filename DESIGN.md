@@ -136,7 +136,7 @@ obfuscation/llvm-<major>/
 - `-irobf-vmp`、`-irobf-vm_functions=`、`-irobf-vmp-noinline`（函数级虚拟化）；
 - `-irobf-idadetect`、`-irobf-timedetect`、`-irobf-rootdetect`、`-irobf-vmdetect`、`-irobf-bandump`、`-irobf-hidemaps`、`-irobf-fakemaps`（反分析检测注入，注入到 `main`）。
 
-`include/ndkp.h` 提供 `NDKP_STR_ENCRYPT`、`NDKP_FLATTEN` 和 `NDKP_VMP`（`annotate("vmp")`，VMP 选择被虚拟化函数）。当前注解仍需配合对应的命令行总开关（VMP 除外：注解即可选中）。
+`include/ndkp.h` 提供 `NDKP_STR_ENCRYPT`、`NDKP_FLATTEN`、`NDKP_VMP` 三个注解宏，分别写入标签 `ndkp.string_encrypt`、`ndkp.fla`、`ndkp.vmp`。前两者折叠为 `+cse` / `+fla`；`ndkp.vmp` 按函数名匹配，等价于 `-irobf-vm_functions=`。三者都只圈定作用函数，仍需配合对应的命令行开关（`-irobf-cse` / `-irobf-fla` / `-irobf-vmp`）。
 
 AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 
