@@ -19,13 +19,14 @@
 
 - 按 NDK 包内的 LLVM `Base revision` 构建对应 clang/lld；
 - 支持字符串加密、控制流平坦化、间接跳转/调用和常量加密；
+- 支持函数级虚拟化（VMP）与反分析检测注入（反调试/Root/模拟器/反转储/maps 隐藏）；
 - 保留官方 NDK 的 sysroot、libc++、compiler-rt 和构建脚本；
 - 为 Linux 和 Windows Host 生成独立 NDK 包；
 - 通过 GitHub Actions 自动发现、构建、测试和发布。
 
 ## 版本命名
 
-`r30-30.0.15729638-beta2-p2` 由 NDK 主版本 `r30`、内部版本 `30.0.15729638`、通道 `beta2` 和 patchset `p2` 组成。产物名为 `android-ndk-<tag>-<host>.zip`。
+`r30-30.0.15729638-beta2` 由 NDK 主版本 `r30`、内部版本 `30.0.15729638` 和通道 `beta2` 组成。产物名为 `android-ndk-<tag>-<host>.zip`。（可选的 patchset 后缀 `-p1`/`-p2` 默认关闭，仅在同一 NDK 版本因 overlay 变化需重新发布时启用。）
 
 ## 使用产物
 
@@ -52,7 +53,7 @@ ndk-build（`Android.mk`）：`LOCAL_CFLAGS += -mllvm -irobf-cse -mllvm -irobf-f
 NDKP_STR_ENCRYPT void secret() { const char* k = "token"; /* ... */ }
 ```
 
-一期开关：`-irobf-cse`（字符串）、`-irobf-cie`/`-irobf-cfe`（整/浮点常量）、`-irobf-fla`、`-irobf-indbr`/`-icall`/`-indgv`。不加任何开关时 overlay 不主动变换 IR；这不代表自建 clang 与官方 Android Clang 完全一致。AArch64 后端机器码混淆（`-aarch64-obfuscate-*`）与 VMP（`-irobf-vmp`）属后续阶段。
+一期开关：`-irobf-cse`（字符串）、`-irobf-cie`/`-irobf-cfe`（整/浮点常量）、`-irobf-fla`、`-irobf-indbr`/`-icall`/`-indgv`。函数级虚拟化 `-irobf-vmp` 与反分析检测 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}` 已实现（详见 [obfuscation/README.md](./obfuscation/README.md)）。不加任何开关时 overlay 不主动变换 IR；这不代表自建 clang 与官方 Android Clang 完全一致。VMP 已本地验证但设备语义验证前不发布；AArch64 后端机器码混淆（`-aarch64-obfuscate-*`）属后续阶段。
 
 ## 构建流程
 
@@ -81,7 +82,7 @@ tests/              package-layout / string-enc / abi-smoke / build-system-smoke
 
 ## 当前状态
 
-阶段 0、1a 已就绪；1b/1c 已完成代码和本地验证，但 GitHub Actions 端到端尚未跑通。VMP、后端扩展和 macOS 尚未实现，见 [ROADMAP.md](./ROADMAP.md)。
+阶段 0、1a 已就绪；1b/1c 已完成代码和本地验证，但 GitHub Actions 端到端尚未跑通。VMP（`-irobf-vmp`）与反分析检测 pass 已实现并本地编译验证（VMP 待设备语义验证）。后端扩展和 macOS 尚未实现，见 [ROADMAP.md](./ROADMAP.md)。
 
 ## 许可证
 
