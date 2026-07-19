@@ -16,6 +16,8 @@ add_llvm_pass_plugin(Obfuscation
   ConstantIntEncryption.cpp
   ConstantFPEncryption.cpp
   DetectUtils.cpp
+  IdaDetect.cpp
+  TimeDetect.cpp
 
   DEPENDS
   intrinsics_gen
