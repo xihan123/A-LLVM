@@ -1869,7 +1869,28 @@ void GOVMTranslator::handle_callinst(CallBase *inst, long long curr_func_id) {
 }
 
 
+// VM 字节码只建模标量整型/指针；含向量(定长或 scalable)或 token 类型的结果/操作数
+// 的指令无法序列化——放行会让 handle_inst 在打包阶段崩溃。故在 eligibility 阶段按
+// 类型拦截：-O2 自动向量化产生的 <N x T> 二元运算 / insertelement / shufflevector /
+// extractelement / llvm.vector.reduce.* 均由此被拒 → 函数 fail-safe 跳过、保持原样。
+static bool vmpTypeIsUnsupported(Type *Ty) {
+    if (!Ty)
+        return false;
+    if (Ty->isVectorTy() || Ty->isTokenTy())  // isVectorTy 涵盖 Fixed 与 Scalable
+        return true;
+    return false;
+}
+
 bool GOVMTranslator::is_supported_instruction(Instruction *ins) {
+    // 类型闸门（先于 opcode 判定）：结果或任一操作数为向量/token → 不支持。
+    if (vmpTypeIsUnsupported(ins->getType()))
+        return false;
+    for (unsigned i = 0; i < ins->getNumOperands(); ++i) {
+        Value *Op = ins->getOperand(i);
+        if (Op && vmpTypeIsUnsupported(Op->getType()))
+            return false;
+    }
+
     if (CallBase *CB = dyn_cast<CallBase>(ins)) {
         if (Function *Callee = CB->getCalledFunction()) {
             if (Callee->isIntrinsic()) {
