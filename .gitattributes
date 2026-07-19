@@ -4,3 +4,8 @@ obfuscation/**/*.cpp text eol=lf
 obfuscation/**/*.h text eol=lf
 obfuscation/**/CMakeLists.txt text eol=lf
 obfuscation/**/registration.patch -text
+
+# VMP 解释器 bitcode 头：机器生成的大字节数组（binary_ir_data[]），跳过 diff
+# （仍按 LF 文本处理，供编译器 #include）。用 scripts/gen_vm_bitcode.sh 重新生成。
+obfuscation/**/aVMP/vm.h -diff
+
