@@ -17,6 +17,8 @@
 #include "llvm/Transforms/Obfuscation/IndirectGlobalVariable.h"
 #include "llvm/Transforms/Obfuscation/ConstantIntEncryption.h"
 #include "llvm/Transforms/Obfuscation/ConstantFPEncryption.h"
+#include "llvm/Transforms/Obfuscation/IdaDetect.h"
+#include "llvm/Transforms/Obfuscation/TimeDetect.h"
 #include "llvm/Passes/PassBuilder.h"
 
 namespace llvm {
