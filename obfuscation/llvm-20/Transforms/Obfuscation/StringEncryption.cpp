@@ -129,7 +129,8 @@ static void ndkpChaCha8Keystream(uint64_t pLo, uint64_t pHi, uint32_t id,
 }
 
 // FNV-1a 64。用于把包名折进 pepper（编码器对 -irobf-cse-bind-package 字符串算，
-// 解码器对 /proc/self/cmdline 首个 NUL 前的字节算，二者一致即匹配）。
+// 解码器对 /proc/self/cmdline 首个 NUL 或 ':' 前的字节算，二者一致即匹配。
+// 截到 ':' 是为兼容多进程：私有子进程 cmdline="包名:suffix"，去 suffix 得回包名）。
 static uint64_t ndkpFnv1a64(const char *p, size_t n) {
 	uint64_t h = 0xcbf29ce484222325ULL;
 	for (size_t i = 0; i < n; ++i) {
@@ -399,6 +400,11 @@ bool StringEncryption::runOnModule(Module &M) {
 	UsePerKey = isCsePerKeyEnabled() || UseBind;
 	if (UseBind) {
 		BindPackage = getCseBindPackage();
+		// 与运行期解码对齐：包名截到首个 ':' 前，令误配 -irobf-cse-bind-package=pkg:proc
+		// 自愈（纯冒号/前导冒号 → 空 → 触发下方 fail-closed 构建报错）。
+		if (std::string::size_type Pos = BindPackage.find(':');
+		    Pos != std::string::npos)
+			BindPackage.erase(Pos);
 		if (BindPackage.empty()) {
 			report_fatal_error(
 			    "-irobf-cse-bind requires -irobf-cse-bind-package=<package>");
@@ -1034,8 +1040,9 @@ void StringEncryption::createPepperGlobals(Module &M) {
 	}
 }
 
-// i64 @ndkp_cse_get_pkgkey()：读 /proc/self/cmdline，对首 NUL 前字节算 FNV-1a64，
-// 带 ready 缓存（每进程算一次）。fopen 失败 ⇒ 返回 0（fail-closed，全串解出乱码）。
+// i64 @ndkp_cse_get_pkgkey()：读 /proc/self/cmdline，对首 NUL 或 ':' 前字节算 FNV-1a64，
+// 带 ready 缓存（每进程算一次）。截 ':' 令多进程私有子进程（cmdline="包名:suffix"）
+// 也还原出包名。fopen 失败 ⇒ 返回 0（fail-closed，全串解出乱码）。
 Function *StringEncryption::buildPkgKeyFunc(Module &M) {
 	LLVMContext &Ctx = M.getContext();
 	IntegerType *I8 = Type::getInt8Ty(Ctx);
@@ -1107,7 +1114,12 @@ Function *StringEncryption::buildPkgKeyFunc(Module &M) {
 	B.SetInsertPoint(FnvBody);
 	Value *CPtr = B.CreateInBoundsGEP(I8, BufPtr, IdxPhi);
 	Value *CByte = B.CreateLoad(I8, CPtr);
-	B.CreateCondBr(B.CreateICmpEQ(CByte, ConstantInt::get(I8, 0)), StoreBB, FnvCont);
+	// 遇 NUL 或 ':' 即停。多进程私有子进程（AndroidManifest android:process=":suffix"）
+	// 的 /proc/self/cmdline = "包名:suffix"，截到 ':' 前还原出包名，与编码期 FNV(包名)
+	// 对齐（合法 Android/Java 包名为点分标识符，绝不含 ':'，故截断无歧义）。
+	Value *IsNul = B.CreateICmpEQ(CByte, ConstantInt::get(I8, 0));
+	Value *IsColon = B.CreateICmpEQ(CByte, ConstantInt::get(I8, ':'));
+	B.CreateCondBr(B.CreateOr(IsNul, IsColon), StoreBB, FnvCont);
 
 	B.SetInsertPoint(FnvCont);
 	Value *HX = B.CreateXor(HashPhi, B.CreateZExt(CByte, I64));
@@ -1117,7 +1129,7 @@ Function *StringEncryption::buildPkgKeyFunc(Module &M) {
 	HashPhi->addIncoming(HNext, FnvCont);
 	B.CreateBr(FnvHead);
 
-	// StoreBB 的两个前驱（FnvHead 当 i>=n、FnvBody 当遇 NUL）都被 FnvHead 支配，
+	// StoreBB 的两个前驱（FnvHead 当 i>=n、FnvBody 当遇 NUL 或 ':'）都被 FnvHead 支配，
 	// HashPhi 在此可直接用。
 	B.SetInsertPoint(StoreBB);
 	B.CreateStore(HashPhi, PkgKeyG);
