@@ -52,8 +52,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
+          # 定时任务：beta 优先，无待构建条目则降级 stable，两者都无则本次不构建
+          # （rc/canary 不参与定时构建）。手动 workflow_dispatch 仍走 --channels/config。
           python scripts/discover_ndk.py \
-            ${{ inputs.channels && format('--channels {0}', inputs.channels) || '' }} \
+            ${{ github.event_name == 'schedule' && '--channel-priority beta,stable' || (inputs.channels && format('--channels {0}', inputs.channels) || '') }} \
             --hosts "${{ inputs.hosts || 'linux-x86_64,windows-x86_64' }}" \
             ${{ inputs.force && '--force' || '' }}
 
