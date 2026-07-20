@@ -70,6 +70,9 @@ Transforms/Obfuscation/
 | --- | --- |
 | `-irobf` | 总开关 |
 | `-irobf-cse` | 字符串加密 |
+| `-irobf-cse-perkey` | 字符串加密强化：per-string 密钥由隐藏 pepper（分片存储）+ 串 id 经 ChaCha8 派生，密文表不再内联密钥 |
+| `-irobf-cse-bind` | 字符串加密强化：把运行期包名（`/proc/self/cmdline`）哈希折进 pepper，`.so` 仅在目标 App 内解出正确明文（错包名→乱码，非分支）。蕴含 `-irobf-cse-perkey`；也可用 `NDKP_STR_BIND` 注解，标签 `ndkp.str_bind` |
+| `-irobf-cse-bind-package=` | `-irobf-cse-bind` 的期望包名（如 `com.example.app`）；bind 开启但缺此项则构建失败（fail-closed） |
 | `-irobf-cie` | 整数常量加密 |
 | `-irobf-cfe` | 浮点常量加密 |
 | `-irobf-fla` | 控制流平坦化 |
@@ -88,7 +91,7 @@ Transforms/Obfuscation/
 | `-irobf-fakemaps` | 伪造 `/proc` maps 注入 |
 | `-level-*` | 强度，范围 1 到 3 |
 
-没有开关时不得执行 IR 变换。函数注解定义在 `include/ndkp.h`；当前注解仍需配合对应总开关。
+没有开关时不得执行 IR 变换。函数注解定义在 `include/ndkp.h`；当前注解仍需配合对应总开关。（`NDKP_STR_BIND` 会在模块级开启 bind 模式，但仍需 `-irobf-cse` 基础开关与 `-irobf-cse-bind-package=<包名>`。）
 
 VMP 已实现并本地验证（IR + clang codegen → 原生 aarch64 `.so`），设备语义等价验证前不发布（见 `DESIGN.md`）。检测类 pass（`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`）注入到 `main`；构建为可执行文件时生效，构建为 `.so`（无 `main`）时自动跳过。
 

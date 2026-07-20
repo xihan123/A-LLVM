@@ -67,6 +67,29 @@ EnableIRStringEncryption("irobf-cse", cl::init(false), cl::NotHidden,
                          cl::desc("Enable IR Constant String Encryption."),
                          cl::ZeroOrMore);
 
+// 字符串加密强化（默认关 ⇒ 与基线逐字节一致）。
+// perkey：per-string 密钥由隐藏 pepper（分片存储）+ 串 id 经 ChaCha8 派生，密文表
+//         不再内联密钥；消除"密钥与密文相邻可离线还原"的缺陷。
+static cl::opt<bool>
+EnableStrPerKey("irobf-cse-perkey", cl::init(false), cl::NotHidden,
+                cl::desc("Harden -irobf-cse: derive per-string keys from a hidden "
+                         "split pepper via ChaCha8 (no key stored inline)."),
+                cl::ZeroOrMore);
+// bind：把运行期包名（/proc/self/cmdline）哈希折进 pepper；错包名 → 解出乱码
+//       （非分支、无可 patch 的 if）。bind 蕴含 perkey。
+static cl::opt<bool>
+EnableStrBind("irobf-cse-bind", cl::init(false), cl::NotHidden,
+              cl::desc("Harden -irobf-cse: bind decryption to the running app's "
+                       "package name (non-branch, fail-closed). Implies "
+                       "-irobf-cse-perkey; requires -irobf-cse-bind-package."),
+              cl::ZeroOrMore);
+// bind 的期望包名（构建期）。bind 开但此项空 ⇒ StringEncryption 里 fail-closed 报错。
+static cl::opt<std::string>
+StrBindPackage("irobf-cse-bind-package", cl::init(""), cl::NotHidden,
+               cl::desc("Expected Android package name to bind string decryption "
+                        "to (e.g., com.example.app). Used with -irobf-cse-bind."),
+               cl::ZeroOrMore);
+
 static cl::opt<bool>
 EnableIRConstantIntEncryption("irobf-cie", cl::init(false), cl::NotHidden,
                               cl::desc("Enable IR Constant Integer Encryption."),
@@ -141,9 +164,15 @@ bool llvm::isIRObfuscationDebugEnabled() { return EnableIRObfuscationDebug; }
 std::string llvm::getVMFunctionsList() { return VMFunctions; }
 bool llvm::isForceNoInlineEnabled() { return ForceNoInline; }
 
+// bind 蕴含 perkey：开启包名绑定即启用 ChaCha8 派生密钥路径。
+bool llvm::isCsePerKeyEnabled() { return EnableStrPerKey || EnableStrBind; }
+bool llvm::isCseBindEnabled() { return EnableStrBind; }
+std::string llvm::getCseBindPackage() { return StrBindPackage; }
+
 bool llvm::isIRObfuscationEnabled() {
   return EnableIRObfuscation || EnableIndirectBr || EnableIndirectCall ||
          EnableIndirectGV || EnableIRFlattening || EnableIRStringEncryption ||
+         EnableStrPerKey || EnableStrBind ||
          EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
          EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
          EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
@@ -220,6 +249,7 @@ struct ObfuscationPassManager : public ModulePass {
   bool runOnModule(Module &M) override {
     bool hasObf = EnableIndirectBr || EnableIndirectCall || EnableIndirectGV ||
                   EnableIRFlattening || EnableIRStringEncryption ||
+                  EnableStrPerKey || EnableStrBind ||
                   EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
                   EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
                   EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
@@ -255,7 +285,8 @@ struct ObfuscationPassManager : public ModulePass {
       add(llvm::createConstantIntEncryptionPass(Options.get()));
     if (EnableIRConstantFPEncryption || Options->cfeOpt()->isEnabled())
       add(llvm::createConstantFPEncryptionPass(Options.get()));
-    if (EnableIRStringEncryption || Options->cseOpt()->isEnabled())
+    if (EnableIRStringEncryption || EnableStrPerKey || EnableStrBind ||
+        Options->cseOpt()->isEnabled())
       add(llvm::createStringEncryptionPass(Options.get()));
     if (EnableIndirectGV || Options->indGvOpt()->isEnabled())
       add(llvm::createIndirectGlobalVariablePass(Options.get()));

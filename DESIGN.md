@@ -130,13 +130,14 @@ obfuscation/llvm-<major>/
 
 - `-irobf`；
 - `-irobf-cse`；
+- `-irobf-cse-perkey`、`-irobf-cse-bind`、`-irobf-cse-bind-package=`（字符串加密强化：ChaCha8 派生 per-string 密钥 / 包名绑定）；
 - `-irobf-cie`、`-irobf-cfe`；
 - `-irobf-fla`；
 - `-irobf-indbr`、`-irobf-icall`、`-irobf-indgv`；
 - `-irobf-vmp`、`-irobf-vm_functions=`、`-irobf-vmp-noinline`（函数级虚拟化）；
 - `-irobf-idadetect`、`-irobf-timedetect`、`-irobf-rootdetect`、`-irobf-vmdetect`、`-irobf-bandump`、`-irobf-hidemaps`、`-irobf-fakemaps`（反分析检测注入，注入到 `main`）。
 
-`include/ndkp.h` 提供 `NDKP_STR_ENCRYPT`、`NDKP_FLATTEN`、`NDKP_VMP` 三个注解宏，分别写入标签 `ndkp.string_encrypt`、`ndkp.fla`、`ndkp.vmp`。前两者折叠为 `+cse` / `+fla`；`ndkp.vmp` 按函数名匹配，等价于 `-irobf-vm_functions=`。三者都只圈定作用函数，仍需配合对应的命令行开关（`-irobf-cse` / `-irobf-fla` / `-irobf-vmp`）。
+`include/ndkp.h` 提供 `NDKP_STR_ENCRYPT`、`NDKP_STR_BIND`、`NDKP_FLATTEN`、`NDKP_VMP` 四个注解宏，分别写入标签 `ndkp.string_encrypt`、`ndkp.str_bind`、`ndkp.fla`、`ndkp.vmp`。`ndkp.string_encrypt` / `ndkp.str_bind` 折叠为 `+cse`、`ndkp.fla` 折叠为 `+fla`；`ndkp.vmp` 按函数名匹配，等价于 `-irobf-vm_functions=`。这些注解只圈定作用函数，仍需配合对应命令行开关（`-irobf-cse` / `-irobf-fla` / `-irobf-vmp`）。例外：`NDKP_STR_BIND` 只要出现在模块任一函数上即会模块级开启 bind 模式（字符串加密对全模块生效），但仍需 `-irobf-cse` 与 `-irobf-cse-bind-package=<包名>`。
 
 AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 
@@ -171,10 +172,10 @@ AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 
 | 功能 | 发布前置条件 |
 | --- | --- |
-| 字符串 per-key / 包名绑定 | 运行时开销和多进程行为测试 |
+| 字符串 per-key / 包名绑定（`-irobf-cse-perkey` / `-irobf-cse-bind`） | 已实现（ChaCha8 派生密钥 + `/proc/self/cmdline` 包名折入 pepper）；host 往返 + IR 校验 + **真机 arm64-v8a**（perkey 正确、bind 包名 happy-path 正确、错包名 fail-closed 乱码）均通过。待运行时开销与多进程（`:suffix` 进程名≠包名）行为测试 |
 | 反分析探针（`-irobf-*detect`/`bandump`/`*maps`） | 已实现（注入 `main`）；待误报测试 + `.so` 场景改注入 `.init_array` |
 | 代码自校验 | 动态重定位归一化和篡改测试 |
-| VMP（`-irobf-vmp`） | 已实现，本地 IR/clang codegen 验证；待各 ABI 解释器扩展与真机语义等价测试 |
+| VMP（`-irobf-vmp`） | 已实现；本地 IR/clang codegen + **真机 arm64-v8a 语义验证**（单函数、与 cse/perkey/bind/fla 组合、纯 VMP+fla 均正确；修复了 `vmp_debug_id` 链接）；待多函数规模化、各 ABI 解释器扩展与性能基准 |
 | AArch64 后端混淆 | 独立补丁和机器码测试 |
 | macOS Host | runner、dmg 打包和签名处理 |
 

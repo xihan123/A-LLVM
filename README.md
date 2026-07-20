@@ -53,7 +53,7 @@ ndk-build（`Android.mk`）：`LOCAL_CFLAGS += -mllvm -irobf-cse -mllvm -irobf-f
 NDKP_STR_ENCRYPT void secret() { const char* k = "token"; /* ... */ }
 ```
 
-一期开关：`-irobf-cse`（字符串）、`-irobf-cie`/`-irobf-cfe`（整/浮点常量）、`-irobf-fla`、`-irobf-indbr`/`-icall`/`-indgv`。函数级虚拟化 `-irobf-vmp` 与反分析检测 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}` 已实现（详见 [obfuscation/README.md](./obfuscation/README.md)）。不加任何开关时 overlay 不主动变换 IR；这不代表自建 clang 与官方 Android Clang 完全一致。VMP 已本地验证但设备语义验证前不发布；AArch64 后端机器码混淆（`-aarch64-obfuscate-*`）属后续阶段。
+一期开关：`-irobf-cse`（字符串）、`-irobf-cie`/`-irobf-cfe`（整/浮点常量）、`-irobf-fla`、`-irobf-indbr`/`-icall`/`-indgv`。字符串加密可叠加强化开关 `-irobf-cse-perkey`（隐藏 pepper 派生 per-string ChaCha8 密钥，密文不再内联密钥）与 `-irobf-cse-bind`（包名绑定，`.so` 仅在目标 App 内解出明文，配合 `-irobf-cse-bind-package=<包名>`，或 `NDKP_STR_BIND` 注解）。函数级虚拟化 `-irobf-vmp` 与反分析检测 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}` 已实现（详见 [obfuscation/README.md](./obfuscation/README.md)）。不加任何开关时 overlay 不主动变换 IR；这不代表自建 clang 与官方 Android Clang 完全一致。字符串包名绑定与 VMP 已本地验证但设备语义验证前不发布；AArch64 后端机器码混淆（`-aarch64-obfuscate-*`）属后续阶段。
 
 ## 构建流程
 
