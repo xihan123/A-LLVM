@@ -402,7 +402,10 @@ void call_handler_with_exception_handling(uint64_t targetfunc_id) {
 
 // Debug functions - implemented by VMP pass via IR injection
 // Controlled by -irobf-debug flag
-extern void vmp_debug_id(int id, uint64_t val);
+// extern "C": 与 call_handler 一致，保持符号不被 C++ 名字修饰，否则 VMP pass 的
+// Mod->getFunction("vmp_debug_id") 找不到（会去匹配修饰名 _Z12vmp_debug_idim），
+// 导致链接期 undefined symbol: vmp_debug_id。
+extern "C" void vmp_debug_id(int id, uint64_t val);
 
 // Debug mode control - set by VMP pass when -irobf-debug is enabled
 // 0 = debug disabled (default), 1 = debug enabled

@@ -30,6 +30,27 @@ for opt in O0 O2 Oz; do
   else
     echo "[ok]   -$opt 开启 -irobf-cse 后明文已消失"
   fi
+
+  # 强化1：per-string ChaCha8 派生密钥（-irobf-cse-perkey，密钥不内联），明文应消失
+  "$CLANG" --target=aarch64-linux-android21 -shared -fPIC "-$opt" \
+    -mllvm -irobf -mllvm -irobf-cse -mllvm -irobf-cse-perkey \
+    -o "$OUT/perkey-$opt.so" "$SRC"
+  if "$STRINGS" "$OUT/perkey-$opt.so" | grep -q "$NEEDLE"; then
+    echo "[FAIL] -$opt 开启 -irobf-cse-perkey 后仍能在 ELF 中找到明文"; fail=1
+  else
+    echo "[ok]   -$opt 开启 -irobf-cse-perkey 后明文已消失"
+  fi
+
+  # 强化2：包名绑定（-irobf-cse-bind），构建应成功且明文应消失
+  "$CLANG" --target=aarch64-linux-android21 -shared -fPIC "-$opt" \
+    -mllvm -irobf -mllvm -irobf-cse -mllvm -irobf-cse-bind \
+    -mllvm -irobf-cse-bind-package=com.ndkp.test \
+    -o "$OUT/bind-$opt.so" "$SRC"
+  if "$STRINGS" "$OUT/bind-$opt.so" | grep -q "$NEEDLE"; then
+    echo "[FAIL] -$opt 开启 -irobf-cse-bind 后仍能在 ELF 中找到明文"; fail=1
+  else
+    echo "[ok]   -$opt 开启 -irobf-cse-bind 后明文已消失"
+  fi
 done
 
 exit $fail

@@ -65,6 +65,7 @@ SmallVector<std::string> readAnnotate(Function *f) {
     const char *plus;
   } NdkpTags[] = {
       {"ndkp.string_encrypt", "+cse"},
+      {"ndkp.str_bind", "+cse"},
       {"ndkp.fla", "+fla"},
   };
   SmallVector<std::string> extra;

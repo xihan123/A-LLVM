@@ -21,6 +21,14 @@
 /* 字符串常量加密。标签 ndkp.string_encrypt 折叠为 +cse，需配合 -mllvm -irobf-cse。 */
 #define NDKP_STR_ENCRYPT NDKP_ANNOTATE("ndkp.string_encrypt")
 
+/* 字符串加密的包名绑定（强化）。标签 ndkp.str_bind：模块内任一函数带此注解即
+ * 等效开启 bind 模式——把运行期 /proc/self/cmdline 的哈希折进 pepper，使 .so 仅在
+ * 目标 App 内解出正确明文（错包名 → 乱码，非分支、无可 patch 的检查）。bind 蕴含
+ * per-string 密钥派生（ChaCha8，密钥不内联存储）。
+ * 需配合 -mllvm -irobf-cse -mllvm -irobf-cse-bind-package=<包名>；缺包名则构建失败。
+ * 亦可直接用命令行开关 -mllvm -irobf-cse-bind 而不加注解。 */
+#define NDKP_STR_BIND NDKP_ANNOTATE("ndkp.str_bind")
+
 /* 控制流平坦化。标签 ndkp.fla 折叠为 +fla，需配合 -mllvm -irobf-fla。 */
 #define NDKP_FLATTEN NDKP_ANNOTATE("ndkp.fla")
 

@@ -38,6 +38,14 @@ bool isIRObfuscationDebugEnabled();
 std::string getVMFunctionsList();
 bool isForceNoInlineEnabled();
 
+// 字符串加密强化开关读取，供 StringEncryption pass 使用。
+// perkey：per-string 密钥由隐藏 pepper + 串 id 经 ChaCha8 派生，不再内联存储。
+// bind：把运行期包名（/proc/self/cmdline）哈希折进 pepper（非分支、fail-closed）；
+//       bind 蕴含 perkey，期望包名由 -irobf-cse-bind-package 提供。
+bool isCsePerKeyEnabled();
+bool isCseBindEnabled();
+std::string getCseBindPackage();
+
 ModulePass *createObfuscationPassManager();
 void initializeObfuscationPassManagerPass(PassRegistry &Registry);
 

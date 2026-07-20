@@ -37,20 +37,20 @@
 - [x] `apply_overlay.sh` 用 `git apply --check` 门控 registration.patch
 - [x] Pass 实现（字符串加密 / 平坦化 / 间接化 / 常量加密），本地验证：WSL/clang-20 编译 13 个 pass 0 错误；真实 r29 NDK 的 aarch64-android21 上 `tests/string-enc` rc=0
 - [~] 读 `llvm.global.annotations`：`readAnnotate` 把 `ndkp.string_encrypt`→`+cse`、`ndkp.fla`→`+fla` 折叠；但注解无法独立开启混淆（见「已知缺陷」#3）
-- [ ] 在 GitHub Actions 端到端跑通（overlay 已提交，本地已验证；`patch-check.yml` 尚未在 CI 实跑）
 
 ## 阶段 2 — VMP（函数级虚拟化）
 
 - [x] `-irobf-vmp` / `NDKP_VMP` pass（移植 aVMP：IR→字节码 + aarch64 解释器 `Linker::linkModules` 链入）
 - [x] translator eligibility 校验（拒绝向量/token/异常处理函数，fail-safe 跳过）
 - [x] 本地 IR + clang codegen 验证（trivial/scalar-loop/全 flag 同开；产出原生 aarch64 `.so`）
-- [ ] 真机语义等价测试；多函数切片；各 ABI 解释器扩展
+- [x] 修复 `vmp_debug_id` 链接（解释器该符号漏了 `extern "C"`→C++ 修饰名，pass 的 `getFunction` 找不到→undefined symbol；曾阻塞任何 VMP 二进制链接）。真机 arm64-v8a 语义验证：单函数（compute 循环 / 返回字符串）+ 与 perkey/bind/fla 组合 + 纯 VMP+fla 均正确
+- [ ] 多函数规模化切片；各 ABI 解释器扩展（arm/x86/x86_64）；性能/体积基准
 
 ## 阶段 1d / 2b — 编译期扩展保护
 
 - [x] 反分析检测注入 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`（注入 `main`，编译验证；待 `.so` 场景 `.init_array` 改造 + 误报测试）
 - [ ] 代码完整性自校验 `-irobf-selfcheck` / `NDKP_SELFCHECK`
-- [ ] 字符串加密强化 `-irobf-cse-perkey` / `-irobf-cse-bind` / `NDKP_STR_BIND`
+- [~] 字符串加密强化 `-irobf-cse-perkey` / `-irobf-cse-bind` / `NDKP_STR_BIND`（ChaCha8 派生 per-string 密钥、密钥不内联；包名折入 pepper 的非分支 fail-closed 绑定。已验证：编译干净、IR 校验、needle 消失、host 往返、**真机 arm64-v8a**——perkey 运行期正确、bind 包名 happy-path 正确解密、错包名 fail-closed 乱码，且与 FLA/全部一期 pass 及 **VMP** 组合真机均正确（含字符串位于被虚拟化函数内）。待：运行时开销、多进程（`:suffix` 进程名≠包名会解出乱码）、CI patch-check）
 - [ ] 函数级 SO 自加密 `-irobf-pack` / `NDKP_PACK` + `tools/ndkp-postlink` + `runtime/ndkp_rt.c`
 - [ ] `include/ndkp.h` 增加扩展宏；新增 `tests/anti-tamper`、`tests/pack-roundtrip`
 
