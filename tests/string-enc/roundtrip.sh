@@ -7,6 +7,11 @@
 # 在「能本机编译并运行」的环境验运行期语义（动态镜像兜底）。包名绑定（bind）需 Android
 # 运行期 /proc/self/cmdline，其语义留待设备/模拟器，故此处只测 perkey。
 #
+# 设备侧 bind 验证（手动，见 memory cse-string-hardening）应覆盖多进程用例：
+#   exec -a com.ndkp.test        ./bin   → 正确解密（主进程）
+#   exec -a com.ndkp.test:remote ./bin   → 仍正确解密（私有子进程，解码器截 ':' 前得回包名）
+#   exec -a com.wrong.app:remote ./bin   → 乱码，不泄明文（fail-closed 仍成立）
+#
 #   用法: roundtrip.sh <clang> [<额外 clang 参数...>]
 #   例:   roundtrip.sh /path/to/clang                       # 默认目标即本机
 #         roundtrip.sh clang.exe --target=x86_64-pc-windows-msvc
