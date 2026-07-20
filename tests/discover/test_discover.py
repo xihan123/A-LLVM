@@ -206,6 +206,179 @@ class DiscoverReleaseTest(unittest.TestCase):
             {entry["ndk_tag"] for entry in releases}, {"r30-beta2", "r29"}
         )
 
+    def test_priority_prefers_beta_when_available(self):
+        # 定时优先级：beta 有待构建条目 -> 锁定 beta，不再触碰 stable。
+        args = types.SimpleNamespace(
+            top_n=0,
+            channels="",
+            channel_priority="beta,stable",
+            hosts="linux-x86_64",
+            force=False,
+            dry_run=False,
+        )
+        upstream = [
+            {
+                "draft": False,
+                "tag_name": "r30-beta2",
+                "prerelease": True,
+                "body": 'ndkVersion "30.0.15729638"',
+            },
+            {
+                "draft": False,
+                "tag_name": "r29",
+                "prerelease": False,
+                "body": 'ndkVersion "29.0.14206865"',
+            },
+        ]
+        with (
+            mock.patch.object(
+                discover_ndk,
+                "load_config",
+                return_value={
+                    "top_n": 15,
+                    "channels": {
+                        "stable": {"enabled": True},
+                        "beta": {"enabled": True},
+                    },
+                },
+            ),
+            mock.patch.object(discover_ndk, "load_patchset", return_value=""),
+            mock.patch.object(
+                discover_ndk,
+                "gh_get",
+                side_effect=[
+                    (200, upstream),
+                    (404, None),  # beta 去重：未发布 -> 有待构建条目，锁定 beta
+                ],
+            ),
+            mock.patch.dict(
+                discover_ndk.os.environ,
+                {"GITHUB_TOKEN": "token", "GITHUB_REPOSITORY": "owner/repo"},
+                clear=True,
+            ),
+        ):
+            rc, builds, releases = discover_ndk.discover(args)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual([entry["ndk_tag"] for entry in builds], ["r30-beta2"])
+        self.assertEqual([entry["ndk_tag"] for entry in releases], ["r30-beta2"])
+
+    def test_priority_falls_back_to_stable_when_beta_built(self):
+        # beta 最新版已完整发布（无待构建条目）-> 降级到 stable。
+        args = types.SimpleNamespace(
+            top_n=0,
+            channels="",
+            channel_priority="beta,stable",
+            hosts="linux-x86_64",
+            force=False,
+            dry_run=False,
+        )
+        upstream = [
+            {
+                "draft": False,
+                "tag_name": "r30-beta2",
+                "prerelease": True,
+                "body": 'ndkVersion "30.0.15729638"',
+            },
+            {
+                "draft": False,
+                "tag_name": "r29",
+                "prerelease": False,
+                "body": 'ndkVersion "29.0.14206865"',
+            },
+        ]
+        beta_release = {
+            "assets": [
+                {"name": "android-ndk-r30-30.0.15729638-beta2-linux-x86_64.zip"},
+                {"name": "SHA256SUMS"},
+            ]
+        }
+        with (
+            mock.patch.object(
+                discover_ndk,
+                "load_config",
+                return_value={
+                    "top_n": 15,
+                    "channels": {
+                        "stable": {"enabled": True},
+                        "beta": {"enabled": True},
+                    },
+                },
+            ),
+            mock.patch.object(discover_ndk, "load_patchset", return_value=""),
+            mock.patch.object(
+                discover_ndk,
+                "gh_get",
+                side_effect=[
+                    (200, upstream),
+                    (200, beta_release),  # beta 已完整发布 -> 无待构建条目
+                    (404, None),  # stable 去重：未发布 -> 降级命中 stable
+                ],
+            ),
+            mock.patch.dict(
+                discover_ndk.os.environ,
+                {"GITHUB_TOKEN": "token", "GITHUB_REPOSITORY": "owner/repo"},
+                clear=True,
+            ),
+        ):
+            rc, builds, releases = discover_ndk.discover(args)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual([entry["ndk_tag"] for entry in builds], ["r29"])
+        self.assertEqual([entry["ndk_tag"] for entry in releases], ["r29"])
+
+    def test_priority_excludes_rc_and_stops_without_beta_or_stable(self):
+        # 复现原 bug：窗口内只有 rc（r29-rc1）。优先级 beta,stable 不含 rc ->
+        # 不构建任何条目（rc 被排除），has_work=false。
+        args = types.SimpleNamespace(
+            top_n=0,
+            channels="",
+            channel_priority="beta,stable",
+            hosts="linux-x86_64",
+            force=False,
+            dry_run=False,
+        )
+        upstream = [
+            {
+                "draft": False,
+                "tag_name": "r29-rc1",
+                "prerelease": True,
+                "body": 'ndkVersion "29.0.13846066"',
+            },
+        ]
+        with (
+            mock.patch.object(
+                discover_ndk,
+                "load_config",
+                return_value={
+                    "top_n": 15,
+                    "channels": {
+                        "stable": {"enabled": True},
+                        "beta": {"enabled": True},
+                        "rc": {"enabled": True},
+                    },
+                },
+            ),
+            mock.patch.object(discover_ndk, "load_patchset", return_value=""),
+            mock.patch.object(
+                discover_ndk,
+                "gh_get",
+                side_effect=[
+                    (200, upstream),  # 仅 rc；beta/stable 均无匹配，不触发去重查询
+                ],
+            ),
+            mock.patch.dict(
+                discover_ndk.os.environ,
+                {"GITHUB_TOKEN": "token", "GITHUB_REPOSITORY": "owner/repo"},
+                clear=True,
+            ),
+        ):
+            rc, builds, releases = discover_ndk.discover(args)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(builds, [])
+        self.assertEqual(releases, [])
+
 
 if __name__ == "__main__":
     unittest.main()
