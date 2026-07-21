@@ -94,8 +94,19 @@ Transforms/Obfuscation/
 | `-irobf-hidemaps` | `/proc/self/maps` 隐藏注入 |
 | `-irobf-fakemaps` | 伪造 `/proc` maps 注入 |
 | `-level-*` | 强度，范围 1 到 3 |
+| `-irobf-debug` | 调试模式（默认关）。关闭时（release）额外做落地去指纹，见下 |
 
 没有开关时不得执行 IR 变换。函数注解定义在 `include/ndkp.h`；当前注解仍需配合对应总开关。（`NDKP_STR_BIND` 会在模块级开启 bind 模式，但仍需 `-irobf-cse` 基础开关与 `-irobf-cse-bind-package=<包名>`。）
+
+### Release 去指纹（`-irobf-debug` 关闭时，默认）
+
+未开 `-irobf-debug` 时，所有混淆 pass 跑完后对整模块做一次去指纹，消除易被分析者用来识别工具链/定位 VM 的特征：
+
+- **自曝段名改名**：`.AProtect.text/.data/.rodata/.bss` → `.s0/.s1/.s2/.s3`。ELF 段标志（AX/WA/A/NOBITS）由符号种类推导、与段名无关，故仅名字改变、布局与标志逐位不变。改名在流水线**最后**统一进行，不影响 Flattening/IndirectCall/VMP 在流水线中途按 `.AProtect` 前缀或 `aproc-vmp-artifact` 属性做的跳过。
+- **VMP 调试串清除**：删除解释器中 3 个运行期门控的调试串 helper（`vm_debug_log_*`）及其落在 `.rodata` 的 `[vm-debug]…` 格式串与 `vm-entry`/`get-byte-after-chacha`/`vm-new-bb…` 等 stage 令牌。开 `-irobf-debug` 时保留这些串以便诊断。
+- **clang 生产者横幅**：剥除本模块 `llvm.ident`（→ `.comment`）。
+
+> **关于 `.comment` 的彻底清零**：编译期只能去掉**本模块**的贡献。最终 `.so` 的 `.comment` 还来自官方 NDK 的 CRT/libc++/compiler-rt 目标与 lld，工具链把链接后的 `.so` 直接交给用户、没有 link 后处理入口，故无法在 clang 内清零。需要时在 link 后自行执行 `llvm-strip -R .comment <输出.so>`（该工具已随 NDK 提供）。注意本项目的 clang 版本串与官方 NDK clang 相同，`.comment` **并非**混淆工具链的唯一指纹，此项为纵深防御。
 
 VMP 已实现并本地验证（IR + clang codegen → 原生 aarch64 `.so`），设备语义等价验证前不发布（见 `DESIGN.md`）。检测类 pass（`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`）注入到 `main`；构建为可执行文件时生效，构建为 `.so`（无 `main`）时自动跳过。
 

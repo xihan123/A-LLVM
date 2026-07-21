@@ -179,6 +179,48 @@ bool llvm::isIRObfuscationEnabled() {
          EnableHideMaps || EnableFakeMaps;
 }
 
+// Release-mode（即未开 -irobf-debug）的落地成果物去指纹：在所有混淆 pass 跑完后、
+// 对整模块做一次清理。必须在 run(M) 之后：Flattening.cpp:261 与 IndirectCall/VMP 内部
+// 逻辑在 pass 流水线执行期间依赖 ".AProtect" 段前缀 / aproc-vmp-artifact 属性做跳过，
+// 若在流水线中途改名会破坏这些 skip-gate。此处也覆盖 VMP 关闭、仅 CSE/detection 产出
+// .AProtect.* 的情形。
+static void scrubPostLinkFingerprints(Module &M) {
+  // (1) .AProtect.{text,data,rodata,bss} -> .s0/.s1/.s2/.s3
+  //     精确等值匹配（非前缀）保持四类各自独立段：函数(AX) / 可写(WA) / 只读(A) /
+  //     零初始化(WA,NOBITS)。ELF 段标志由 MC 按符号种类（getKindForGlobal）推导，与段名
+  //     无关，故改名后 flags/type 逐位不变，仅名字字符串改变。切勿改为前缀匹配统一改名，
+  //     否则四类挤进同一段会并集出冲突标志。
+  static const struct {
+    const char *From;
+    const char *To;
+  } kSectionMap[] = {
+      {".AProtect.text", ".s0"},
+      {".AProtect.data", ".s1"},
+      {".AProtect.rodata", ".s2"},
+      {".AProtect.bss", ".s3"},
+  };
+  auto remap = [&](GlobalObject &GO) {
+    if (!GO.hasSection())
+      return;
+    StringRef S = GO.getSection();
+    for (const auto &E : kSectionMap)
+      if (S == E.From) {
+        GO.setSection(E.To);
+        return;
+      }
+  };
+  for (Function &F : M)
+    remap(F);
+  for (GlobalVariable &GV : M.globals())
+    remap(GV);
+
+  // (2) 去掉本模块 clang 生产者横幅（llvm.ident -> .comment）。纵深防御：NDK 的
+  //     CRT/libc++/lld 目标仍会贡献 .comment，最终 .so 的彻底清零需 link 后
+  //     `llvm-strip -R .comment`（见 README/DESIGN）。
+  if (NamedMDNode *Ident = M.getNamedMetadata("llvm.ident"))
+    Ident->eraseFromParent();
+}
+
 namespace llvm {
 
 struct ObfuscationPassManager : public ModulePass {
@@ -312,7 +354,11 @@ struct ObfuscationPassManager : public ModulePass {
     if (EnableFakeMaps)
       add(llvm::createFakeMapsPass());
 
-    return run(M);
+    bool Changed = run(M);
+    // Release 模式（默认，未开 -irobf-debug）：所有 pass 跑完后统一去指纹。
+    if (!isIRObfuscationDebugEnabled())
+      scrubPostLinkFingerprints(M);
+    return Changed;
   }
 };
 

@@ -4298,6 +4298,63 @@ void GOVMInterpreter::construct_gv() {
 
 // Function *govm_interpreter;
 
+// Release 模式（未开 -irobf-debug）去除解释器里 3 个运行期门控的调试串 helper 及其
+// 落在 .rodata 的字面量。默认解释器配置（VM_ENABLE_DEBUG_TRACE=0）下，这 3 个 helper
+// 是仅存的调试串来源：`[vm-debug]…` 格式串（在 helper 体内）+ stage 令牌（"vm-entry"/
+// "get-byte-after-chacha"/"vm-new-bb-enter" 等，作为调用点实参传入）。它们被 vmp_debug_enabled
+// 运行期守卫置零后静默，但字符串常量始终编入 .rodata。VMP 在 OptimizerLast 运行、其后无
+// 必然的 GlobalDCE，故必须在此显式删除。
+static void stripVmpDebugStrings(Module *Mod) {
+    // 解释器是 C++ TU，这 3 个 static helper 的符号名被 C++ 修饰（如
+    // _ZL24vm_debug_log_stdio_entryPKc），精确名 getFunction 找不到，故按子串匹配。
+    // 修饰名均含 "vm_debug_log_"；vm_debug_layout_* 含的是 "vm_debug_layout" 不误命中。
+    SmallVector<Function *, 4> Helpers;
+    for (Function &Fn : *Mod)
+        if (Fn.getName().contains("vm_debug_log_"))
+            Helpers.push_back(&Fn);
+
+    SmallVector<GlobalVariable *, 32> MaybeDead;
+    auto noteOperand = [&](Value *V) {
+        if (auto *GV = dyn_cast<GlobalVariable>(V->stripPointerCasts()))
+            MaybeDead.push_back(GV);
+    };
+    for (Function *H : Helpers) {
+        // 收集全部调用点（先快照，勿边遍历 users() 边删）。
+        SmallVector<CallBase *, 16> Calls;
+        for (User *U : H->users())
+            if (auto *CB = dyn_cast<CallBase>(U))
+                if (CB->getCalledFunction() == H)
+                    Calls.push_back(CB);
+
+        // 删除前先记录死串候选：
+        //  (a) helper 体内引用的常量全局 —— `[vm-debug]…` 格式串；
+        //  (b) 各调用点的指针实参 —— stage 令牌（调用点实参，不在 helper 体内）。
+        for (Instruction &I : instructions(*H))
+            for (Use &Op : I.operands())
+                noteOperand(Op.get());
+        for (CallBase *CB : Calls)
+            for (Use &A : CB->args())
+                if (A.get()->getType()->isPointerTy())
+                    noteOperand(A.get());
+
+        for (CallBase *CB : Calls)
+            CB->eraseFromParent(); // helper 返回 void，无需 RAUW。
+
+        H->removeDeadConstantUsers();
+        if (H->use_empty())
+            H->eraseFromParent();
+    }
+
+    // 回收因上面删除而变死的字面量全局。保守：仅删 private/internal 的常量且无使用者。
+    for (GlobalVariable *GV : MaybeDead) {
+        if (!GV->getParent())
+            continue; // 已被删（候选可能重复）。
+        GV->removeDeadConstantUsers();
+        if (GV->use_empty() && GV->isConstant() && GV->hasLocalLinkage())
+            GV->eraseFromParent();
+    }
+}
+
 // Create debug print function using IRBuilder (like IdaDetect does)
 // Uses integer ID instead of string to avoid string constant cloning issues
 // If debug is disabled, creates a no-op function
@@ -4792,6 +4849,10 @@ void GOVMInterpreter::run() {
         if (!Mod->getFunction("vmp_resume_unwind_shared"))
             ru->setName("vmp_resume_unwind_shared");
     }
+
+    // 8. Release 模式：清除解释器调试串 helper 及其 .rodata 字面量。
+    if (!isIRObfuscationDebugEnabled())
+        stripVmpDebugStrings(Mod);
 
     if (isIRObfuscationDebugEnabled()) {
         errs() << "[GOVMInterpreter] run() complete (Linker path)\n";
