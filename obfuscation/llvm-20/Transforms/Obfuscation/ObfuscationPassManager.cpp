@@ -143,6 +143,14 @@ EnableFakeMaps("irobf-fakemaps", cl::init(false), cl::NotHidden,
                cl::desc("Enable IR Fake /proc maps Injection."),
                cl::ZeroOrMore);
 
+// 代码完整性自校验：对 VMP（-irobf-vmp）产出的每函数字节码 blob（gv_code_seg_<fn>）
+// 注入加载期哈希校验，检测到篡改即终止。只在有被虚拟化函数时生效，否则 no-op。
+static cl::opt<bool>
+EnableSelfCheck("irobf-selfcheck", cl::init(false), cl::NotHidden,
+                cl::desc("Enable IR Self Integrity Check Injection "
+                         "(verifies VMP bytecode blobs; requires -irobf-vmp)."),
+                cl::ZeroOrMore);
+
 // 阶段 2 VMP（函数级虚拟化）。被虚拟化的函数通过注解（ndkp.vmp / "vmp"）或
 // -irobf-vm_functions= 指定；VMP 要求 -frtti -fno-exceptions（见 include/ndkp.h）。
 static cl::opt<std::string>
@@ -176,7 +184,7 @@ bool llvm::isIRObfuscationEnabled() {
          EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
          EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
          EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
-         EnableHideMaps || EnableFakeMaps;
+         EnableHideMaps || EnableFakeMaps || EnableSelfCheck;
 }
 
 // Release-mode（即未开 -irobf-debug）的落地成果物去指纹：在所有混淆 pass 跑完后、
@@ -295,7 +303,7 @@ struct ObfuscationPassManager : public ModulePass {
                   EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
                   EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
                   EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
-                  EnableHideMaps || EnableFakeMaps;
+                  EnableHideMaps || EnableFakeMaps || EnableSelfCheck;
     if (hasObf)
       EnableIRObfuscation = true;
 
@@ -353,6 +361,11 @@ struct ObfuscationPassManager : public ModulePass {
       add(llvm::createHideMapsPass());
     if (EnableFakeMaps)
       add(llvm::createFakeMapsPass());
+
+    // 自校验最后：读取 VMP 产出的 gv_code_seg_<fn> 最终字节，注入加载期完整性校验。
+    // 必须在 VMP 之后（此处检测块 = run(M) 末尾即满足）；仍早于 run(M) 之后的段改名。
+    if (EnableSelfCheck)
+      add(llvm::createSelfCheckPass());
 
     bool Changed = run(M);
     // Release 模式（默认，未开 -irobf-debug）：所有 pass 跑完后统一去指纹。

@@ -49,7 +49,7 @@
 ## 阶段 1d / 2b — 编译期扩展保护
 
 - [x] 反分析检测注入 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`
-- [ ] 代码完整性自校验 `-irobf-selfcheck` / `NDKP_SELFCHECK`
+- [x] 代码完整性自校验 `-irobf-selfcheck` / `NDKP_SELFCHECK`（VMP 字节码内部校验：编译期对每函数字节码 blob `gv_code_seg_<fn>` 算 FNV-1a64 内嵌、注入 ELF 构造器加载期 volatile 重算比对、篡改即 kill；无需链接后回填工具/重定位归一化。真机 arm64-v8a：happy-path 正确、篡改即 SIGKILL、VMP-only 同篡改静默放过。待 CI patch-check）
 - [x] 字符串加密强化 `-irobf-cse-perkey` / `-irobf-cse-bind` / `NDKP_STR_BIND`
 - [ ] 函数级 SO 自加密 `-irobf-pack` / `NDKP_PACK` + `tools/ndkp-postlink` + `runtime/ndkp_rt.c`
 - [ ] `include/ndkp.h` 增加扩展宏；新增 `tests/anti-tamper`、`tests/pack-roundtrip`

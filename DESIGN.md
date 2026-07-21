@@ -175,7 +175,7 @@ AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 | --- | --- |
 | 字符串 per-key / 包名绑定（`-irobf-cse-perkey` / `-irobf-cse-bind`） | 已实现（ChaCha8 派生密钥 + `/proc/self/cmdline` 包名折入 pepper）；host 往返 + IR 校验 + **真机 arm64-v8a 与 armeabi-v7a**（perkey 正确、bind 包名 happy-path 正确、错包名 fail-closed 乱码）均通过。体积开销 perkey +3.1KB / bind +3.8KB（解码一次性缓存，运行期 ~0）；多进程 `:suffix` 私有子进程经 `:` 截断还原基础包名，真机验证正确解密（错包名仍 fail-closed）。待 CI patch-check 实跑 |
 | 反分析探针（`-irobf-*detect`/`bandump`/`*maps`） | 已实现（注入 `main`）；待误报测试 + `.so` 场景改注入 `.init_array` |
-| 代码自校验 | 动态重定位归一化和篡改测试 |
+| 代码完整性自校验（`-irobf-selfcheck`） | 已实现（**VMP 字节码内部校验**）：只校验 VMP 产出的每函数字节码 blob（`gv_code_seg_<fn>`，编译期已知的常量字节、段 `.AProtect.data`）。Pass 编译期算出各 blob 的 FNV-1a64 并内嵌，注入一个 ELF 构造器（`ndkp_selfcheck_verify`，`llvm.global_ctors` 优先级 101）加载期用 volatile 读重算比对，不符即调 `DetectUtils` 的 report/kill 终止。因 blob 是数据段纯常量、运行期只读不写 → **无需重定位归一化、无需链接后回填工具**（这正是选 VMP 字节码为对象的原因）。**真机 arm64-v8a 验证**：happy-path 正确（rc=0）；篡改 blob 任一字节 → 加载期 `SIGKILL`、`main` 不执行；同一篡改在 VMP-only（无自校验）下被静默放过（`-irobf-vmp` 每 BB 加密无 blob 级 MAC）——体现增量价值。范围：只覆盖 VMP 字节码，不含解释器 `.text` 或非 VMP 代码；whole-`.text` 自校验（需重定位归一化 + 链接后回填工具）仍为后续。待 CI patch-check 实跑 |
 | VMP（`-irobf-vmp`） | 已实现；本地 IR/clang codegen + **真机 arm64-v8a 语义验证**（单函数、**多函数嵌套互调**、与 cse/perkey/bind/fla 组合、纯 VMP+fla 均正确；修复了 `vmp_debug_id` 链接）。性能实测 compute 循环 ~1.0×（块体原生、仅虚拟化控制流），体积 +~1.8MB 解释器/模块；待各 ABI 解释器扩展（arm/x86/x86_64）与控制流密集场景基准 |
 | AArch64 后端混淆 | 独立补丁和机器码测试 |
 | macOS Host | runner、dmg 打包和签名处理 |
