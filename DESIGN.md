@@ -136,6 +136,7 @@ obfuscation/llvm-<major>/
 - `-irobf-indbr`、`-irobf-icall`、`-irobf-indgv`；
 - `-irobf-vmp`、`-irobf-vm_functions=`、`-irobf-vmp-noinline`（函数级虚拟化）；
 - `-irobf-idadetect`、`-irobf-timedetect`、`-irobf-rootdetect`、`-irobf-vmdetect`、`-irobf-bandump`、`-irobf-hidemaps`、`-irobf-fakemaps`（反分析检测注入，注入到 `main`）。
+- `-irobf-debug`（默认关）：调试模式。**关闭时（release，默认）**在所有 pass 跑完后对整模块去指纹——把 `.AProtect.*` 段改名为 `.s0/.s1/.s2/.s3`（标志由符号种类推导，逐位不变）、删除 VMP 解释器的 `vm_debug_log_*` 调试串（`[vm-debug]…`、`vm-entry` 等 stage 令牌）、剥除本模块 `llvm.ident`。开启时保留上述特征以便诊断。最终 `.so` 的 `.comment` 还含 NDK CRT/libc++/lld 贡献（无 link 后处理入口，且与官方 clang 同版本、非唯一指纹），彻底清零需 link 后 `llvm-strip -R .comment <输出.so>`。
 
 `include/ndkp.h` 提供 `NDKP_STR_ENCRYPT`、`NDKP_STR_BIND`、`NDKP_FLATTEN`、`NDKP_VMP` 四个注解宏，分别写入标签 `ndkp.string_encrypt`、`ndkp.str_bind`、`ndkp.fla`、`ndkp.vmp`。`ndkp.string_encrypt` / `ndkp.str_bind` 折叠为 `+cse`、`ndkp.fla` 折叠为 `+fla`；`ndkp.vmp` 按函数名匹配，等价于 `-irobf-vm_functions=`。这些注解只圈定作用函数，仍需配合对应命令行开关（`-irobf-cse` / `-irobf-fla` / `-irobf-vmp`）。例外：`NDKP_STR_BIND` 只要出现在模块任一函数上即会模块级开启 bind 模式（字符串加密对全模块生效），但仍需 `-irobf-cse` 与 `-irobf-cse-bind-package=<包名>`。
 
