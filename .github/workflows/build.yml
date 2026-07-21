@@ -242,6 +242,10 @@ jobs:
         if: ${{ inputs.mode == 'build' }}
         run: bash tests/string-enc/check.sh "$NDK_DIR" "$HOST"
 
+      - name: 去指纹测试（build 模式）
+        if: ${{ inputs.mode == 'build' }}
+        run: bash tests/fingerprint-scrub/run.sh "$NDK_DIR" "$HOST"
+
       - name: 打包
         run: |
           set -euo pipefail
