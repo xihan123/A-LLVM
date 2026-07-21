@@ -93,6 +93,7 @@ Transforms/Obfuscation/
 | `-irobf-bandump` | 反内存转储注入 |
 | `-irobf-hidemaps` | `/proc/self/maps` 隐藏注入 |
 | `-irobf-fakemaps` | 伪造 `/proc` maps 注入 |
+| `-irobf-selfcheck` | 代码完整性自校验：校验 VMP 字节码 blob，篡改即终止（需 `-irobf-vmp`） |
 | `-level-*` | 强度，范围 1 到 3 |
 | `-irobf-debug` | 调试模式（默认关）。关闭时（release）额外做落地去指纹，见下 |
 
@@ -111,6 +112,15 @@ Transforms/Obfuscation/
 VMP 已实现并本地验证（IR + clang codegen → 原生 aarch64 `.so`），设备语义等价验证前不发布（见 `DESIGN.md`）。检测类 pass（`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`）注入到 `main`；构建为可执行文件时生效，构建为 `.so`（无 `main`）时自动跳过。
 
 AArch64 后端混淆和对应的 Driver 参数尚未实现。
+
+### 代码完整性自校验（`-irobf-selfcheck`）
+
+只校验 VMP（`-irobf-vmp`）产出的每函数字节码 blob（`gv_code_seg_<fn>`）。该 blob 是编译期已知的常量字节（ChaCha 加密、无指针/无重定位、段 `.AProtect.data`），运行期解释器只读不写，故其内存字节恒等于编译期密文。
+
+- Pass 在**编译期**直接算出各 blob 的 FNV-1a64 并内嵌，注入一个 ELF 构造器（`ndkp_selfcheck_verify`，`llvm.global_ctors` 优先级 101）；加载期用 **volatile 读**重算比对（volatile 防止优化器对已知常量把校验折成恒真、删掉），不符即调用与检测类 pass 相同的 report/kill（`getpid`+`kill(SIGKILL)`+`brk`）终止。
+- 因此**无需链接后回填工具，也无需重定位归一化** —— 这是选「VMP 字节码」为校验对象（而非整个 `.text`）的原因。构造器注入使其在 `.so`（无 `main`）上也生效。
+- **依赖 `-irobf-vmp`**：无被虚拟化函数即无 blob，本开关 no-op。`NDKP_SELFCHECK` 注解为 opt-in 标记，实际由开关控制。
+- **范围**：只覆盖 VMP 字节码数据。VMP 自带的每 BB 加密无 blob 级 MAC（operand-level 字节翻转可被静默放过），本校验对整个 blob 做全量认证、篡改即确定性终止；但不覆盖解释器 `.text` 或非 VMP 代码。
 
 ## 适配新版本
 

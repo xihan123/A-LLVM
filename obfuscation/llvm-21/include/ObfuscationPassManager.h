@@ -24,6 +24,7 @@
 #include "llvm/Transforms/Obfuscation/BanDump.h"
 #include "llvm/Transforms/Obfuscation/HideMaps.h"
 #include "llvm/Transforms/Obfuscation/FakeMaps.h"
+#include "llvm/Transforms/Obfuscation/SelfCheck.h"
 #include "llvm/Passes/PassBuilder.h"
 #include <string>
 

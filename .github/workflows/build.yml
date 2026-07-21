@@ -246,6 +246,10 @@ jobs:
         if: ${{ inputs.mode == 'build' }}
         run: bash tests/fingerprint-scrub/run.sh "$NDK_DIR" "$HOST"
 
+      - name: 代码完整性自校验测试（build 模式）
+        if: ${{ inputs.mode == 'build' }}
+        run: bash tests/anti-tamper/run.sh "$NDK_DIR" "$HOST"
+
       - name: 打包
         run: |
           set -euo pipefail
