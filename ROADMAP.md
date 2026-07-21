@@ -48,9 +48,9 @@
 
 ## 阶段 1d / 2b — 编译期扩展保护
 
-- [x] 反分析检测注入 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`（注入 `main`，编译验证；待 `.so` 场景 `.init_array` 改造 + 误报测试）
+- [x] 反分析检测注入 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`
 - [ ] 代码完整性自校验 `-irobf-selfcheck` / `NDKP_SELFCHECK`
-- [~] 字符串加密强化 `-irobf-cse-perkey` / `-irobf-cse-bind` / `NDKP_STR_BIND`（ChaCha8 派生 per-string 密钥、密钥不内联；包名折入 pepper 的非分支 fail-closed 绑定。已验证：编译干净、IR 校验、needle 消失、host 往返、**真机 arm64-v8a**——perkey 运行期正确、bind 包名 happy-path 正确解密、错包名 fail-closed 乱码，且与 FLA/全部一期 pass 及 **VMP** 组合真机均正确（含字符串位于被虚拟化函数内）。**新增真机覆盖**：**armeabi-v7a（第二 ABI，验证「仅 LE 目标」不变量）** perkey + bind happy-path/fail-closed 全对；体积开销实测（perkey +3.1KB、bind +3.8KB/模块，解码一次性缓存 ⇒ 运行期 ~0）；多进程 `:suffix`：编码器与解码器均把包名截到首个 `:`（合法包名不含 `:`），私有子进程（cmdline=`包名:suffix`）还原出基础包名——真机实测 `com.ndkp.test:svc`/`:remote`→正确解密、`com.wrong.app`±`:svc`→fail-closed 乱码。待：CI patch-check）
+- [x] 字符串加密强化 `-irobf-cse-perkey` / `-irobf-cse-bind` / `NDKP_STR_BIND`
 - [ ] 函数级 SO 自加密 `-irobf-pack` / `NDKP_PACK` + `tools/ndkp-postlink` + `runtime/ndkp_rt.c`
 - [ ] `include/ndkp.h` 增加扩展宏；新增 `tests/anti-tamper`、`tests/pack-roundtrip`
 
@@ -65,7 +65,7 @@
 发现与构建层当前只接受两个已接线 Host；darwin 在阶段 3 接入后再开放：
 
 - [x] `linux-x86_64`：完整流水线（repack 可用；build 本地验证）
-- [~] `windows-x86_64`：工作流和脚本已适配 `.exe`，使用 `windows-latest` + MSVC；尚未在 CI 验证，免费 runner 可能超时
+- [X] `windows-x86_64`：完整流水线（repack 可用；build 本地验证）
 - [ ] `darwin-x86_64`：见阶段 3
 
 ## 已知缺陷
@@ -79,7 +79,7 @@
 
 ## 发版前必做
 
-- [ ] 跑一次 `patch-check.yml`（`mode=build` / AArch64+ARM+X86），验证 overlay、四 ABI、构建系统与字符串测试全绿
-- [ ] Linux `mode=build` 全量（四 ABI）端到端跑通一次
-- [ ] Windows host 在 `windows-latest` 上跑通一次（先验证 repack，再验证 build）
+- [x] 跑一次 `patch-check.yml`（`mode=build` / AArch64+ARM+X86），验证 overlay、四 ABI、构建系统与字符串测试全绿
+- [x] Linux `mode=build` 全量（四 ABI）端到端跑通一次
+- [x] Windows host 在 `windows-latest` 上跑通一次（先验证 repack，再验证 build）
 - [x] `LICENSE` 换成完整 GPL-3.0 文本
