@@ -96,6 +96,8 @@ Transforms/Obfuscation/
 | `-irobf-hidemaps` | `/proc/self/maps` 隐藏注入 |
 | `-irobf-fakemaps` | 伪造 `/proc` maps 注入 |
 | `-irobf-selfcheck` | 代码完整性自校验：校验 VMP 字节码 blob，篡改即加载期终止(SIGKILL)（需 `-irobf-vmp`） |
+| `-irobf-cert-bind` | APK 签名证书绑定：把运行期 APK 签名证书 SHA-256 派生的 128-bit 混合值折进 CSE 字符串 pepper 与 VMP 函数密钥；产物仅在被 `-irobf-cert-file` 指定证书签名时才正确运行（错签名/重打包→乱码，非分支、fail-closed）。字符串绑定需配合 `-irobf-cse`、VMP 密钥绑定需配合 `-irobf-vmp`；运行期读证书需 app 侧链接 `runtime/ndkp_apkcert.cpp`（见该目录 README） |
+| `-irobf-cert-file=` | `-irobf-cert-bind` 的期望签名者证书（DER，也接受 PEM）；其 SHA-256 在构建期折入。bind 开启但缺此项/不可读则构建失败（fail-closed） |
 | `-level-*` | 强度，范围 1 到 3 |
 | `-irobf-debug` | 调试模式（默认关）。关闭时（release）额外做落地去指纹，见下 |
 

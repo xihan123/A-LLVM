@@ -25,8 +25,10 @@
 #include "llvm/Transforms/Obfuscation/HideMaps.h"
 #include "llvm/Transforms/Obfuscation/FakeMaps.h"
 #include "llvm/Transforms/Obfuscation/SelfCheck.h"
+#include "llvm/Transforms/Obfuscation/CertBind.h"
 #include "llvm/Passes/PassBuilder.h"
 #include <string>
+#include <cstdint>
 
 namespace llvm {
 class ModulePass;
@@ -47,6 +49,14 @@ bool isVMProtectEnabled();
 bool isCsePerKeyEnabled();
 bool isCseBindEnabled();
 std::string getCseBindPackage();
+
+// APK 签名证书绑定开关/构建期证书摘要读取，供 StringEncryption 与 CertBind pass 使用。
+// isCertBindEnabled：-irobf-cert-bind 是否开启。
+// getCertBindLo/Hi：-irobf-cert-file 的 DER 证书 SHA-256 派生的 128-bit 混合值（首次
+//   读取时算一次并缓存；bind 开但文件缺失/不可读 ⇒ fail-closed 构建报错）。
+bool isCertBindEnabled();
+uint64_t getCertBindLo();
+uint64_t getCertBindHi();
 
 ModulePass *createObfuscationPassManager();
 void initializeObfuscationPassManagerPass(PassRegistry &Registry);

@@ -250,6 +250,10 @@ jobs:
         if: ${{ inputs.mode == 'build' }}
         run: bash tests/anti-tamper/run.sh "$NDK_DIR" "$HOST"
 
+      - name: 证书绑定测试（build 模式）
+        if: ${{ inputs.mode == 'build' }}
+        run: bash tests/cert-bind/run.sh "$NDK_DIR" "$HOST"
+
       - name: 打包
         run: |
           set -euo pipefail
