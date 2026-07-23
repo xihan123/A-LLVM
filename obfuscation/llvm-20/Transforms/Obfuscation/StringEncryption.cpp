@@ -14,6 +14,7 @@
 #include "llvm/Transforms/Obfuscation/ObfuscationOptions.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
 #include "llvm/Transforms/Obfuscation/StringEncryption.h"
+#include "llvm/Transforms/Obfuscation/CertBind.h"
 #include "llvm/Transforms/Obfuscation/Utils.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
 #include "llvm/Transforms/IPO/Attributor.h"
@@ -201,6 +202,12 @@ namespace {
 		GlobalVariable *PepperShare[4] = {nullptr, nullptr, nullptr, nullptr}; ///< pepper 分片
 		Function *PkgKeyFunc = nullptr;      ///< ndkp_cse_get_pkgkey（bind 时）
 		Function *SharedDecodeFunc = nullptr;///< ndkp_cse_decode（共享 ChaCha8 解码核心）
+
+		// ---- APK 签名证书绑定（-irobf-cert-bind）----
+		bool UseCertBind = false;            ///< 把运行期证书混合值折进 pepper（蕴含 UsePerKey）
+		uint64_t CertLo = 0, CertHi = 0;     ///< 构建期证书混合值（-irobf-cert-file 的 DER 摘要派生）
+		GlobalVariable *CertLoGV = nullptr;  ///< 运行期缓存 ndkp_cert_lo（构造器 ndkp_certbind_init 填）
+		GlobalVariable *CertHiGV = nullptr;  ///< 运行期缓存 ndkp_cert_hi
 
 		/**
 		 * @brief 构造函数，初始化字符串加密Pass
@@ -411,6 +418,18 @@ bool StringEncryption::runOnModule(Module &M) {
 		}
 	}
 
+	// APK 签名证书绑定：把运行期证书混合值折进 pepper（与包名绑定独立、可叠加）。
+	// cert-bind 亦蕴含 perkey —— 需 ChaCha/pepper 路径才有可折入的密钥；故开启 cert-bind
+	// 即便未显式开 -irobf-cse-perkey/-bind，字符串也走强化路径。构建期证书摘要由
+	// getCertBindLo/Hi 提供（内部读 -irobf-cert-file 的 DER 并 SHA-256；缺失即 fail-closed
+	// 构建报错）。运行期缓存全局 CertLoGV/CertHiGV 在下方 UsePerKey 基座里建立。
+	UseCertBind = isCertBindEnabled();
+	if (UseCertBind) {
+		CertLo = getCertBindLo();
+		CertHi = getCertBindHi();
+		UsePerKey = true;
+	}
+
 	for (GlobalVariable &GV : M.globals()) {
 		// 跳过没有初始化器的全局变量
 		if (!GV.hasInitializer() ||
@@ -519,6 +538,13 @@ bool StringEncryption::runOnModule(Module &M) {
 		if (UseBind) {
 			PkgKeyFunc = buildPkgKeyFunc(M);
 		}
+		if (UseCertBind) {
+			// 建立/复用证书绑定运行期基座（缓存全局 + .init_array 构造器）。解码期读
+			// CertLoGV/CertHiGV 折入 pepper；构造器加载期调 ndkp_certbind_mix 填之。
+			NdkpCertMixGlobals G = getOrCreateNdkpCertMix(M);
+			CertLoGV = G.Lo;
+			CertHiGV = G.Hi;
+		}
 		SharedDecodeFunc = buildChaChaDecodeFunc(M);
 	}
 
@@ -528,6 +554,13 @@ bool StringEncryption::runOnModule(Module &M) {
 		uint64_t PkgKey = ndkpFnv1a64(BindPackage.data(), BindPackage.size());
 		EncLo ^= PkgKey;
 		EncHi ^= ndkpRotl64(PkgKey, 32);
+	}
+	if (UseCertBind) {
+		// 折入构建期证书混合值（le64 派生，见 runtime/ndkp_apkcert.cpp / jni.cpp）。解码期
+		// 用运行期证书重现同一混合值抵消；错/缺证书 ⇒ 运行期 (0,0) ⇒ 不抵消 ⇒ 乱码。
+		// 与包名折入独立、可叠加。
+		EncLo ^= CertLo;
+		EncHi ^= CertHi;
 	}
 
 	for (CSPEntry *Entry : ConstantStringPool) {
@@ -1204,6 +1237,12 @@ Function *StringEncryption::buildChaChaDecodeFunc(Module &M) {
 		Value *Pk = B.CreateCall(PkgKeyFunc, {});
 		PLo = B.CreateXor(PLo, Pk);
 		PHi = B.CreateXor(PHi, ROTL64(Pk, 32));
+	}
+	if (UseCertBind && CertLoGV && CertHiGV) {
+		// 运行期证书混合值由 .init_array 构造器 ndkp_certbind_init 在加载期缓存到全局；
+		// 与编码期 EncLo^=CertLo; EncHi^=CertHi 对称，证书匹配才抵消回原 pepper。
+		PLo = B.CreateXor(PLo, B.CreateLoad(I64, CertLoGV));
+		PHi = B.CreateXor(PHi, B.CreateLoad(I64, CertHiGV));
 	}
 
 	// SplitMix64 扩钥 → key[0..8)

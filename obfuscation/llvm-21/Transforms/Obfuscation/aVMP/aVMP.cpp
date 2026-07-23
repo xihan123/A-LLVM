@@ -24,6 +24,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Value.h"
@@ -4008,7 +4009,11 @@ void GOVMModifier::run() {
     irbuilder.CreateStore(code_seg_ptr2int, code_seg_addr);
     irbuilder.CreateStore(code_seg_ptr2int, dispatch_code_seg_addr);
 
-    irbuilder.CreateStore(ConstantInt::get(Type::getInt64Ty(Mod->getContext()), vm_function_key), vm_function_key_gv);
+    StoreInst *ndkp_vmkey_store = irbuilder.CreateStore(ConstantInt::get(Type::getInt64Ty(Mod->getContext()), vm_function_key), vm_function_key_gv);
+    // 打 !ndkp.vmpkey.entry 标记：供 CertBind（-irobf-cert-bind）按标记命中此入口桩密钥常量
+    // 存并"包裹当前值"折入 APK 签名证书混合值。即便 SelfCheck 已就地把值改成非常量，标记仍
+    // 在，故 CertBind 与 SelfCheck 的密钥折入可顺序无关地叠加（标记名见 CertBind.h）。
+    ndkp_vmkey_store->setMetadata(NdkpVmpKeyEntryMD, MDNode::get(Mod->getContext(), {}));
 
     // 重置 ip 为 0，确保每次调用都从函数开头执行
     irbuilder.CreateStore(ConstantInt::get(Type::getInt32Ty(Mod->getContext()), 0), ip);

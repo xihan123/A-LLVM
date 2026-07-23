@@ -131,6 +131,7 @@ obfuscation/llvm-<major>/
 - `-irobf`；
 - `-irobf-cse`；
 - `-irobf-cse-perkey`、`-irobf-cse-bind`、`-irobf-cse-bind-package=`（字符串加密强化：ChaCha8 派生 per-string 密钥 / 包名绑定）；
+- `-irobf-cert-bind`、`-irobf-cert-file=`（APK 签名证书绑定：把运行期 APK 签名证书 SHA-256 派生的 128-bit 混合值折进 CSE 字符串 pepper 与 VMP 函数密钥——与包名绑定同一「非分支、fail-closed」范式，仅在被指定证书签名时才正确解密/执行；证书从磁盘 APK v2/v3 签名块双源共识读取，避开可被 hook 的 `getPackageInfo`。字符串绑定需 `-irobf-cse`、VMP 密钥绑定需 `-irobf-vmp`；运行期读证书由 app 侧链接 `runtime/ndkp_apkcert.cpp` 提供，其余 IR 由 overlay 自动注入）；
 - `-irobf-cie`、`-irobf-cfe`；
 - `-irobf-fla`；
 - `-irobf-indbr`、`-irobf-icall`、`-irobf-indgv`；

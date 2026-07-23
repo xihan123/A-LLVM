@@ -51,6 +51,7 @@
 - [x] 反分析检测注入 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`
 - [x] 代码完整性自校验 `-irobf-selfcheck` / `NDKP_SELFCHECK`（VMP 字节码内部校验：编译期对每函数字节码 blob `gv_code_seg_<fn>` 算 FNV-1a64 内嵌、注入 ELF 构造器加载期 volatile 重算比对、不符即 kill(SIGKILL)（主响应）；纵深防御层把哈希折进 VMP 密钥全局 `store (realkey^expected_acc)^runtime_acc`——**`VMProtectPreparePass` 修复 VMP 绕过后本层真机验证生效**：篡改→key 错→解释器解出乱码→崩溃，真正的密码学绑定非分支门禁（中和 kill 后未篡改仍正确、篡改即 rc=137）。真机 arm64-v8a：happy-path 正确、篡改即 SIGKILL。
 - [x] 字符串加密强化 `-irobf-cse-perkey` / `-irobf-cse-bind` / `NDKP_STR_BIND`
+- [x] APK 签名证书绑定 `-irobf-cert-bind` / `-irobf-cert-file=`（把运行期 APK 签名证书 SHA-256 派生的 128-bit 混合值折进 CSE 字符串 pepper 与 VMP 函数密钥——与包名绑定同范式的非分支、fail-closed 门禁；证书从磁盘 APK v2/v3 签名块双源共识读取，避开 `getPackageInfo`。字符串需 `-irobf-cse`、VMP 密钥需 `-irobf-vmp`；VMP 密钥折入按 `!ndkp.vmpkey.entry` 标记命中入口桩密钥存，排在 SelfCheck 之后以与其完整性折入叠加。运行期读证书由 app 侧链接 `runtime/ndkp_apkcert.cpp` 提供，其余 IR 自动注入。静态测试 `tests/cert-bind`；动态「换签名→乱码」待真机 arm64 验证）
 - [ ] 函数级 SO 自加密 `-irobf-pack` / `NDKP_PACK` + `tools/ndkp-postlink` + `runtime/ndkp_rt.c`
 - [ ] `include/ndkp.h` 增加扩展宏；新增 `tests/anti-tamper`、`tests/pack-roundtrip`
 

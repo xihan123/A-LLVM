@@ -31,6 +31,7 @@ add_llvm_pass_plugin(Obfuscation
   HideMaps.cpp
   FakeMaps.cpp
   SelfCheck.cpp
+  CertBind.cpp
   aVMP/aVMP.cpp
   aVMP/aVMPCrypto.cpp
   aVMP/aVMPDispatcher.cpp
