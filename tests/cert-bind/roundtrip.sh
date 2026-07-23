@@ -23,8 +23,12 @@ OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 
 command -v openssl >/dev/null 2>&1 || { echo "[skip] 无 openssl，跳过证书绑定往返"; exit 0; }
 CERT="$OUT/cert.der"
-openssl req -x509 -newkey rsa:2048 -keyout /dev/null -nodes -days 1 \
-  -subj "/CN=ndkp-cert-roundtrip" -outform DER -out "$CERT" >/dev/null 2>&1
+# 私钥写临时文件：Windows 原生 openssl 不接受 -keyout /dev/null。
+if ! openssl req -x509 -newkey rsa:2048 -keyout "$OUT/key.pem" -nodes -days 1 \
+      -subj "/CN=ndkp-cert-roundtrip" -outform DER -out "$CERT" >/dev/null 2>&1 \
+   || [[ ! -s "$CERT" ]]; then
+  echo "[FAIL] openssl 未能生成测试证书 DER"; exit 1
+fi
 
 # stub：按与 pass（ObfuscationPassManager ensureCertMix）/ runtime（ndkp_apkcert.cpp）相同的
 # le64 公式，从指定 DER 文件算证书混合值。独立转写以便交叉校验编码期公式。
@@ -55,15 +59,24 @@ extern "C" void ndkp_certbind_mix(uint64_t *lo, uint64_t *hi) {
 EOF
 
 EXE="$OUT/rt"; EXEB="$OUT/rtbad"
+IS_WIN=0
 case "$("$CLANG" -dumpmachine 2>/dev/null || true)" in
-  *windows*|*mingw*) EXE="$OUT/rt.exe"; EXEB="$OUT/rtbad.exe" ;;
+  *windows*|*mingw*) EXE="$OUT/rt.exe"; EXEB="$OUT/rtbad.exe"; IS_WIN=1 ;;
 esac
 
-CB="-mllvm -irobf -mllvm -irobf-cse -mllvm -irobf-cert-bind -mllvm -irobf-cert-file=$CERT"
+# Git Bash/MSYS 不会转换「= 后」的路径；原生 Windows clang/fopen 需要 Windows 路径。
+CERT_NATIVE="$CERT"
+INC_NATIVE="$INC"
+if [[ "$IS_WIN" -eq 1 ]] && command -v cygpath >/dev/null 2>&1; then
+  CERT_NATIVE="$(cygpath -m "$CERT")"
+  INC_NATIVE="$(cygpath -m "$INC")"
+fi
+CB_ARGS=(-mllvm -irobf -mllvm -irobf-cse -mllvm -irobf-cert-bind \
+  -mllvm "-irobf-cert-file=${CERT_NATIVE}")
 fail=0
 
 # 正例：stub 返回与构建期相同的混合值 → 抵消 → 正确解密。
-"$CLANG" "$@" -O2 $CB -I"$INC" -DNDKP_CERT_PATH="\"$CERT\"" \
+"$CLANG" "$@" -O2 "${CB_ARGS[@]}" -I "$INC_NATIVE" -DNDKP_CERT_PATH="\"${CERT_NATIVE}\"" \
   -o "$EXE" "$RT" "$OUT/stub.cpp"
 GOT="$("$EXE")"
 if [ "$GOT" = "$SECRET" ]; then
@@ -73,7 +86,7 @@ else
 fi
 
 # 负例：stub 返回 (0,0)（换签名/缺证书）→ 不抵消 → 应乱码（不得等于明文）。
-"$CLANG" "$@" -O2 $CB -I"$INC" -DNDKP_STUB_ZERO \
+"$CLANG" "$@" -O2 "${CB_ARGS[@]}" -I "$INC_NATIVE" -DNDKP_STUB_ZERO \
   -o "$EXEB" "$RT" "$OUT/stub.cpp"
 GOTB="$("$EXEB" || true)"
 if [ "$GOTB" = "$SECRET" ]; then
