@@ -62,6 +62,8 @@ Transforms/Obfuscation/
 
 各 pass 仍使用 legacy `ModulePass`，由 `ObfuscationPassManagerPass` 接入 new PM。VMP（`-irobf-vmp`）在流水线最前运行，其注入的解释器（段 `.AProtect.text`）被后续 CFG pass 按段名/函数名跳过。
 
+> **VMProtectPreparePass（关键）**：VMP 主体在 `OptimizerLast` 运行，早于 inliner/IPSCCP。若不干预，被保护函数会在到达 VM 桩前被**内联进调用方**或**常量折叠**掉（如 `leaf(10)→55`），VM 桩沦为死代码、解释器根本不执行 → 密钥/完整性绑定全部失效。故新增一个 `PipelineStartEP`（早于 inliner）标记 pass：给每个 VMP 目标打 `NoInline` + `llvm.compiler.used`（后者令 `hasAddressTaken()` 为真 → IPSCCP 停止参数追踪 → 调用点不被折叠），保证目标以真实 `call` 存活到 `OptimizerLast` 被虚拟化、运行期真正走解释器。仅标记已选中的函数，不改变选择范围。**性能**：真正解释后小函数即比原生慢数千倍，故只应虚拟化小型/关键函数（如授权/密钥校验）。
+
 ## 开关
 
 所有开关通过 `-mllvm` 传入：
@@ -93,7 +95,7 @@ Transforms/Obfuscation/
 | `-irobf-bandump` | 反内存转储注入 |
 | `-irobf-hidemaps` | `/proc/self/maps` 隐藏注入 |
 | `-irobf-fakemaps` | 伪造 `/proc` maps 注入 |
-| `-irobf-selfcheck` | 代码完整性自校验：校验 VMP 字节码 blob，篡改即终止（需 `-irobf-vmp`） |
+| `-irobf-selfcheck` | 代码完整性自校验：校验 VMP 字节码 blob，篡改即加载期终止(SIGKILL)（需 `-irobf-vmp`） |
 | `-level-*` | 强度，范围 1 到 3 |
 | `-irobf-debug` | 调试模式（默认关）。关闭时（release）额外做落地去指纹，见下 |
 
@@ -117,10 +119,11 @@ AArch64 后端混淆和对应的 Driver 参数尚未实现。
 
 只校验 VMP（`-irobf-vmp`）产出的每函数字节码 blob（`gv_code_seg_<fn>`）。该 blob 是编译期已知的常量字节（ChaCha 加密、无指针/无重定位、段 `.AProtect.data`），运行期解释器只读不写，故其内存字节恒等于编译期密文。
 
-- Pass 在**编译期**直接算出各 blob 的 FNV-1a64 并内嵌，注入一个 ELF 构造器（`ndkp_selfcheck_verify`，`llvm.global_ctors` 优先级 101）；加载期用 **volatile 读**重算比对（volatile 防止优化器对已知常量把校验折成恒真、删掉），不符即调用与检测类 pass 相同的 report/kill（`getpid`+`kill(SIGKILL)`+`brk`）终止。
+- Pass 在**编译期**直接算出各 blob 的 FNV-1a64 并内嵌，注入一个 ELF 构造器（`ndkp_selfcheck_verify`，`llvm.global_ctors` 优先级 101）加载期用 **volatile 读**重算比对（volatile 防止优化器对已知常量把校验折成恒真、删掉），不符即调用与检测类 pass 相同的 report/kill（`getpid`+`kill(SIGKILL)`+`brk`）终止（**主响应**）。
+- **纵深防御层（附，已真机验证生效）**：把各 blob 运行期哈希 XOR 累加进 `ndkp_selfcheck_runtime_acc`，并把 VMP 入口桩的密钥存改写为 `store (realkey ^ expected_acc) ^ load(runtime_acc)`（未篡改 `runtime_acc==expected_acc` 抵消回 `realkey`）。篡改任一 blob 字节 → `runtime_acc≠expected_acc` → key 错 → VMP 解释器 ChaCha 解出乱码 opcode → 崩溃。**这是真正的密码学绑定、非分支门禁**：即便 ① 的 kill 被 patch，篡改仍经此层破坏执行（真机：中和 kill 后未篡改正确、篡改即崩溃）。前提是 VMP 目标真正经解释器执行，由 `VMProtectPreparePass` 保证（见下）。
 - 因此**无需链接后回填工具，也无需重定位归一化** —— 这是选「VMP 字节码」为校验对象（而非整个 `.text`）的原因。构造器注入使其在 `.so`（无 `main`）上也生效。
 - **依赖 `-irobf-vmp`**：无被虚拟化函数即无 blob，本开关 no-op。`NDKP_SELFCHECK` 注解为 opt-in 标记，实际由开关控制。
-- **范围**：只覆盖 VMP 字节码数据。VMP 自带的每 BB 加密无 blob 级 MAC（operand-level 字节翻转可被静默放过），本校验对整个 blob 做全量认证、篡改即确定性终止；但不覆盖解释器 `.text` 或非 VMP 代码。
+- **范围**：只覆盖 VMP 字节码数据。VMP 自带的每 BB 加密无 blob 级 MAC（operand-level 字节翻转可被静默放过），本校验对整个 blob 做全量认证、篡改即加载期终止；但不覆盖解释器 `.text` 或非 VMP 代码。
 
 ## 适配新版本
 

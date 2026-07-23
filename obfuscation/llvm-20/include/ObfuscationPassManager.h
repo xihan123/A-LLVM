@@ -38,6 +38,7 @@ bool isIRObfuscationDebugEnabled();
 // VMP（-irobf-vmp）辅助开关读取，供 aVMP pass 使用。
 std::string getVMFunctionsList();
 bool isForceNoInlineEnabled();
+bool isVMProtectEnabled();
 
 // 字符串加密强化开关读取，供 StringEncryption pass 使用。
 // perkey：per-string 密钥由隐藏 pepper + 串 id 经 ChaCha8 派生，不再内联存储。

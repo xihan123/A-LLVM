@@ -29,6 +29,14 @@ llvm::PassPluginLibraryInfo getObfuscationPluginInfo() {
                   if (isIRObfuscationEnabled())
                     MPM.addPass(ObfuscationPassManagerPass());
                 });
+            // VMP 目标必须在 inliner / IPSCCP 之前被钉住（NoInline + compiler.used），
+            // 否则会在被虚拟化前被内联/常量折叠掉，VMP 桩沦为死代码。PipelineStartEP
+            // 在两者之前运行；属性持久，LTO 合并后仍生效。
+            PB.registerPipelineStartEPCallback(
+                [](ModulePassManager &MPM, OptimizationLevel) {
+                  if (isVMProtectEnabled())
+                    MPM.addPass(VMProtectPreparePass());
+                });
             PB.registerPipelineParsingCallback(
                 [](StringRef Name, ModulePassManager &MPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
@@ -40,6 +48,11 @@ llvm::PassPluginLibraryInfo getObfuscationPluginInfo() {
                   // VMP（不经 legacy 适配器）。
                   if (Name == "vmprotect") {
                     MPM.addPass(VMProtectPass(true));
+                    return true;
+                  }
+                  // 早期标记 pass 入口：供 opt -passes=vmprotect-prepare 单测。
+                  if (Name == "vmprotect-prepare") {
+                    MPM.addPass(VMProtectPreparePass());
                     return true;
                   }
                   return false;
