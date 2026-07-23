@@ -230,6 +230,9 @@ public:
   unsigned long long scramble64(const unsigned in, const char key[16]);
 
   int sha256(const char *msg, unsigned char *hash);
+  // 定长二进制哈希：SHA-256(msg[0..len))。与上面的 sha256(const char*) 不同，不做 strlen，
+  // 可安全用于含 NUL 字节的二进制数据（如证书 DER）。供 -irobf-cert-file 构建期算摘要。
+  int sha256(const unsigned char *msg, unsigned long len, unsigned char *hash);
 
 private:
   uint32_t ks[44];

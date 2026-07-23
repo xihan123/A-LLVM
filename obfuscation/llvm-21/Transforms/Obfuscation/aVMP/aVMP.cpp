@@ -24,6 +24,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Value.h"
@@ -470,6 +471,9 @@ class GOVMTranslator {
         std::map<Value *, int> alloca_area_map;
         std::map<BasicBlock *, int> basicblock_map;
         std::vector<pair<int, BasicBlock *>> br_map;
+        // PHI 各 incoming 的 bb_id 字段位置 + 前驱 BB，emit 后回填其真实偏移
+        // （前驱可能是尚未 emit 的回边 BB，emit 时不可知）。与 br_map 同机制。
+        std::vector<pair<int, BasicBlock *>> phi_bb_map;
         std::map<CallBase *, long long> callinst_map;
 
         // LLVM 21: SwitchInst支持
@@ -2544,15 +2548,32 @@ void GOVMTranslator::handle_inst(Instruction *ins) {
         for (unsigned i = 0; i < num_incoming; i++) {
             BasicBlock *incoming_bb = inst->getIncomingBlock(i);
             Value *incoming_val = inst->getIncomingValue(i);
-            int bb_id = basicblock_map[incoming_bb];
-            std::vector<uint8_t> packed_bb_id = pack(bb_id, pointer_size);
-            
-            if (isIRObfuscationDebugEnabled()) {
-                errs() << "[PHI] incoming[" << i << "] bb_id=" << bb_id 
-                       << " incoming_bb=" << incoming_bb->getName().str()
-                       << " basicblock_map lookup result=" << bb_id << "\n";
+            // 回边前向引用修复：incoming 值可能是尚未 emit 的后继 BB 里定义的指令
+            // （SSA 里唯有 PHI 操作数能前向引用）。此时它不在 value_map → packValue 报错。
+            // 提前给它分配 data-seg 槽；其定义指令稍后 emit 时 insert 为 no-op、沿用此槽
+            // （仅多占一个 curr_data_offset 槽，无害），故 PHI 读、定义写同一槽。
+            if (isa<Instruction>(incoming_val) &&
+                value_map.find(incoming_val) == value_map.end()) {
+                int isz = modDataLayout->getTypeAllocSize(incoming_val->getType());
+                insert_to_value_map(&value_map, incoming_val, curr_data_offset);
+                curr_data_offset += isz;
             }
-            
+            // bb_id（前驱 BB 偏移）：前驱可能是回边 BB、此刻未 emit → 用 .find 避免
+            // operator[] 污染 basicblock_map；真实偏移 emit 后由 phi_bb_map 回填。
+            auto bbit = basicblock_map.find(incoming_bb);
+            int bb_id = (bbit != basicblock_map.end()) ? bbit->second : 0;
+            // 记录 bb_id 字段在最终 vm_code 中的绝对偏移，供回填（此处 vm_code 未变、
+            // hex_code 尚未 append 本条 → 该位置即 bb_id 起始）。
+            int bb_id_code_pos = (int)(vm_code.size() + hex_code.size());
+            phi_bb_map.push_back(pair<int, BasicBlock *>(bb_id_code_pos, incoming_bb));
+            std::vector<uint8_t> packed_bb_id = pack(bb_id, pointer_size);
+
+            if (isIRObfuscationDebugEnabled()) {
+                errs() << "[PHI] incoming[" << i << "] bb_id=" << bb_id
+                       << " incoming_bb=" << incoming_bb->getName().str()
+                       << " (backpatched later)\n";
+            }
+
             std::vector<uint8_t> packed_incoming = GET_PACK_VALUE(incoming_val);
             ins_to_hex(hex_code, packed_bb_id, packed_incoming);
         }
@@ -3514,7 +3535,10 @@ bool GOVMTranslator::run(){
         }
 
         BasicBlock * bb = &*bbl;
-        basicblock_map.insert(pair<BasicBlock *, int>(bb, vm_code.size()));
+        // 用 operator[]= 覆盖赋值，而非 .insert()（对已存在键是 no-op）。PHI/BR 处理里
+        // 对前向引用 BB 的 basicblock_map[bb] 读会把 {bb:0} 提前插入；若这里用 insert
+        // 则真实偏移写不进去、该 BB 永远解析成 0 → 分支全跳 BB0 → 死循环。
+        basicblock_map[bb] = (int)vm_code.size();
 
         uint32_t bb_offset = (uint32_t)vm_code.size();
         uint64_t bb_token = deriveBBToken(vm_function_key, bb_offset);
@@ -3622,6 +3646,21 @@ bool GOVMTranslator::run(){
         }
     }
     
+    // fill phi bb_id map（PHI 各 incoming 的前驱 BB 偏移，机制同 br_map；
+    // 前驱可能是回边 BB、emit PHI 时未知，故一律 emit 后回填）
+    for(auto it=phi_bb_map.rbegin(); it!=phi_bb_map.rend(); it++) {
+        int code_pos = it->first;
+        BasicBlock * pred_bb = it->second;
+        auto bb_it = basicblock_map.find(pred_bb);
+        if (bb_it != basicblock_map.end()) {
+            uint32_t off = bb_it->second;
+            std::vector<uint8_t> bb_addr = pack(off, pointer_size);
+            if (code_pos + pointer_size <= (int)vm_code.size()) {
+                std::copy(bb_addr.begin(), bb_addr.end(), vm_code.begin()+code_pos);
+            }
+        }
+    }
+
     // LLVM 21: Fill switch_map
     for(auto it=switch_map.rbegin(); it!=switch_map.rend(); it++) {
         int code_pos = std::get<0>(*it);
@@ -3970,7 +4009,11 @@ void GOVMModifier::run() {
     irbuilder.CreateStore(code_seg_ptr2int, code_seg_addr);
     irbuilder.CreateStore(code_seg_ptr2int, dispatch_code_seg_addr);
 
-    irbuilder.CreateStore(ConstantInt::get(Type::getInt64Ty(Mod->getContext()), vm_function_key), vm_function_key_gv);
+    StoreInst *ndkp_vmkey_store = irbuilder.CreateStore(ConstantInt::get(Type::getInt64Ty(Mod->getContext()), vm_function_key), vm_function_key_gv);
+    // 打 !ndkp.vmpkey.entry 标记：供 CertBind（-irobf-cert-bind）按标记命中此入口桩密钥常量
+    // 存并"包裹当前值"折入 APK 签名证书混合值。即便 SelfCheck 已就地把值改成非常量，标记仍
+    // 在，故 CertBind 与 SelfCheck 的密钥折入可顺序无关地叠加（标记名见 CertBind.h）。
+    ndkp_vmkey_store->setMetadata(NdkpVmpKeyEntryMD, MDNode::get(Mod->getContext(), {}));
 
     // 重置 ip 为 0，确保每次调用都从函数开头执行
     irbuilder.CreateStore(ConstantInt::get(Type::getInt32Ty(Mod->getContext()), 0), ip);
@@ -4981,6 +5024,28 @@ namespace {
         return false;
     }
 
+    // VMProtectPreparePass 用的选择器：等价于 toObfuscateFunction(false, f, "vmp")，
+    // 但不写 used_passes（早期标记 pass 只读判定，不参与 pass 计数）。覆盖注解
+    // (ndkp.vmp / novmp) 与 -irobf-vm_functions 两条选择路径。
+    bool isVMProtectTarget(Function *f) {
+        std::string annotation = readAnnotate(f);
+        if (annotation.find("novmp") != std::string::npos)
+            return false;
+        if (annotation.find("vmp") != std::string::npos)
+            return true;
+        std::string vmFunctionsList = getVMFunctionsList();
+        if (!vmFunctionsList.empty()) {
+            std::string funcName = f->getName().str();
+            std::istringstream ss(vmFunctionsList);
+            std::string token;
+            while (std::getline(ss, token, ';')) {
+                if (!token.empty() && funcName == token)
+                    return true;
+            }
+        }
+        return false;
+    }
+
 struct VMProtect : public ModulePass {
   static char ID;
   bool flag;
@@ -5214,7 +5279,34 @@ PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM)
   }
 
   normalizeModuleLocalDefaultVisibility(M);
-  
+
   return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+
+// 早期标记 pass（PipelineStartEP）实现：给每个 VMP 目标函数打 NoInline +
+// llvm.compiler.used。关键：compiler.used 使 hasAddressTaken() 为真 → IPSCCP 的
+// canTrackArgumentsInterprocedurally 返回 false → 参数相关的返回值变 overdefined →
+// 调用点不被折成常量、也不被删除；NoInline 阻止内联进调用方。二者合力保证 VMP
+// 目标以真实 call 存活到 OptimizerLast，届时 VMProtect 才虚拟化它，调用方真正走 VM。
+// 不用 optnone：它不阻 IPSCCP，且与 GOVMModifier 给 wrapper 加的 AlwaysInline 冲突
+// （verifier 失败），还会让字节码体膨胀。
+PreservedAnalyses llvm::VMProtectPreparePass::run(Module &M,
+                                                  ModuleAnalysisManager &AM) {
+  SmallVector<GlobalValue *, 8> Marked;
+  for (Function &F : M) {
+    if (F.isDeclaration() || F.isVarArg())
+      continue;
+    if (!isVMProtectTarget(&F))
+      continue;
+    F.addFnAttr(Attribute::NoInline);
+    Marked.push_back(&F);
+    if (isIRObfuscationDebugEnabled())
+      errs() << "[NDKP] vmprotect-prepare: pinned VMP target (noinline + "
+                "compiler.used): " << F.getName() << "\n";
+  }
+  if (Marked.empty())
+    return PreservedAnalyses::all();
+  appendToCompilerUsed(M, Marked);
+  return PreservedAnalyses::none();
 }
 #endif

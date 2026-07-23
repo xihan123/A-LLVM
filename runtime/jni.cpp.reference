@@ -1,0 +1,238 @@
+/*
+ * Copyright 2026 StringArmor
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * JNI bridge for org.stringarmor.StringArmorNative.decrypt(long).
+ * The decrypt symbol is bound dynamically via JNI_OnLoad/RegisterNatives and is
+ * NOT exported, so only JNI_OnLoad is visible in the stripped .so.
+ */
+#include <jni.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+
+#include "blob.h"
+#include "deobfuscator.h"
+#include "ndkp.h"
+
+#ifdef STRINGARMOR_CERT_BIND
+#include "apkcert.h"
+#endif
+
+#ifdef STRINGARMOR_ANTI_HOOK
+#include "antihook.h"
+#endif
+
+// The encrypted blob + masked pepper shares live in their own translation unit
+// (blob.cpp), reached through stringarmor::blobData() / blobUnitCount() / blobPepper().
+// That isolation lets the opt-in A-LLVM string-binding pass (-irobf-cse-bind) be scoped
+// to blob.cpp alone, so it never compounds with this TU's VMP or deobfuscator.cpp's FLA.
+// The blob is StringArmor keystream-ciphertext; the 128-bit pepper crosses this boundary
+// only as its four masked shares (never a plaintext key) and is reassembled + wiped
+// inside decode() per call.
+
+// --- A-LLVM VMP runtime shim -------------------------------------------------
+// When decrypt() is virtualized (-mllvm -irobf-vmp), the injected VM interpreter emits
+// calls to vmp_debug_id(int, unsigned long) — a debug-id hook that A-LLVM only *defines*
+// under -mllvm -irobf-debug. In a normal (non-debug) build the symbol is left undefined,
+// and the NDK's default -Wl,--no-undefined turns that into a link error
+// (`undefined symbol: vmp_debug_id`). The hook is side-effect-only: its result is unused
+// and its logging is gated at runtime by vmp_shared_debug_enabled (which stays 0), so a
+// no-op definition is safe. External linkage (so the interpreter's call binds to it) with
+// hidden visibility (never exported); --gc-sections drops it in non-VMP builds where it is
+// unreferenced. Weak lets an A-LLVM-provided definition win if a future toolchain ships one.
+__attribute__((weak, visibility("hidden")))
+unsigned long vmp_debug_id(int, unsigned long) { return 0; }
+
+namespace {
+
+// Common short strings decode into this stack buffer (no allocation); only longer
+// strings fall back to a heap buffer. Both are wiped before returning.
+constexpr size_t kStackUnits = 256;
+
+#ifdef STRINGARMOR_CERT_BIND
+// --- Signing-cert binding (opt-in via stringarmor { nativeCertBind = true }) --------------
+// Little-endian u64 from 8 bytes.
+inline uint64_t le64(const uint8_t* b) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(b[i]) << (8 * i);
+    return v;
+}
+
+// Cached 128-bit cert mix. Computed ONCE in JNI_OnLoad (native context) — deliberately NOT
+// inside the VMP-virtualized decrypt(), where JNI upcalls routed through the VM interpreter's
+// external-call bridge (env + by-ref out-params) corrupt memory. decrypt() only reads these.
+// The SHA-256 of the signer cert is read straight from the on-disk APK's v2/v3 signing block
+// over two independent, cross-checked native paths (apkcert.h) — never from the framework's
+// getPackageInfo, the API signature-bypass tools hook. A wrong/absent/redirected cert leaves
+// (0,0): fail-closed — the blob built under pepper ^ buildCertMix then garbles.
+uint64_t g_certLo = 0, g_certHi = 0;
+void initCertMix() {
+    uint8_t sha[32];
+    if (stringarmor::apkcert::certSha256Consensus(sha)) {
+        g_certLo = le64(sha) ^ le64(sha + 16);
+        g_certHi = le64(sha + 8) ^ le64(sha + 24);
+    }
+}
+#endif  // STRINGARMOR_CERT_BIND
+
+#ifdef STRINGARMOR_ANTI_HOOK
+// Native self-integrity mix, published by the antihook monitor thread (antihook.h):
+// (0,0) while our guarded functions (decode/decrypt) are byte-for-byte unmodified, a
+// random 128-bit value once an inline hook rewrites their prologue. decrypt() reads
+// these as plain globals — same VMP-safe pattern as the cert mix — and XORs them into
+// the pepper, so a hooked process derives a different keystream key -> garbage.
+uint64_t g_selfLo = 0, g_selfHi = 0;
+#endif  // STRINGARMOR_ANTI_HOOK
+
+// decrypt() is the chosen VMP target: it is small (blob/share orchestration of the
+// out-of-line decode call), so virtualization is cheap (~40 s) — unlike decode(),
+// whose inlined ChaCha8 makes VMP explode. It also has no bit-exact-with-encoder
+// constraint (only decode must match the JVM encoder), so it is the safe function to
+// virtualize. The 128-bit pepper is never reconstructed here: decrypt forwards the
+// four masked shares to decode(), which reassembles + wipes the key halves internally
+// — so no plaintext key crosses this call boundary. When -irobf-vmp is on, the whole
+// decrypt path becomes interpreted VM bytecode.
+NDKP_VMP
+NDKP_STR_ENCRYPT
+NDKP_FLATTEN
+jstring decrypt(JNIEnv* env, jclass /*clazz*/, jlong id) {
+    const unsigned char* const blob = stringarmor::blobData();
+    const unsigned int units = stringarmor::blobUnitCount();
+    stringarmor::BlobPepper pep = stringarmor::blobPepper();
+
+#ifdef STRINGARMOR_CERT_BIND
+    // Fold the cached signing-cert mix (computed in JNI_OnLoad) into share0 of each pepper half
+    // (half = s0 ^ rotl64(s1,23), so XOR-ing into s0 XORs it into the reassembled pepper). Plain
+    // global reads + XOR — no JNI in the VMP'd frame. The blob decrypts only under the build-time
+    // cert; a wrong/absent cert yields garbage (non-branching, fail-closed).
+    pep.loShare0 ^= g_certLo;
+    pep.hiShare0 ^= g_certHi;
+#endif
+
+#ifdef STRINGARMOR_ANTI_HOOK
+    // Fold the native self-integrity mix (0 unless an inline hook was detected on
+    // decode/decrypt). Plain global reads + XOR — no libc/JNI in the VMP'd frame.
+    // Non-branching, fail-closed: a hooked process decodes garbage (len>units guard).
+    pep.loShare0 ^= g_selfLo;
+    pep.hiShare0 ^= g_selfHi;
+#endif
+
+    char16_t stack[kStackUnits];
+    const size_t len = stringarmor::decode(
+        static_cast<uint64_t>(id), blob, units,
+        pep.loShare0, pep.loShare1, pep.hiShare0, pep.hiShare1, stack, kStackUnits);
+
+    // A valid record's UTF-16 length is always < the blob's total unit count. A wrong/absent
+    // cert (fail-closed) instead yields a ~uniform 32-bit garbage length that almost always
+    // exceeds it — without this guard decrypt() would malloc hundreds of MB and scan/log a
+    // giant garbage string (observed as a 100% CPU spin on a resigned APK). Cap it to a clean
+    // empty string. Cheap integer compare; does not branch on plaintext content.
+    if (len > units) {
+        return env->NewString(reinterpret_cast<const jchar*>(stack), 0);
+    }
+
+    char16_t* heap = nullptr;
+    const char16_t* p = stack;
+    if (len > kStackUnits) {
+        heap = static_cast<char16_t*>(std::malloc(len * sizeof(char16_t)));
+        if (heap == nullptr) {
+            return nullptr;
+        }
+        stringarmor::decode(
+            static_cast<uint64_t>(id), blob, units,
+            pep.loShare0, pep.loShare1, pep.hiShare0, pep.hiShare1, heap, len);
+        p = heap;
+    }
+
+    // Length-based construction: the payload may contain U+0000 / lone surrogates.
+    jstring result = env->NewString(reinterpret_cast<const jchar*>(p), static_cast<jsize>(len));
+
+    stringarmor::secure_wipe(const_cast<char16_t*>(p), len * sizeof(char16_t));
+    if (heap != nullptr) {
+        std::free(heap);
+    }
+    return result;
+}
+
+}  // namespace
+
+// JNI metadata (class/method/signature) obfuscated at rest so the plaintext
+// identifiers "org/stringarmor/StringArmorNative", "decrypt" and the signature do
+// NOT sit as readable strings in .rodata (they would otherwise pinpoint the JNI
+// entry at a glance). Each byte is plain[i] ^ (0x37 ^ (uint8_t)(i*0x51)); the names
+// are reconstructed into stack buffers in JNI_OnLoad, used, and wiped. (Limited
+// benefit — the Java class is still named in the DEX — but it removes the one-glance
+// native tell. The Java name is kept stable by the plugin's injected ProGuard rule,
+// so this fixed name still resolves under R8.)
+namespace {
+
+// "org/stringarmor/StringArmorNative" (len 33)
+static const unsigned char kSaClsObf[] = {0x58, 0x14, 0xf2, 0xeb, 0x00, 0xd6, 0xa3, 0x69, 0xd1, 0x89, 0x7c, 0x3e, 0x96, 0x45, 0x2b, 0xa7, 0x74, 0x22, 0xf7, 0x5d, 0x0d, 0xf5, 0x80, 0x02, 0xc2, 0xb1, 0x7f, 0xf2, 0x8a, 0x6e, 0x20, 0x8e, 0x72};
+// "decrypt" (len 7)
+static const unsigned char kSaMethodObf[] = {0x53, 0x03, 0xf6, 0xb6, 0x0a, 0xd2, 0xa5};
+// "(J)Ljava/lang/String;" (len 21)
+static const unsigned char kSaSigObf[] = {0x1f, 0x2c, 0xbc, 0x88, 0x19, 0xc3, 0xa7, 0x61, 0x90, 0x82, 0x7c, 0x22, 0x9c, 0x05, 0x0a, 0xfc, 0x55, 0x3f, 0xeb, 0x53, 0x58};
+
+// Deobfuscate `len` bytes of `b` into `out` (sized >= len+1) and NUL-terminate.
+inline void sa_deob(const unsigned char* b, size_t len, char* out) {
+    for (size_t i = 0; i < len; ++i) {
+        out[i] = static_cast<char>(b[i] ^ (0x37u ^ static_cast<unsigned char>(i * 0x51u)));
+    }
+    out[len] = '\0';
+}
+
+}  // namespace
+
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_ERR;
+    }
+    char clsName[sizeof(kSaClsObf) + 1];
+    char mName[sizeof(kSaMethodObf) + 1];
+    char sig[sizeof(kSaSigObf) + 1];
+    sa_deob(kSaClsObf, sizeof(kSaClsObf), clsName);
+    sa_deob(kSaMethodObf, sizeof(kSaMethodObf), mName);
+    sa_deob(kSaSigObf, sizeof(kSaSigObf), sig);
+
+    jclass clazz = env->FindClass(clsName);
+    stringarmor::secure_wipe(clsName, sizeof clsName);
+    if (clazz == nullptr) {
+        stringarmor::secure_wipe(mName, sizeof mName);
+        stringarmor::secure_wipe(sig, sizeof sig);
+        return JNI_ERR;
+    }
+    const JNINativeMethod methods[] = {
+        {mName, sig, reinterpret_cast<void*>(&decrypt)},
+    };
+    const jint rc = env->RegisterNatives(clazz, methods, 1);
+    env->DeleteLocalRef(clazz);
+    stringarmor::secure_wipe(mName, sizeof mName);
+    stringarmor::secure_wipe(sig, sizeof sig);
+    if (rc != JNI_OK) {
+        return JNI_ERR;
+    }
+#ifdef STRINGARMOR_CERT_BIND
+    // Fetch + fold the signing-cert digest here, in native context — not inside the VMP'd
+    // decrypt(). Read from the on-disk APK v2/v3 signing block over two cross-checked native
+    // paths (apkcert.h); no JNI upcall, no framework getPackageInfo (the API bypass tools hook).
+    initCertMix();
+#endif
+#ifdef STRINGARMOR_ANTI_HOOK
+    // Snapshot the prologues of our critical functions and start the self-integrity
+    // monitor thread. Guards decode() (crypto core) and decrypt() (JNI entry); a native
+    // inline hook on either flips the published mix -> garbage decode. Runs here in
+    // native context (not the VMP'd decrypt) so the by-ref libc calls stay off the VM
+    // bridge, mirroring initCertMix(). See antihook.h for scope/limits.
+    {
+        const void* regions[] = {
+            reinterpret_cast<const void*>(&decrypt),
+            reinterpret_cast<const void*>(&stringarmor::decode),
+        };
+        stringarmor::antihook::arm(regions, 2, &g_selfLo, &g_selfHi);
+    }
+#endif
+    return JNI_VERSION_1_6;
+}

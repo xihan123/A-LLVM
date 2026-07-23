@@ -24,8 +24,11 @@
 #include "llvm/Transforms/Obfuscation/BanDump.h"
 #include "llvm/Transforms/Obfuscation/HideMaps.h"
 #include "llvm/Transforms/Obfuscation/FakeMaps.h"
+#include "llvm/Transforms/Obfuscation/SelfCheck.h"
+#include "llvm/Transforms/Obfuscation/CertBind.h"
 #include "llvm/Passes/PassBuilder.h"
 #include <string>
+#include <cstdint>
 
 namespace llvm {
 class ModulePass;
@@ -37,6 +40,7 @@ bool isIRObfuscationDebugEnabled();
 // VMP（-irobf-vmp）辅助开关读取，供 aVMP pass 使用。
 std::string getVMFunctionsList();
 bool isForceNoInlineEnabled();
+bool isVMProtectEnabled();
 
 // 字符串加密强化开关读取，供 StringEncryption pass 使用。
 // perkey：per-string 密钥由隐藏 pepper + 串 id 经 ChaCha8 派生，不再内联存储。
@@ -45,6 +49,14 @@ bool isForceNoInlineEnabled();
 bool isCsePerKeyEnabled();
 bool isCseBindEnabled();
 std::string getCseBindPackage();
+
+// APK 签名证书绑定开关/构建期证书摘要读取，供 StringEncryption 与 CertBind pass 使用。
+// isCertBindEnabled：-irobf-cert-bind 是否开启。
+// getCertBindLo/Hi：-irobf-cert-file 的 DER 证书 SHA-256 派生的 128-bit 混合值（首次
+//   读取时算一次并缓存；bind 开但文件缺失/不可读 ⇒ fail-closed 构建报错）。
+bool isCertBindEnabled();
+uint64_t getCertBindLo();
+uint64_t getCertBindHi();
 
 ModulePass *createObfuscationPassManager();
 void initializeObfuscationPassManagerPass(PassRegistry &Registry);

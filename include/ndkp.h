@@ -37,4 +37,10 @@
  * 等价于用 -mllvm -irobf-vm_functions=<name;name> 按函数名指定。 */
 #define NDKP_VMP NDKP_ANNOTATE("ndkp.vmp")
 
+/* 代码完整性自校验（VMP 字节码）。标签 ndkp.selfcheck 为 opt-in 标记，实际由开关
+ * -mllvm -irobf-selfcheck 控制（与其它注解一样，注解不替代开关）。自校验只对 VMP
+ * 产出的每函数字节码 blob 生效，故须同时开启 -mllvm -irobf-vmp（无被虚拟化函数则
+ * 自校验自动 no-op）。加载期比对字节码哈希，检测到篡改即终止进程。 */
+#define NDKP_SELFCHECK NDKP_ANNOTATE("ndkp.selfcheck")
+
 #endif /* NDKP_H */
