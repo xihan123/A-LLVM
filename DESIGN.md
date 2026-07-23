@@ -131,6 +131,7 @@ obfuscation/llvm-<major>/
 - `-irobf`；
 - `-irobf-cse`；
 - `-irobf-cse-perkey`、`-irobf-cse-bind`、`-irobf-cse-bind-package=`（字符串加密强化：ChaCha8 派生 per-string 密钥 / 包名绑定）；
+- `-irobf-cert-bind`、`-irobf-cert-file=`（APK 签名证书绑定：把运行期 APK 签名证书 SHA-256 派生的 128-bit 混合值折进 CSE 字符串 pepper 与 VMP 函数密钥——与包名绑定同一「非分支、fail-closed」范式，仅在被指定证书签名时才正确解密/执行；证书从磁盘 APK v2/v3 签名块双源共识读取，避开可被 hook 的 `getPackageInfo`。字符串绑定需 `-irobf-cse`、VMP 密钥绑定需 `-irobf-vmp`；运行期读证书由 app 侧链接 `runtime/ndkp_apkcert.cpp` 提供，其余 IR 由 overlay 自动注入）；
 - `-irobf-cie`、`-irobf-cfe`；
 - `-irobf-fla`；
 - `-irobf-indbr`、`-irobf-icall`、`-irobf-indgv`；
@@ -175,8 +176,8 @@ AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 | --- | --- |
 | 字符串 per-key / 包名绑定（`-irobf-cse-perkey` / `-irobf-cse-bind`） | 已实现（ChaCha8 派生密钥 + `/proc/self/cmdline` 包名折入 pepper）；host 往返 + IR 校验 + **真机 arm64-v8a 与 armeabi-v7a**（perkey 正确、bind 包名 happy-path 正确、错包名 fail-closed 乱码）均通过。体积开销 perkey +3.1KB / bind +3.8KB（解码一次性缓存，运行期 ~0）；多进程 `:suffix` 私有子进程经 `:` 截断还原基础包名，真机验证正确解密（错包名仍 fail-closed）。待 CI patch-check 实跑 |
 | 反分析探针（`-irobf-*detect`/`bandump`/`*maps`） | 已实现（注入 `main`）；待误报测试 + `.so` 场景改注入 `.init_array` |
-| 代码自校验 | 动态重定位归一化和篡改测试 |
-| VMP（`-irobf-vmp`） | 已实现；本地 IR/clang codegen + **真机 arm64-v8a 语义验证**（单函数、**多函数嵌套互调**、与 cse/perkey/bind/fla 组合、纯 VMP+fla 均正确；修复了 `vmp_debug_id` 链接）。性能实测 compute 循环 ~1.0×（块体原生、仅虚拟化控制流），体积 +~1.8MB 解释器/模块；待各 ABI 解释器扩展（arm/x86/x86_64）与控制流密集场景基准 |
+| 代码完整性自校验（`-irobf-selfcheck`） | 已实现（**VMP 字节码内部校验**）：只校验 VMP 产出的每函数字节码 blob（`gv_code_seg_<fn>`，编译期已知的常量字节、段 `.AProtect.data`）。Pass 编译期算出各 blob 的 FNV-1a64 并内嵌，注入 ELF 构造器（`ndkp_selfcheck_verify`，`llvm.global_ctors` 优先级 101）加载期 volatile 读重算比对，不符即调 `DetectUtils` 的 report/kill（`getpid`+`kill(SIGKILL)`+`brk`）终止（**主响应**）。**纵深防御层（现已真机验证生效）**：把哈希 XOR 累加折进 `vmp_shared_vm_function_key` 入口桩存——`store (realkey^expected_acc)^load(runtime_acc)`；篡改任一 blob 字节 → `runtime_acc≠expected_acc` → key 错 → VMP 解释器解出乱码 → 崩溃。**真正的密码学绑定、非分支门禁**（即便 kill 分支被 patch，篡改仍经此层破坏执行；真机实测中和 kill 后未篡改正确/篡改 rc=137）。此前误判为"惰性"是因 VMP 被 inline/fold 绕过、VM 根本没执行；`VMProtectPreparePass` 修复后本层生效。因 blob 是数据段纯常量、运行期只读不写 → **无需重定位归一化、无需链接后回填工具**。范围：只覆盖 VMP 字节码，不含解释器 `.text` 或非 VMP 代码 |
+| VMP（`-irobf-vmp`） | 已实现且**真机验证真正经解释器执行**。**关键修复（2026-07）**：VMP 在 OptimizerLast 运行，早于 inliner/IPSCCP，导致被保护函数在到达 VM 桩前被内联/常量折叠掉、VM 桩沦为死代码（此前"~1.0× 原生"实为函数根本没走 VM）。新增 `VMProtectPreparePass`（PipelineStartEP 早期给目标打 `NoInline`+`llvm.compiler.used`，后者令 IPSCCP 停止参数追踪→调用点不被折叠）修复此绕过。**并修复 translator 的循环/PHI 前向引用 bug**（`basicblock_map` 用 `.insert()` 被 operator[] 污染的 0 卡住→分支全跳 BB0 死循环；PHI 回边 incoming 值未分配槽 `packValue` 报错；PHI bb_id 未回填）——改 `basicblock_map[bb]=` 覆盖 + PHI 值提前分配槽 + `phi_bb_map` 回填。真机 arm64-v8a：直线 64-bit、循环(LCG/FNV)、递归(fib)、内存(alloca/load/store/gep)、switch、VM→native 调用、float/double 全部 == 原生；旧"compute 挂死"已修。**性能**：真正解释后 hot 循环 ~10000× 原生（hot(1000) 54ms vs 0.005ms）——故仅虚拟化小型/关键函数；向量指令 translator 拒绝→安全回退原生。体积 +~1.8MB 解释器/模块；待各 ABI 解释器扩展 |
 | AArch64 后端混淆 | 独立补丁和机器码测试 |
 | macOS Host | runner、dmg 打包和签名处理 |
 

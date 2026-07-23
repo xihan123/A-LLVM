@@ -13,6 +13,14 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationOptions.h"
 #include "llvm/Transforms/Obfuscation/aVMP/aVMP.h"
+#include "llvm/Transforms/Obfuscation/CryptoUtils.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/Base64.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include <cstdint>
+#include <vector>
 
 #define DEBUG_TYPE "ir-obfuscation"
 
@@ -143,6 +151,14 @@ EnableFakeMaps("irobf-fakemaps", cl::init(false), cl::NotHidden,
                cl::desc("Enable IR Fake /proc maps Injection."),
                cl::ZeroOrMore);
 
+// 代码完整性自校验：对 VMP（-irobf-vmp）产出的每函数字节码 blob（gv_code_seg_<fn>）
+// 注入加载期哈希校验，检测到篡改即终止。只在有被虚拟化函数时生效，否则 no-op。
+static cl::opt<bool>
+EnableSelfCheck("irobf-selfcheck", cl::init(false), cl::NotHidden,
+                cl::desc("Enable IR Self Integrity Check Injection "
+                         "(verifies VMP bytecode blobs; requires -irobf-vmp)."),
+                cl::ZeroOrMore);
+
 // 阶段 2 VMP（函数级虚拟化）。被虚拟化的函数通过注解（ndkp.vmp / "vmp"）或
 // -irobf-vm_functions= 指定；VMP 要求 -frtti -fno-exceptions（见 include/ndkp.h）。
 static cl::opt<std::string>
@@ -159,15 +175,107 @@ ForceNoInline("irobf-vmp-noinline", cl::init(false), cl::NotHidden,
               cl::desc("Force disable inlining for all functions in VMP."),
               cl::ZeroOrMore);
 
+// APK 签名证书绑定：把运行期 APK 签名证书 SHA-256 派生的 128-bit 混合值折进 CSE 字符串
+// pepper 与 VMP 函数密钥。产物仅在被 -irobf-cert-file 指定证书签名时才正确运行（非分支、
+// fail-closed）。运行期证书读取由 app 侧链接 runtime/ndkp_apkcert.cpp 提供。
+static cl::opt<bool>
+EnableCertBind("irobf-cert-bind", cl::init(false), cl::NotHidden,
+               cl::desc("Bind decryption to the APK signing certificate (folds into "
+                        "-irobf-cse strings and the VMP function key; non-branch, "
+                        "fail-closed). Requires -irobf-cert-file; the app links "
+                        "runtime/ndkp_apkcert.cpp."),
+               cl::ZeroOrMore);
+// 期望签名证书（构建期），DER 编码；其 SHA-256 在构建期折入。bind 开但此项空/不可读 ⇒
+// StringEncryption/CertBind 取值时 fail-closed 报错。
+static cl::opt<std::string>
+CertBindFile("irobf-cert-file", cl::init(""), cl::NotHidden,
+             cl::desc("Path to the expected signer certificate in DER form (PEM also "
+                      "accepted); its SHA-256 is folded at build time. Used with "
+                      "-irobf-cert-bind."),
+             cl::ZeroOrMore);
+
 bool llvm::isIRObfuscationDebugEnabled() { return EnableIRObfuscationDebug; }
 
 std::string llvm::getVMFunctionsList() { return VMFunctions; }
 bool llvm::isForceNoInlineEnabled() { return ForceNoInline; }
+bool llvm::isVMProtectEnabled() { return EnableVMProtect; }
 
 // bind 蕴含 perkey：开启包名绑定即启用 ChaCha8 派生密钥路径。
 bool llvm::isCsePerKeyEnabled() { return EnableStrPerKey || EnableStrBind; }
 bool llvm::isCseBindEnabled() { return EnableStrBind; }
 std::string llvm::getCseBindPackage() { return StrBindPackage; }
+
+// ---- APK 签名证书绑定（-irobf-cert-bind / -irobf-cert-file）构建期证书摘要 ----
+// 首次取值时读文件→（PEM 则转 DER）→SHA-256→派生 128-bit 混合值并缓存。混合公式与
+// 运行期 runtime/ndkp_apkcert.cpp（及 stringarmor2 jni.cpp initCertMix）逐字节一致：
+//   lo = le64(sha[0:8]) ^ le64(sha[16:24]); hi = le64(sha[8:16]) ^ le64(sha[24:32])。
+static bool CertMixReady = false;
+static uint64_t CertMixLo = 0, CertMixHi = 0;
+
+// 若缓冲是 PEM（含 "-----BEGIN"），抽取首个 BEGIN..END 之间的 base64 主体解码为 DER；
+// 否则原样返回。令 -irobf-cert-file 既接受 keytool -exportcert 的 DER，也接受 PEM。
+static std::vector<uint8_t> ndkpPemToDerIfNeeded(StringRef Bytes) {
+  size_t P = Bytes.find("-----BEGIN");
+  if (P == StringRef::npos)
+    return std::vector<uint8_t>(Bytes.bytes_begin(), Bytes.bytes_end());
+  size_t HdrEnd = Bytes.find('\n', P);
+  if (HdrEnd == StringRef::npos)
+    report_fatal_error("-irobf-cert-file: malformed PEM (no header newline)");
+  size_t End = Bytes.find("-----END", HdrEnd);
+  StringRef Body = Bytes.substr(HdrEnd + 1,
+                                (End == StringRef::npos ? Bytes.size() : End) -
+                                    (HdrEnd + 1));
+  std::string B64;
+  for (char C : Body)
+    if (C != '\n' && C != '\r' && C != ' ' && C != '\t')
+      B64.push_back(C);
+  std::vector<char> Out;
+  if (Error E = decodeBase64(B64, Out)) {
+    consumeError(std::move(E));
+    report_fatal_error("-irobf-cert-file: PEM base64 decode failed");
+  }
+  return std::vector<uint8_t>(Out.begin(), Out.end());
+}
+
+static void ensureCertMix() {
+  if (CertMixReady)
+    return;
+  CertMixReady = true; // 只算一次（即便下面 report_fatal_error 也不会再进）。
+  if (!EnableCertBind)
+    return;
+  // 先落到 std::string：cl::opt<std::string> 仅经用户定义转换给出 std::string，直接对其调
+  // .empty() 或再隐式转 Twine/StringRef 需两次用户转换（不允许）。与本文件 BindPackage 同法。
+  const std::string File = CertBindFile;
+  if (File.empty())
+    report_fatal_error("-irobf-cert-bind requires -irobf-cert-file=<cert.der>");
+  ErrorOr<std::unique_ptr<MemoryBuffer>> Buf = MemoryBuffer::getFile(File);
+  if (!Buf)
+    report_fatal_error(Twine("-irobf-cert-file: cannot read '") + File + "'");
+  std::vector<uint8_t> Der = ndkpPemToDerIfNeeded((*Buf)->getBuffer());
+  if (Der.empty())
+    report_fatal_error("-irobf-cert-file: empty certificate");
+  CryptoUtils Crypto;
+  unsigned char Sha[32];
+  Crypto.sha256(Der.data(), static_cast<unsigned long>(Der.size()), Sha);
+  auto le64 = [](const unsigned char *b) -> uint64_t {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i)
+      v |= static_cast<uint64_t>(b[i]) << (8 * i);
+    return v;
+  };
+  CertMixLo = le64(Sha) ^ le64(Sha + 16);
+  CertMixHi = le64(Sha + 8) ^ le64(Sha + 24);
+}
+
+bool llvm::isCertBindEnabled() { return EnableCertBind; }
+uint64_t llvm::getCertBindLo() {
+  ensureCertMix();
+  return CertMixLo;
+}
+uint64_t llvm::getCertBindHi() {
+  ensureCertMix();
+  return CertMixHi;
+}
 
 bool llvm::isIRObfuscationEnabled() {
   return EnableIRObfuscation || EnableIndirectBr || EnableIndirectCall ||
@@ -176,7 +284,7 @@ bool llvm::isIRObfuscationEnabled() {
          EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
          EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
          EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
-         EnableHideMaps || EnableFakeMaps;
+         EnableHideMaps || EnableFakeMaps || EnableSelfCheck || EnableCertBind;
 }
 
 // Release-mode（即未开 -irobf-debug）的落地成果物去指纹：在所有混淆 pass 跑完后、
@@ -295,7 +403,8 @@ struct ObfuscationPassManager : public ModulePass {
                   EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
                   EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
                   EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
-                  EnableHideMaps || EnableFakeMaps;
+                  EnableHideMaps || EnableFakeMaps || EnableSelfCheck ||
+                  EnableCertBind;
     if (hasObf)
       EnableIRObfuscation = true;
 
@@ -353,6 +462,17 @@ struct ObfuscationPassManager : public ModulePass {
       add(llvm::createHideMapsPass());
     if (EnableFakeMaps)
       add(llvm::createFakeMapsPass());
+
+    // 自校验最后：读取 VMP 产出的 gv_code_seg_<fn> 最终字节，注入加载期完整性校验。
+    // 必须在 VMP 之后（此处检测块 = run(M) 末尾即满足）；仍早于 run(M) 之后的段改名。
+    if (EnableSelfCheck)
+      add(llvm::createSelfCheckPass());
+
+    // 证书绑定的 VMP 密钥折入必须排在 SelfCheck 之后：SelfCheck 用 isa<ConstantInt>
+    // 命中入口桩密钥常量存，若 CertBind 先跑把值改成非常量会令 SelfCheck 静默漏掉。
+    // CertBind 按 !ndkp.vmpkey.entry 标记命中、包裹当前值，故与 SelfCheck 顺序无关地叠加。
+    if (EnableCertBind)
+      add(llvm::createCertBindPass());
 
     bool Changed = run(M);
     // Release 模式（默认，未开 -irobf-debug）：所有 pass 跑完后统一去指纹。

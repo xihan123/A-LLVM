@@ -1174,3 +1174,17 @@ int CryptoUtils::sha256(const char *msg, unsigned char *hash) {
   memcpy(hash, tmp, 32);
   return 0;
 }
+
+// 定长二进制哈希：SHA-256(msg[0..len))，不 strlen，可安全用于含 NUL 的证书 DER。
+int CryptoUtils::sha256(const unsigned char *msg, unsigned long len,
+                        unsigned char *hash) {
+  unsigned char tmp[32];
+  sha256_state md;
+
+  sha256_init(&md);
+  sha256_process(&md, msg, len);
+  sha256_done(&md, tmp);
+
+  memcpy(hash, tmp, 32);
+  return 0;
+}
