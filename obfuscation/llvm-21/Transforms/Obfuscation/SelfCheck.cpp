@@ -11,15 +11,27 @@
 //   - 因此期望哈希可在本 Pass 内直接算出并内嵌 —— 无需链接后回填工具，也无需重定位
 //     归一化（数据段纯常量，文件字节 == 内存字节）。
 //
-// 注入一个 ELF 构造器（llvm.global_ctors）：加载期对每个 blob 做 FNV-1a64，用 volatile
-// 读（关键 —— blob 是常量，非 volatile 会被优化器对已知常量把哈希折成恒真、删掉校验），
-// 与内嵌的期望值比较，不符即调用 DetectUtils 的 report/kill（getpid+kill(SIGKILL)+brk）
-// 终止进程（分支式响应）。
+// 注入一个 ELF 构造器（llvm.global_ctors，优先级 101）：加载期对每个 blob 做 FNV-1a64
+// （volatile 读 —— blob 是常量，非 volatile 会被优化器对已知常量把校验折成恒真、删掉），
+// 与内嵌的期望值比较。
+//
+// 【响应机制 = 两层】
+//   ① 主：不符即调 DetectUtils 的 report/kill（getpid+kill(SIGKILL)+brk）加载期终止进程
+//      （分支式响应，可被 patch，但真机验证确实生效）。
+//   ② 附（纵深防御，已真机验证生效）：把各 blob 运行期哈希 XOR 累加进可写全局
+//      ndkp_selfcheck_runtime_acc，并把 VMP 入口桩里 `store realkey ->
+//      vmp_shared_vm_function_key` 改写为 `store (realkey^expected_acc)^load(runtime_acc)`
+//      —— 未篡改时 runtime_acc==expected_acc 抵消回 realkey；篡改任一 blob 字节则
+//      runtime_acc≠expected_acc → 存入的 key 错 → VMP 解释器 ChaCha 解密出乱码 opcode →
+//      崩溃。**这层是真正的密码学绑定、非分支门禁**：即便 ① 的 kill 分支被 patch 掉，篡改
+//      仍会经此层破坏执行（真机实测：中和 kill 后，未篡改仍正确、篡改即 rc=137）。绕过需
+//      还原原始 blob 字节。前提是 VMP 目标真正经解释器执行——由 VMProtectPreparePass
+//      （PipelineStartEP 早期 NoInline+compiler.used 标记）保证其不被 inline/常量折叠掉。
 //
 // 增量价值（相对 VMP 已有机制）：VMP 每 BB 加密由静态偏移派生密钥、无 BB 体 MAC、单
 // 字节翻转不跨 BB 扩散 —— operand-level 字节翻转可静默解成合法但错误的指令并执行、无
-// 任何检查触发。本全量 blob 认证正好补上该缺口。范围诚实声明：只覆盖 VMP 字节码数据，
-// 不覆盖解释器 .text 或非 VMP 代码。
+// 任何检查触发。本全量 blob 认证（加载期哈希+kill）正好补上该缺口。范围诚实声明：只覆盖
+// VMP 字节码数据，不覆盖解释器 .text 或非 VMP 代码。
 //
 //===----------------------------------------------------------------------===//
 
@@ -70,8 +82,9 @@ struct SelfCheck : public ModulePass {
   bool runOnModule(Module &M) override;
 
 private:
-  // 发射 void @ndkp_selfcheck_one(ptr base, i64 len, i64 expected)：
-  //   H = FNV-1a64(volatile base[0..len))；若 H != expected 则调 KillFn 终止。
+  // 发射 i64 @ndkp_selfcheck_one(ptr base, i64 len, i64 expected)：
+  //   H = FNV-1a64(volatile base[0..len))；若 H != expected 则调 KillFn 终止（主响应），
+  //   否则返回 H（供 ctor XOR 累加进 runtime_acc 的纵深防御层）。
   Function *createCheckOneFunc(Module &M, Function *KillFn);
 };
 
@@ -81,13 +94,12 @@ char SelfCheck::ID = 0;
 
 Function *SelfCheck::createCheckOneFunc(Module &M, Function *KillFn) {
   LLVMContext &Ctx = M.getContext();
-  Type *VoidTy = Type::getVoidTy(Ctx);
   Type *Int8Ty = Type::getInt8Ty(Ctx);
   Type *Int64Ty = Type::getInt64Ty(Ctx);
   PointerType *PtrTy = PointerType::get(Ctx, 0);
 
   FunctionType *FuncTy =
-      FunctionType::get(VoidTy, {PtrTy, Int64Ty, Int64Ty}, false);
+      FunctionType::get(Int64Ty, {PtrTy, Int64Ty, Int64Ty}, false);
   Function *Func = Function::Create(
       FuncTy, GlobalValue::InternalLinkage,
       M.getDataLayout().getProgramAddressSpace(), "ndkp_selfcheck_one", &M);
@@ -130,7 +142,7 @@ Function *SelfCheck::createCheckOneFunc(Module &M, Function *KillFn) {
   H->addIncoming(HMul, BodyBB);
   B.CreateBr(LoopBB);
 
-  // 比较：H != expected ⇒ 篡改。
+  // 比较：H != expected ⇒ 篡改 ⇒ kill（主响应）。
   B.SetInsertPoint(DoneBB);
   Value *Mismatch = B.CreateICmpNE(H, Expected);
   B.CreateCondBr(Mismatch, TamperBB, OkBB);
@@ -139,8 +151,9 @@ Function *SelfCheck::createCheckOneFunc(Module &M, Function *KillFn) {
   B.CreateCall(KillFn);
   B.CreateUnreachable();
 
+  // 未篡改：返回哈希（供纵深防御层 XOR 累加）。
   B.SetInsertPoint(OkBB);
-  B.CreateRetVoid();
+  B.CreateRet(H);
 
   return Func;
 }
@@ -187,11 +200,24 @@ bool SelfCheck::runOnModule(Module &M) {
   Type *VoidTy = Type::getVoidTy(Ctx);
   Type *Int64Ty = Type::getInt64Ty(Ctx);
 
-  // 复用 DetectUtils 的 report/kill（getpid+kill(SIGKILL)+brk），分支式响应。
+  // expected_acc = XOR_i FNV1a64(blob_i)（编译期）。仅供纵深防御层折进密钥常量。
+  uint64_t ExpectedAcc = 0;
+  for (const Blob &Bl : Blobs)
+    ExpectedAcc ^= Bl.Expected;
+
+  // 运行期累加器（纵深防御层）：可写、非常量、零初值。ctor 写入 XOR_i runtime-FNV(blob_i)。
+  // 非 gv_code_seg_ 名 + 非常量 => 不被上面的 blob 扫描命中；有 volatile 存/取 => 不被 DCE。
+  GlobalVariable *RuntimeAccGV = new GlobalVariable(
+      M, Int64Ty, /*isConstant=*/false, GlobalValue::InternalLinkage,
+      ConstantInt::get(Int64Ty, 0), "ndkp_selfcheck_runtime_acc");
+  RuntimeAccGV->setSection(".AProtect.data");
+
+  // 复用 DetectUtils 的 report/kill（getpid+kill(SIGKILL)+brk），主响应。
   Function *KillFn = DetectUtils::createReportAndKillFunc(M, "SelfCheck");
   Function *CheckOne = createCheckOneFunc(M, KillFn);
 
-  // 构造器入口：逐 blob 调 ndkp_selfcheck_one(blobPtr, len, expected)。
+  // 构造器入口：逐 blob 调 ndkp_selfcheck_one（不符即 kill；否则返回哈希），并把返回的哈希
+  // XOR 累加进 runtime_acc（纵深防御层）。
   FunctionType *CtorFnTy = FunctionType::get(VoidTy, {}, false);
   Function *CtorFn = Function::Create(
       CtorFnTy, GlobalValue::InternalLinkage,
@@ -199,14 +225,48 @@ bool SelfCheck::runOnModule(Module &M) {
   CtorFn->addFnAttr(Attribute::NoInline);
   BasicBlock *BB = BasicBlock::Create(Ctx, "entry", CtorFn);
   IRBuilder<> B(BB);
-  for (const Blob &Bl : Blobs)
-    B.CreateCall(CheckOne, {Bl.GV, ConstantInt::get(Int64Ty, Bl.Len),
-                            ConstantInt::get(Int64Ty, Bl.Expected)});
+  Value *Acc = ConstantInt::get(Int64Ty, 0);
+  for (const Blob &Bl : Blobs) {
+    Value *H = B.CreateCall(CheckOne, {Bl.GV, ConstantInt::get(Int64Ty, Bl.Len),
+                                       ConstantInt::get(Int64Ty, Bl.Expected)});
+    Acc = B.CreateXor(Acc, H);
+  }
+  // volatile 存：阻止 IPO/GVN 把 runtime_acc 证成常量、折掉入口桩里的 XOR。
+  B.CreateStore(Acc, RuntimeAccGV)->setVolatile(true);
   B.CreateRetVoid();
 
   // 注册为 ELF 构造器（.init_array）。优先级 101：在应用 ctor（默认 65535）之前、
   // 加载期即校验；101 避开 0..100 的系统/ABI 保留区。
   appendToGlobalCtors(M, CtorFn, /*Priority=*/101);
+
+  // 纵深防御层：把每个 VMP 函数入口桩里“store <realkey const> -> vmp_shared_vm_function_key”
+  // 改写为 store (realkey ^ expected_acc) ^ load(runtime_acc)。isa<ConstantInt> 精确命中
+  // aVMP.cpp 入口桩的常量存（3973 附近），排除 vm_restore_call_frame 的“存 load 出的值”。
+  // 未篡改时 runtime_acc==expected_acc 抵消回 realkey；篡改任一 blob 字节则 key 错 →
+  // 解释器 ChaCha 解出乱码 opcode → 崩溃。真正的密码学绑定、非分支门禁：即便上面的 kill
+  // 被 patch，篡改仍经此层破坏执行（真机：中和 kill 后未篡改正确、篡改 rc=137）。前提是
+  // VMP 目标真正经解释器执行——由 VMProtectPreparePass 保证不被 inline/常量折叠。
+  if (GlobalVariable *KeyGV =
+          M.getGlobalVariable("vmp_shared_vm_function_key", /*AllowInternal=*/true)) {
+    Constant *ExpAccC = ConstantInt::get(Int64Ty, ExpectedAcc);
+    SmallVector<StoreInst *, 8> Stores;
+    for (User *U : KeyGV->users())
+      if (auto *SI = dyn_cast<StoreInst>(U))
+        if (SI->getPointerOperand() == KeyGV &&
+            isa<ConstantInt>(SI->getValueOperand()))
+          Stores.push_back(SI);
+    for (StoreInst *SI : Stores) {
+      IRBuilder<> IB(SI);
+      LoadInst *Ld = IB.CreateLoad(Int64Ty, RuntimeAccGV);
+      Ld->setVolatile(true);
+      Value *Biased = IB.CreateXor(SI->getValueOperand(), ExpAccC);
+      SI->setOperand(0, IB.CreateXor(Biased, Ld));
+    }
+    if (isIRObfuscationDebugEnabled())
+      errs() << "[NDKP] selfcheck: folded integrity into " << Stores.size()
+             << " VM entry-stub key store(s) (defense-in-depth)\n";
+  }
+
   return true;
 }
 

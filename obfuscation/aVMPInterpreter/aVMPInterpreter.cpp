@@ -464,6 +464,28 @@ static uint8_t vm_trace_layout_id;
 static uint8_t vm_fault_layout_id;
 static uint8_t vm_debug_layout_id;
 
+// ChaCha 密钥流缓存（性能）。keystream 字节是元组
+// (function_key, payload_seed, chain_seed, bb_offset, payload_index) 的纯函数：
+//   - key_words/nonce_words 仅依赖前 4 项（KDF 输入，每 BB 恒定）；
+//   - block 依赖 key/nonce + block_index==payload_index>>6（调度只置换块内低 6 位 lane）。
+// 故按“元组”做记忆化即对递归/重入/每函数克隆全部正确：元组变化（新 BB 或
+// vm_push/restore_call_frame 换 seed）自动失效重算，两个不同上下文绝不会在同一元组上
+// 却需要不同字节。material_valid=key/nonce 对当前元组有效；block_valid=block 对
+// (元组, block_index) 有效。存储类与其它 VM 状态一致（非 TLS，单次调用模型）。
+typedef struct {
+	uint64_t fn_key;
+	uint64_t payload_seed;
+	uint64_t chain_seed;
+	uint32_t bb_offset;
+	uint32_t block_index;
+	uint8_t material_valid;
+	uint8_t block_valid;
+	uint32_t key_words[8];
+	uint32_t nonce_words[3];
+	uint8_t block[64];
+} vm_chacha_cache_t;
+static vm_chacha_cache_t vm_chacha_cache;
+
 #define VM_LAYOUT_VARIANT_COUNT 24
 static const uint8_t vm_layout_permutations[VM_LAYOUT_VARIANT_COUNT][4] = {
 	{0, 1, 2, 3}, {0, 1, 3, 2}, {0, 2, 1, 3}, {0, 2, 3, 1},
@@ -1209,20 +1231,34 @@ static VMP_RUNTIME_CRYPTO_ATTR uint8_t vmp_schedule_mask(uint64_t function_key, 
 static VMP_RUNTIME_CRYPTO_ATTR uint8_t chacha20_byte_at(uint64_t function_key, uint64_t payload_seed,
 	                           uint64_t chain_seed, uint32_t bb_offset,
 	                           uint32_t payload_index) {
-	uint32_t key_words[8];
-	uint32_t nonce_words[3];
-	uint8_t block[64];
+	vm_chacha_cache_t *c = &vm_chacha_cache;
+	// KDF 输入元组变了（新 BB / 调用返回换 seed）才重算 key/nonce —— 原本每字节都算。
+	if (!c->material_valid || c->fn_key != function_key ||
+	    c->payload_seed != payload_seed || c->chain_seed != chain_seed ||
+	    c->bb_offset != bb_offset) {
+		derive_chacha_material(function_key, payload_seed, chain_seed, bb_offset,
+		                      c->key_words, c->nonce_words);
+		c->fn_key = function_key;
+		c->payload_seed = payload_seed;
+		c->chain_seed = chain_seed;
+		c->bb_offset = bb_offset;
+		c->material_valid = 1;
+		c->block_valid = 0; // block 依赖 key/nonce，material 变则必须重算
+	}
 	uint32_t scheduled_index =
 	    vmp_schedule_index(function_key, payload_seed, chain_seed, bb_offset,
 	                       payload_index);
-	uint32_t block_index = scheduled_index / 64U;
-	uint32_t block_offset = scheduled_index % 64U;
-	derive_chacha_material(function_key, payload_seed, chain_seed, bb_offset,
-	                      key_words, nonce_words);
-	chacha20_block(key_words, block_index, nonce_words, block);
+	uint32_t block_index = scheduled_index >> 6;   // == payload_index >> 6
+	uint32_t block_offset = scheduled_index & 63U;
+	// 同一 64B 块被相邻 64 个位置共享 —— 仅当 block_index 变化才跑整块 ChaCha20。
+	if (!c->block_valid || c->block_index != block_index) {
+		chacha20_block(c->key_words, block_index, c->nonce_words, c->block);
+		c->block_index = block_index;
+		c->block_valid = 1;
+	}
 	uint8_t mask = vmp_schedule_mask(function_key, payload_seed, chain_seed,
 	                                 bb_offset, payload_index);
-	uint8_t out = block[block_offset] ^ mask;
+	uint8_t out = c->block[block_offset] ^ mask;
 	return out;
 }
 
@@ -2951,6 +2987,10 @@ void vm_interpreter() {
 			vm_code_state = derive_vm_seed(vm_function_key, bb_token);
 			vm_block_chain_state = derive_chain_seed(vm_function_key, bb_token,
 			                                        (uint32_t)current_bb_id);
+			// 新 BB：KDF 输入元组已变，主动失效 ChaCha 缓存（清晰/DiD；chacha20_byte_at
+			// 内的元组校验才是正确性所依赖的机制，覆盖 BB 内 CALL 返回换 seed 的情形）。
+			vm_chacha_cache.material_valid = 0;
+			vm_chacha_cache.block_valid = 0;
 			expected_bb_token = 0;
 			is_a_new_bb = 0;
 			vm_debug_log_ip_stage("vm-new-bb-seeds-ready", ip);

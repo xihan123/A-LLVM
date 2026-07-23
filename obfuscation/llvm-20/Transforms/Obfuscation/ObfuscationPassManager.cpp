@@ -171,6 +171,7 @@ bool llvm::isIRObfuscationDebugEnabled() { return EnableIRObfuscationDebug; }
 
 std::string llvm::getVMFunctionsList() { return VMFunctions; }
 bool llvm::isForceNoInlineEnabled() { return ForceNoInline; }
+bool llvm::isVMProtectEnabled() { return EnableVMProtect; }
 
 // bind 蕴含 perkey：开启包名绑定即启用 ChaCha8 派生密钥路径。
 bool llvm::isCsePerKeyEnabled() { return EnableStrPerKey || EnableStrBind; }

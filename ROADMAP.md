@@ -44,12 +44,12 @@
 - [x] translator eligibility 校验（拒绝向量/token/异常处理函数，fail-safe 跳过）
 - [x] 本地 IR + clang codegen 验证（trivial/scalar-loop/全 flag 同开；产出原生 aarch64 `.so`）
 - [x] 修复 `vmp_debug_id` 链接（解释器该符号漏了 `extern "C"`→C++ 修饰名，pass 的 `getFunction` 找不到→undefined symbol；曾阻塞任何 VMP 二进制链接）。真机 arm64-v8a 语义验证：单函数（compute 循环 / 返回字符串）+ 与 perkey/bind/fla 组合 + 纯 VMP+fla 均正确
-- [~] 多函数规模化：真机 arm64-v8a 三函数嵌套虚拟化（`top→mid→leaf` 互调 + `main` 调用三者，各自独立 `gv_code_seg_*`）plain==VMP 输出一致；性能/体积实测——compute 循环 **~1.0× 运行时**（块体以原生 handler 存于解释器、仅控制流虚拟化，已核 `ror #51`/FNV 素数为原生），体积 **+~1.8MB 固定解释器/模块**、每增一函数 ~数十 KB。剩：各 ABI 解释器扩展（arm/x86/x86_64，当前仅 aarch64 解释器 bitcode）；控制流密集函数的开销刻画
+- [x] 多函数规模化 + **真正经解释器执行**：关键修复 `VMProtectPreparePass`（`PipelineStartEP` 早期给 VMP 目标打 `NoInline`+`llvm.compiler.used`，令 IPSCCP 停止参数追踪→调用点不被折叠）——此前"~1.0× 原生"实为函数被 inline/常量折叠掉、VM 桩死代码、根本没走 VM。同时修复 translator 循环/PHI 前向引用 bug（`basicblock_map` operator[] 污染致分支全跳 BB0 死循环；PHI 回边值未分配槽；PHI bb_id 未回填）。真机 arm64-v8a：直线/循环(LCG,FNV)/递归(fib)/内存(alloca,load,store,gep)/switch/VM→native/float 全 == 原生；旧"compute 挂死"已修。性能：真解释后 hot 循环 ~10000× 原生（故仅虚拟化小型/关键函数）；向量指令拒绝→安全回退原生。体积 +~1.8MB；剩：各 ABI 解释器扩展（当前仅 aarch64 bitcode）
 
 ## 阶段 1d / 2b — 编译期扩展保护
 
 - [x] 反分析检测注入 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`
-- [x] 代码完整性自校验 `-irobf-selfcheck` / `NDKP_SELFCHECK`（VMP 字节码内部校验：编译期对每函数字节码 blob `gv_code_seg_<fn>` 算 FNV-1a64 内嵌、注入 ELF 构造器加载期 volatile 重算比对、篡改即 kill；无需链接后回填工具/重定位归一化。真机 arm64-v8a：happy-path 正确、篡改即 SIGKILL、VMP-only 同篡改静默放过。待 CI patch-check）
+- [x] 代码完整性自校验 `-irobf-selfcheck` / `NDKP_SELFCHECK`（VMP 字节码内部校验：编译期对每函数字节码 blob `gv_code_seg_<fn>` 算 FNV-1a64 内嵌、注入 ELF 构造器加载期 volatile 重算比对、不符即 kill(SIGKILL)（主响应）；纵深防御层把哈希折进 VMP 密钥全局 `store (realkey^expected_acc)^runtime_acc`——**`VMProtectPreparePass` 修复 VMP 绕过后本层真机验证生效**：篡改→key 错→解释器解出乱码→崩溃，真正的密码学绑定非分支门禁（中和 kill 后未篡改仍正确、篡改即 rc=137）。真机 arm64-v8a：happy-path 正确、篡改即 SIGKILL。
 - [x] 字符串加密强化 `-irobf-cse-perkey` / `-irobf-cse-bind` / `NDKP_STR_BIND`
 - [ ] 函数级 SO 自加密 `-irobf-pack` / `NDKP_PACK` + `tools/ndkp-postlink` + `runtime/ndkp_rt.c`
 - [ ] `include/ndkp.h` 增加扩展宏；新增 `tests/anti-tamper`、`tests/pack-roundtrip`
