@@ -44,20 +44,37 @@ CERT="$OUT/cert.der"
 if ! command -v openssl >/dev/null 2>&1; then
   echo "[skip] 未找到 openssl，无法生成测试证书 DER，跳过证书绑定测试"; exit 0
 fi
-openssl req -x509 -newkey rsa:2048 -keyout /dev/null -nodes -days 1 \
-  -subj "/CN=ndkp-cert-bind-test" -outform DER -out "$CERT" >/dev/null 2>&1
+# 私钥写到临时文件：Windows 原生 openssl 不接受 -keyout /dev/null。
+if ! openssl req -x509 -newkey rsa:2048 -keyout "$OUT/key.pem" -nodes -days 1 \
+      -subj "/CN=ndkp-cert-bind-test" -outform DER -out "$CERT" >/dev/null 2>&1 \
+   || [[ ! -s "$CERT" ]]; then
+  echo "[FAIL] openssl 未能生成测试证书 DER"; exit 1
+fi
 
-CERTBIND="-mllvm -irobf-cert-bind -mllvm -irobf-cert-file=$CERT"
+# Git Bash/MSYS 不会转换「= 后」的路径；传给原生 clang.exe 时需 Windows 路径。
+# -I 也拆成独立参数，让 MSYS 自动转换 include 目录（-I/path 整段不会被转换）。
+CERT_FOR_CLANG="$CERT"
+INC_FOR_CLANG="$INC"
+case "$HOST" in
+  windows-*)
+    if command -v cygpath >/dev/null 2>&1; then
+      CERT_FOR_CLANG="$(cygpath -m "$CERT")"
+      INC_FOR_CLANG="$(cygpath -m "$INC")"
+    fi
+    ;;
+esac
+# 单独引住 -irobf-cert-file=…，避免路径含空格时被词法拆开。
+CERTBIND_ARGS=(-mllvm -irobf-cert-bind -mllvm "-irobf-cert-file=${CERT_FOR_CLANG}")
 
 # 编入 helper（提供 ndkp_certbind_mix）以满足 --no-undefined，即真实集成方式。
-"$CLANG" $TGT -mllvm -irobf -mllvm -irobf-cse $CERTBIND -I"$INC" \
+"$CLANG" $TGT -mllvm -irobf -mllvm -irobf-cse "${CERTBIND_ARGS[@]}" -I "$INC_FOR_CLANG" \
   -o "$OUT/cse_cert.so" "$SRC" "$HELPER"
 # cse-only 无需 helper（不引用 ndkp_certbind_mix）。
 "$CLANG" $TGT -mllvm -irobf -mllvm -irobf-cse \
   -o "$OUT/cse_only.so" "$SRC"
 # vmp + cert-bind：VMP 密钥折入路径亦应建运行期基座。
 "$CLANG" $TGT -mllvm -irobf -mllvm -irobf-vmp \
-  -mllvm -irobf-vm_functions=ndkp_secret_len $CERTBIND -I"$INC" \
+  -mllvm -irobf-vm_functions=ndkp_secret_len "${CERTBIND_ARGS[@]}" -I "$INC_FOR_CLANG" \
   -o "$OUT/vmp_cert.so" "$SRC" "$HELPER"
 
 has_sym() { "$NM" "$1" 2>/dev/null | grep -q "$2"; }
@@ -99,7 +116,7 @@ else
 fi
 
 # 6) 缺 -irobf-cert-file ⇒ 构建 fail-closed（预期 clang 非零退出）
-if "$CLANG" $TGT -mllvm -irobf -mllvm -irobf-cse -mllvm -irobf-cert-bind -I"$INC" \
+if "$CLANG" $TGT -mllvm -irobf -mllvm -irobf-cse -mllvm -irobf-cert-bind -I "$INC_FOR_CLANG" \
      -o "$OUT/nofile.so" "$SRC" "$HELPER" >/dev/null 2>&1; then
   echo "[FAIL] -irobf-cert-bind 缺 -irobf-cert-file 竟构建成功（应 fail-closed）"; fail=1
 else
