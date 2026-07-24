@@ -24,10 +24,16 @@ OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 command -v openssl >/dev/null 2>&1 || { echo "[skip] 无 openssl，跳过证书绑定往返"; exit 0; }
 CERT="$OUT/cert.der"
 # 私钥写临时文件：Windows 原生 openssl 不接受 -keyout /dev/null。
+# -subj 用 //CN=…：Git Bash/MSYS 会把 "/CN=…" 误当成 Unix 路径转成
+# "C:/Program Files/Git/CN=…"，导致 openssl 报 subject name 格式错误；
+# 双斜杠是 MSYS 约定写法，传给原生程序时还原为 /CN=…（Linux 也接受）。
 if ! openssl req -x509 -newkey rsa:2048 -keyout "$OUT/key.pem" -nodes -days 1 \
-      -subj "/CN=ndkp-cert-roundtrip" -outform DER -out "$CERT" >/dev/null 2>&1 \
+      -subj "//CN=ndkp-cert-roundtrip" -outform DER -out "$CERT" \
+      >/dev/null 2>"$OUT/openssl.err" \
    || [[ ! -s "$CERT" ]]; then
-  echo "[FAIL] openssl 未能生成测试证书 DER"; exit 1
+  echo "[FAIL] openssl 未能生成测试证书 DER"
+  sed 's/^/  /' "$OUT/openssl.err" 2>/dev/null || true
+  exit 1
 fi
 
 # stub：按与 pass（ObfuscationPassManager ensureCertMix）/ runtime（ndkp_apkcert.cpp）相同的
