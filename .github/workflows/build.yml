@@ -53,222 +53,222 @@ jobs:
       DOWNLOAD_URL: ${{ inputs.download_url }}
       LLVM_TARGETS: ${{ inputs.targets }}
     steps:
-      - uses: actions/checkout@v7
+    - uses: actions/checkout@v7
 
-      - name: 自动获取所选通道的最新 NDK
-        if: ${{ inputs.ndk_tag == '' && inputs.internal == '' }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/discover_ndk.py --latest-channel "$CHANNEL"
+    - name: 自动获取所选通道的最新 NDK
+      if: ${{ inputs.ndk_tag == '' && inputs.internal == '' }}
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: python scripts/discover_ndk.py --latest-channel "$CHANNEL"
 
-      - name: 计算 our_tag / download_url 默认值
-        id: vars
-        run: |
-          set -euo pipefail
-          [ -n "$NDK_TAG" ] && [ -n "$INTERNAL" ] || {
-            echo "::error::ndk_tag 与 internal 必须同时填写，或同时留空自动获取最新版"; exit 1;
-          }
-          OUR_TAG="${{ inputs.our_tag }}"
-          if [ -z "$OUR_TAG" ]; then
-            BASE="${NDK_TAG%%-*}"
-            SUFFIX="${NDK_TAG#"$BASE"}"
-            SUFFIX="${SUFFIX#-}"
-            OUR_TAG="${BASE}-${INTERNAL}${SUFFIX:+-$SUFFIX}${PATCHSET_VERSION:+-$PATCHSET_VERSION}"
-          fi
-          URL="${DOWNLOAD_URL}"
-          if [ -z "$URL" ]; then
-            case "$HOST" in
-              windows-x86_64) HOSTFILE=windows.zip ;;
-              *)              HOSTFILE=linux.zip ;;
-            esac
-            URL="https://dl.google.com/android/repository/android-ndk-${NDK_TAG}-${HOSTFILE}"
-          fi
-          echo "our_tag=$OUR_TAG" >> "$GITHUB_OUTPUT"
-          echo "download_url=$URL" >> "$GITHUB_OUTPUT"
-          echo "OUR_TAG=$OUR_TAG" >> "$GITHUB_ENV"
-
-      - name: 校验 host
-        run: |
-          case "$MODE" in
-            build|repack) ;;
-            *) echo "::error::不支持的 mode=$MODE（仅 build / repack）"; exit 1 ;;
-          esac
-          if [ "$MODE" = build ]; then
-            for target in AArch64 ARM X86; do
-              case ";$LLVM_TARGETS;" in
-                *";$target;"*) ;;
-                *) echo "::error::targets 缺少四 ABI 测试所需后端：$target"; exit 1 ;;
-              esac
-            done
-          fi
+    - name: 计算 our_tag / download_url 默认值
+      id: vars
+      run: |
+        set -euo pipefail
+        [ -n "$NDK_TAG" ] && [ -n "$INTERNAL" ] || {
+          echo "::error::ndk_tag 与 internal 必须同时填写，或同时留空自动获取最新版"; exit 1;
+        }
+        OUR_TAG="${{ inputs.our_tag }}"
+        if [ -z "$OUR_TAG" ]; then
+          BASE="${NDK_TAG%%-*}"
+          SUFFIX="${NDK_TAG#"$BASE"}"
+          SUFFIX="${SUFFIX#-}"
+          OUR_TAG="${BASE}-${INTERNAL}${SUFFIX:+-$SUFFIX}${PATCHSET_VERSION:+-$PATCHSET_VERSION}"
+        fi
+        URL="${DOWNLOAD_URL}"
+        if [ -z "$URL" ]; then
           case "$HOST" in
-            linux-x86_64|windows-x86_64) echo "host=$HOST 受支持" ;;
-            *) echo "::error::不支持的 host=$HOST（仅 linux-x86_64 / windows-x86_64；macOS 属后续阶段）"; exit 1 ;;
+            windows-x86_64) HOSTFILE=windows.zip ;;
+            *)              HOSTFILE=linux.zip ;;
           esac
+          URL="https://dl.google.com/android/repository/android-ndk-${NDK_TAG}-${HOSTFILE}"
+        fi
+        echo "our_tag=$OUR_TAG" >> "$GITHUB_OUTPUT"
+        echo "download_url=$URL" >> "$GITHUB_OUTPUT"
+        echo "OUR_TAG=$OUR_TAG" >> "$GITHUB_ENV"
 
-      - name: 清理磁盘空间
-        if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: true
-          large-packages: false
+    - name: 校验 host
+      run: |
+        case "$MODE" in
+          build|repack) ;;
+          *) echo "::error::不支持的 mode=$MODE（仅 build / repack）"; exit 1 ;;
+        esac
+        if [ "$MODE" = build ]; then
+          for target in AArch64 ARM X86; do
+            case ";$LLVM_TARGETS;" in
+              *";$target;"*) ;;
+              *) echo "::error::targets 缺少四 ABI 测试所需后端：$target"; exit 1 ;;
+            esac
+          done
+        fi
+        case "$HOST" in
+          linux-x86_64|windows-x86_64) echo "host=$HOST 受支持" ;;
+          *) echo "::error::不支持的 host=$HOST（仅 linux-x86_64 / windows-x86_64；macOS 属后续阶段）"; exit 1 ;;
+        esac
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
+    - name: 清理磁盘空间
+      if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
+      uses: jlumbroso/free-disk-space@v1.3.1
+      with:
+        tool-cache: true
+        large-packages: false
 
-      - name: 下载并解压官方 NDK
-        run: |
-          set -euo pipefail
-          curl -fL --retry 3 -o ndk.zip "${{ steps.vars.outputs.download_url }}"
-          echo "下载 sha256: $(sha256sum ndk.zip | cut -d' ' -f1)"
-          if [ "$RUNNER_OS" = "Windows" ]; then 7z x -y ndk.zip >/dev/null; else unzip -q ndk.zip; fi
-          NDK_DIR="$(find . -maxdepth 1 -type d -name 'android-ndk-*' | head -n1)"
-          [ -n "$NDK_DIR" ] || { echo "::error::未找到解压后的 NDK 目录"; exit 1; }
-          NDK_DIR="$(cd "$NDK_DIR" && pwd -P)"
-          echo "NDK_DIR=$NDK_DIR" >> "$GITHUB_ENV"
-          echo "解压得到：$NDK_DIR"
+    - uses: actions/setup-python@v7
+      with:
+        python-version: "3.11"
 
-      # ---------------- build 模式：自建 patched clang ----------------
-      - name: 安装宿主构建工具链（Linux）
-        if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang lld ninja-build cmake python3 zlib1g-dev
+    - name: 下载并解压官方 NDK
+      run: |
+        set -euo pipefail
+        curl -fL --retry 3 -o ndk.zip "${{ steps.vars.outputs.download_url }}"
+        echo "下载 sha256: $(sha256sum ndk.zip | cut -d' ' -f1)"
+        if [ "$RUNNER_OS" = "Windows" ]; then 7z x -y ndk.zip >/dev/null; else unzip -q ndk.zip; fi
+        NDK_DIR="$(find . -maxdepth 1 -type d -name 'android-ndk-*' | head -n1)"
+        [ -n "$NDK_DIR" ] || { echo "::error::未找到解压后的 NDK 目录"; exit 1; }
+        NDK_DIR="$(cd "$NDK_DIR" && pwd -P)"
+        echo "NDK_DIR=$NDK_DIR" >> "$GITHUB_ENV"
+        echo "解压得到：$NDK_DIR"
 
-      - name: 配置 MSVC 环境（Windows）
-        if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
-        uses: ilammy/msvc-dev-cmd@v1
+    # ---------------- build 模式：自建 patched clang ----------------
+    - name: 安装宿主构建工具链（Linux）
+      if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          clang lld ninja-build cmake python3 zlib1g-dev
 
-      - name: 安装 ninja（Windows）
-        if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
-        uses: seanmiddleditch/gha-setup-ninja@v6
+    - name: 配置 MSVC 环境（Windows）
+      if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
+      uses: ilammy/msvc-dev-cmd@v1
 
-      - name: 解析官方编译器的上游 LLVM 基线
-        if: ${{ inputs.mode == 'build' }}
-        id: loc
-        run: |
-          python scripts/locate_llvm.py --ndk-dir "$NDK_DIR" --host "$HOST"
+    - name: 安装 ninja（Windows）
+      if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
+      uses: seanmiddleditch/gha-setup-ninja@v6
 
-      - name: 浅克隆 llvm-project @ base commit
-        if: ${{ inputs.mode == 'build' }}
-        run: |
-          set -euo pipefail
-          BASE="${{ steps.loc.outputs.base_commit }}"
-          [ -n "$BASE" ] || { echo "::error::base_commit 为空"; exit 1; }
-          git init -q llvm-project
-          cd llvm-project
-          git remote add origin https://github.com/llvm/llvm-project.git
-          git fetch -q --depth=1 origin "$BASE"
-          git reset -q --hard FETCH_HEAD
-          echo "llvm-project @ $BASE"
+    - name: 解析官方编译器的上游 LLVM 基线
+      if: ${{ inputs.mode == 'build' }}
+      id: loc
+      run: |
+        python scripts/locate_llvm.py --ndk-dir "$NDK_DIR" --host "$HOST"
 
-      - name: 应用混淆 overlay（build 模式必须存在）
-        if: ${{ inputs.mode == 'build' }}
-        id: overlay
-        run: |
-          set -euo pipefail
-          MAJOR="${{ steps.loc.outputs.llvm_major }}"
-          [ -d "obfuscation/llvm-$MAJOR/Transforms/Obfuscation" ] || {
-            echo "::error::缺少 LLVM $MAJOR 混淆 overlay；build 模式拒绝发布无混淆工具链"; exit 1;
-          }
-          [ -f "obfuscation/llvm-$MAJOR/registration.patch" ] || {
-            echo "::error::LLVM $MAJOR overlay 缺少 registration.patch"; exit 1;
-          }
-          bash scripts/apply_overlay.sh --llvm-src "$PWD/llvm-project" --major "$MAJOR"
-          echo "overlay_applied=true" >> "$GITHUB_OUTPUT"
+    - name: 浅克隆 llvm-project @ base commit
+      if: ${{ inputs.mode == 'build' }}
+      run: |
+        set -euo pipefail
+        BASE="${{ steps.loc.outputs.base_commit }}"
+        [ -n "$BASE" ] || { echo "::error::base_commit 为空"; exit 1; }
+        git init -q llvm-project
+        cd llvm-project
+        git remote add origin https://github.com/llvm/llvm-project.git
+        git fetch -q --depth=1 origin "$BASE"
+        git reset -q --hard FETCH_HEAD
+        echo "llvm-project @ $BASE"
 
-      - name: 配置并编译 clang（Linux）
-        if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
-        run: |
-          set -euo pipefail
-          cmake -S llvm-project/llvm -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_ASSERTIONS=OFF \
-            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-            -DLLVM_USE_LINKER=lld \
-            -DLLVM_PARALLEL_LINK_JOBS=1 \
-            -DLLVM_OBFUSCATION_LINK_INTO_TOOLS=ON \
-            -DLLVM_ENABLE_PROJECTS="clang" \
-            -DLLVM_TARGETS_TO_BUILD="$LLVM_TARGETS"
-          ninja -C build clang clang-resource-headers
+    - name: 应用混淆 overlay（build 模式必须存在）
+      if: ${{ inputs.mode == 'build' }}
+      id: overlay
+      run: |
+        set -euo pipefail
+        MAJOR="${{ steps.loc.outputs.llvm_major }}"
+        [ -d "obfuscation/llvm-$MAJOR/Transforms/Obfuscation" ] || {
+          echo "::error::缺少 LLVM $MAJOR 混淆 overlay；build 模式拒绝发布无混淆工具链"; exit 1;
+        }
+        [ -f "obfuscation/llvm-$MAJOR/registration.patch" ] || {
+          echo "::error::LLVM $MAJOR overlay 缺少 registration.patch"; exit 1;
+        }
+        bash scripts/apply_overlay.sh --llvm-src "$PWD/llvm-project" --major "$MAJOR"
+        echo "overlay_applied=true" >> "$GITHUB_OUTPUT"
 
-      - name: 配置并编译 clang（Windows / MSVC）
-        if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
-        run: |
-          set -euo pipefail
-          # 用 MSVC cl 原生编 Windows clang.exe；不启用 lld 链接器与 sccache
-          # （cl + sccache 在 PDB 分离下不稳，Release 无调试信息，暂以稳定性优先）。
-          cmake -S llvm-project/llvm -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_ASSERTIONS=OFF \
-            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl \
-            -DLLVM_OBFUSCATION_LINK_INTO_TOOLS=ON \
-            -DLLVM_ENABLE_PROJECTS="clang" \
-            -DLLVM_TARGETS_TO_BUILD="$LLVM_TARGETS"
-          ninja -C build clang clang-resource-headers
+    - name: 配置并编译 clang（Linux）
+      if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
+      run: |
+        set -euo pipefail
+        cmake -S llvm-project/llvm -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_ENABLE_ASSERTIONS=OFF \
+          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+          -DLLVM_USE_LINKER=lld \
+          -DLLVM_PARALLEL_LINK_JOBS=1 \
+          -DLLVM_OBFUSCATION_LINK_INTO_TOOLS=ON \
+          -DLLVM_ENABLE_PROJECTS="clang" \
+          -DLLVM_TARGETS_TO_BUILD="$LLVM_TARGETS"
+        ninja -C build clang clang-resource-headers
 
-      - name: 用自建二进制覆盖 NDK
-        if: ${{ inputs.mode == 'build' }}
-        run: |
-          bash scripts/overlay_ndk.sh --built "$PWD/build" --ndk "$NDK_DIR" \
-            --host "$HOST" --major "${{ steps.loc.outputs.llvm_major }}"
+    - name: 配置并编译 clang（Windows / MSVC）
+      if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
+      run: |
+        set -euo pipefail
+        # 用 MSVC cl 原生编 Windows clang.exe；不启用 lld 链接器与 sccache
+        # （cl + sccache 在 PDB 分离下不稳，Release 无调试信息，暂以稳定性优先）。
+        cmake -S llvm-project/llvm -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_ENABLE_ASSERTIONS=OFF \
+          -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl \
+          -DLLVM_OBFUSCATION_LINK_INTO_TOOLS=ON \
+          -DLLVM_ENABLE_PROJECTS="clang" \
+          -DLLVM_TARGETS_TO_BUILD="$LLVM_TARGETS"
+        ninja -C build clang clang-resource-headers
 
-      # ---------------- 公共：元数据 / 测试 / 打包 ----------------
-      - name: 写入可追溯元数据
-        run: |
-          python scripts/make_release_meta.py --ndk-dir "$NDK_DIR" \
-            --our-tag "$OUR_TAG" --ndk-tag "$NDK_TAG" --internal "$INTERNAL" \
-            --channel "$CHANNEL" --host "$HOST" --patchset "$PATCHSET_VERSION" \
-            --llvm-major "${{ steps.loc.outputs.llvm_major }}" \
-            --clang-rev "${{ steps.loc.outputs.clang_rev }}" \
-            --base-commit "${{ steps.loc.outputs.base_commit }}" \
-            --overlay-applied "${{ steps.overlay.outputs.overlay_applied || 'false' }}" \
-            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    - name: 用自建二进制覆盖 NDK
+      if: ${{ inputs.mode == 'build' }}
+      run: |
+        bash scripts/overlay_ndk.sh --built "$PWD/build" --ndk "$NDK_DIR" \
+          --host "$HOST" --major "${{ steps.loc.outputs.llvm_major }}"
 
-      - name: 包结构测试
-        run: bash tests/package-layout/check_layout.sh "$NDK_DIR" "$HOST"
+    # ---------------- 公共：元数据 / 测试 / 打包 ----------------
+    - name: 写入可追溯元数据
+      run: |
+        python scripts/make_release_meta.py --ndk-dir "$NDK_DIR" \
+          --our-tag "$OUR_TAG" --ndk-tag "$NDK_TAG" --internal "$INTERNAL" \
+          --channel "$CHANNEL" --host "$HOST" --patchset "$PATCHSET_VERSION" \
+          --llvm-major "${{ steps.loc.outputs.llvm_major }}" \
+          --clang-rev "${{ steps.loc.outputs.clang_rev }}" \
+          --base-commit "${{ steps.loc.outputs.base_commit }}" \
+          --overlay-applied "${{ steps.overlay.outputs.overlay_applied || 'false' }}" \
+          --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-      - name: 四 ABI 编链冒烟
-        if: ${{ inputs.mode == 'build' }}
-        run: bash tests/abi-smoke/run.sh "$NDK_DIR" "$HOST"
+    - name: 包结构测试
+      run: bash tests/package-layout/check_layout.sh "$NDK_DIR" "$HOST"
 
-      - name: CMake / ndk-build 冒烟
-        if: ${{ inputs.mode == 'build' }}
-        run: bash tests/build-system-smoke/run.sh "$NDK_DIR" "$HOST"
+    - name: 四 ABI 编链冒烟
+      if: ${{ inputs.mode == 'build' }}
+      run: bash tests/abi-smoke/run.sh "$NDK_DIR" "$HOST"
 
-      - name: 字符串加密测试（build 模式）
-        if: ${{ inputs.mode == 'build' }}
-        run: bash tests/string-enc/check.sh "$NDK_DIR" "$HOST"
+    - name: CMake / ndk-build 冒烟
+      if: ${{ inputs.mode == 'build' }}
+      run: bash tests/build-system-smoke/run.sh "$NDK_DIR" "$HOST"
 
-      - name: 去指纹测试（build 模式）
-        if: ${{ inputs.mode == 'build' }}
-        run: bash tests/fingerprint-scrub/run.sh "$NDK_DIR" "$HOST"
+    - name: 字符串加密测试（build 模式）
+      if: ${{ inputs.mode == 'build' }}
+      run: bash tests/string-enc/check.sh "$NDK_DIR" "$HOST"
 
-      - name: 代码完整性自校验测试（build 模式）
-        if: ${{ inputs.mode == 'build' }}
-        run: bash tests/anti-tamper/run.sh "$NDK_DIR" "$HOST"
+    - name: 去指纹测试（build 模式）
+      if: ${{ inputs.mode == 'build' }}
+      run: bash tests/fingerprint-scrub/run.sh "$NDK_DIR" "$HOST"
 
-      - name: 证书绑定测试（build 模式）
-        if: ${{ inputs.mode == 'build' }}
-        run: bash tests/cert-bind/run.sh "$NDK_DIR" "$HOST"
+    - name: 代码完整性自校验测试（build 模式）
+      if: ${{ inputs.mode == 'build' }}
+      run: bash tests/anti-tamper/run.sh "$NDK_DIR" "$HOST"
 
-      - name: 打包
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          ZIP="android-ndk-${OUR_TAG}-${HOST}.zip"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            7z a -tzip "dist/$ZIP" "$(basename "$NDK_DIR")" >/dev/null
-          else
-            zip -r -q "dist/$ZIP" "$(basename "$NDK_DIR")"
-          fi
-          ( cd dist && sha256sum *.zip > SHA256SUMS )
-          ls -lh dist/
+    - name: 证书绑定测试（build 模式）
+      if: ${{ inputs.mode == 'build' }}
+      run: bash tests/cert-bind/run.sh "$NDK_DIR" "$HOST"
 
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ndk-${{ steps.vars.outputs.our_tag }}-${{ inputs.host }}
-          path: dist/*.zip
-          retention-days: 7
+    - name: 打包
+      run: |
+        set -euo pipefail
+        mkdir -p dist
+        ZIP="android-ndk-${OUR_TAG}-${HOST}.zip"
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          7z a -tzip "dist/$ZIP" "$(basename "$NDK_DIR")" >/dev/null
+        else
+          zip -r -q "dist/$ZIP" "$(basename "$NDK_DIR")"
+        fi
+        ( cd dist && sha256sum *.zip > SHA256SUMS )
+        ls -lh dist/
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: ndk-${{ steps.vars.outputs.our_tag }}-${{ inputs.host }}
+        path: dist/*.zip
+        retention-days: 7
