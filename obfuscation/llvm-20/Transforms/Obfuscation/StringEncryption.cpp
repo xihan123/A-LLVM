@@ -28,7 +28,6 @@
 #include "llvm/Transforms/Obfuscation/CryptoUtils.h"
 #include <map>
 #include <set>
-#include <iostream>
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -174,12 +173,9 @@ static void emitOncePublish(IRBuilder<> &B, GlobalVariable *State) {
 
 namespace {
 	struct StringEncryption : public ModulePass {
-		static char ID;  ///< Pass标识符
+		static char ID;
 
-		/**
-		 * @brief 常量字符串池条目结构体
-		 * 存储加密字符串的相关信息
-		 */
+		// 一个字符串及其密文、解密缓冲区和初始化状态。
 		struct CSPEntry {
 			CSPEntry() : ID(0), Offset(0), DecGV(nullptr), DecStatus(nullptr), IsUTF16(false), DecFunc(nullptr) {}
 			unsigned ID;
@@ -194,10 +190,7 @@ namespace {
 			Function *DecFunc;
 		};
 
-		/**
-		 * @brief 常量字符串用户结构体
-		 * 存储使用常量字符串的全局变量信息
-		 */
+		// 引用字符串的聚合全局量，需要在解密后初始化。
 		struct CSUser {
 			CSUser(Type* ETy, GlobalVariable *User, GlobalVariable *NewGV)
 				: Ty(ETy), GV(User), DecGV(NewGV), DecStatus(nullptr),
@@ -209,17 +202,17 @@ namespace {
 			Function *InitFunc;
 		};
 
-		ObfuscationOptions *ArgsOptions;  ///< 混淆选项配置
-		CryptoUtils RandomEngine;  ///< 随机数生成引擎
-		std::vector<CSPEntry *> ConstantStringPool;  ///< 常量字符串池
+		ObfuscationOptions *ArgsOptions;
+		CryptoUtils RandomEngine;
+		std::vector<CSPEntry *> ConstantStringPool;
 		std::map<GlobalVariable *, CSPEntry *> CSPEntryMap;  ///< 全局变量到条目的映射
 		std::map<GlobalVariable *, CSUser *> CSUserMap;  ///< 全局变量到用户的映射
 		std::map<GlobalVariable *, CSPEntry *> DecryptedCSPEntryMap;  ///< 解密缓冲区到条目的反向映射
 		std::map<GlobalVariable *, CSUser *> DecryptedCSUserMap;  ///< 解密用户缓冲区到用户的反向映射
 		std::map<const CSUser *, SmallVector<CSPEntry *, 8>> UserReferencedEntries;  ///< 每个全局用户依赖的底层字符串
 		std::map<GlobalVariable *, SmallVector<CSPEntry *, 8>> GlobalReferencedEntries;  ///< 任意全局变量依赖的底层字符串
-		GlobalVariable *EncryptedStringTable = nullptr;  ///< 加密字符串表全局变量
-		std::set<GlobalVariable *> MaybeDeadGlobalVars;  ///< 可能死亡的全局变量集合
+		GlobalVariable *EncryptedStringTable = nullptr;
+		std::set<GlobalVariable *> MaybeDeadGlobalVars;
 
 		// ---- 字符串加密强化（-irobf-cse-perkey / -irobf-cse-bind）----
 		bool UsePerKey = false;   ///< ChaCha8 派生密钥（不内联存储密钥）
@@ -237,20 +230,11 @@ namespace {
 		GlobalVariable *CertLoGV = nullptr;  ///< 运行期缓存 ndkp_cert_lo（构造器 ndkp_certbind_init 填）
 		GlobalVariable *CertHiGV = nullptr;  ///< 运行期缓存 ndkp_cert_hi
 
-		/**
-		 * @brief 构造函数，初始化字符串加密Pass
-		 * @param argsOptions 混淆选项配置对象
-		 */
 		StringEncryption(ObfuscationOptions *argsOptions) : ModulePass(ID) {
 			this->ArgsOptions = argsOptions;
 			initializeStringEncryptionPass(*PassRegistry::getPassRegistry());
 		}
 
-		/**
-		 * @brief Pass结束时的清理工作
-		 * @param M LLVM模块
-		 * @return 始终返回false
-		 */
 		bool doFinalization(Module &) override {
 			for (CSPEntry *Entry : ConstantStringPool) {
 				delete (Entry);
@@ -270,77 +254,27 @@ namespace {
 			return false;
 		}
 
-		/**
-		 * @brief 获取Pass名称
-		 * @return Pass名称字符串
-		 */
 		StringRef getPassName() const override {
 			return {"StringEncryption"};
 		}
 
-		/**
-		 * @brief 对模块执行字符串加密
-		 * @param M 要处理的LLVM模块
-		 * @return 如果模块被修改返回true，否则返回false
-		 */
 		bool runOnModule(Module &M) override;
 
-		/**
-		 * @brief 收集使用常量字符串的全局变量
-		 * @param CString 常量字符串全局变量
-		 * @param Users 输出的用户集合
-		 */
 		static void collectConstantStringUser(GlobalVariable *CString, std::set<GlobalVariable *> &Users);
 
-		/**
-		 * @brief 检查全局变量是否适合加密
-		 * @param GV 要检查的全局变量
-		 * @return 如果适合加密返回true
-		 */
 		static bool isValidToEncrypt(GlobalVariable *GV);
 		static GlobalVariable *extractReferencedGlobal(Value *V);
 		CSPEntry *resolveCSPEntryGlobal(GlobalVariable *GV);
 		CSUser *resolveCSUserGlobal(GlobalVariable *GV);
 
-		/**
-		 * @brief 获取全局变量指向的解密后的全局变量
-		 * @param GV 全局变量（指针类型）
-		 * @return 如果该全局变量的初始化器指向加密的字符串，返回对应的解密后全局变量；否则返回nullptr
-		 */
-		GlobalVariable *getPointedDecryptedGlobal(GlobalVariable *GV);
-
-		/**
-		 * @brief 获取全局变量指向的CSPEntry
-		 * @param GV 全局变量（指针类型）
-		 * @return 如果该全局变量的初始化器指向加密的字符串，返回对应的CSPEntry；否则返回nullptr
-		 */
 		CSPEntry *getPointedCSPEntry(GlobalVariable *GV);
 
-		/**
-		 * @brief 获取全局变量指向的CSUser
-		 * @param GV 全局变量（指针类型）
-		 * @return 如果该全局变量的初始化器指向加密的字符串，返回对应的CSUser；否则返回nullptr
-		 */
 		CSUser *getPointedCSUser(GlobalVariable *GV);
 
-		/**
-		 * @brief 处理函数中的常量字符串使用
-		 * @param F 要处理的函数
-		 * @return 如果函数被修改返回true
-		 */
 		bool processConstantStringUse(Function *F);
 
-		/**
-		 * @brief 删除未使用的全局变量
-		 */
 		void deleteUnusedGlobalVariable();
 
-		/**
-		 * @brief 构建解密函数
-		 * @param M LLVM模块
-		 * @param Entry 常量字符串池条目
-		 * @return 构建的解密函数
-		 */
 		static Function *buildDecryptFunction(Module *M, const CSPEntry *Entry);
 
 		// ---- 字符串加密强化：emitters ----
@@ -355,61 +289,23 @@ namespace {
 		/// PerKey/Bind 模式下每串的薄封装解密函数（幂等守卫 + 调用 ndkp_cse_decode）。
 		Function *buildDecryptFunctionChaCha(Module *M, const CSPEntry *Entry);
 
-		/**
-		 * @brief 构建初始化函数
-		 * @param M LLVM模块
-		 * @param User 常量字符串用户
-		 * @return 构建的初始化函数
-		 */
 		Function *buildInitFunction(Module *M, const CSUser *User);
 
-		/**
-		 * @brief 生成随机字节
-		 * @param Bytes 输出的字节向量
-		 * @param MinSize 最小大小
-		 * @param MaxSize 最大大小
-		 */
 		template <typename T>
 		void getRandomBytes(std::vector<T> &Bytes, uint32_t MinSize, uint32_t MaxSize);
 
-		/**
-		 * @brief 降低全局常量到运行时初始化
-		 * @param CV 常量值
-		 * @param IRB IR构建器
-		 * @param Ptr 目标指针
-		 * @param Ty 类型
-		 */
 		void lowerGlobalConstant(Constant *CV, IRBuilder<> &IRB, Value *Ptr, Type *Ty);
 
-		/**
-		 * @brief 降低结构体常量
-		 * @param CS 结构体常量
-		 * @param IRB IR构建器
-		 * @param Ptr 目标指针
-		 * @param Ty 类型
-		 */
 		void lowerGlobalConstantStruct(ConstantStruct *CS, IRBuilder<> &IRB, Value *Ptr, Type *Ty);
 
-		/**
-		 * @brief 降低数组常量
-		 * @param CA 数组常量
-		 * @param IRB IR构建器
-		 * @param Ptr 目标指针
-		 * @param Ty 类型
-		 */
 		void lowerGlobalConstantArray(ConstantArray *CA, IRBuilder<> &IRB, Value *Ptr, Type *Ty);
 		void collectReferencedEntries(Constant *CV, SmallPtrSetImpl<Constant *> &Visited,
 		                             SmallPtrSetImpl<CSPEntry *> &Entries);
 	};
-} // namespace llvm
+} // namespace
 
 char StringEncryption::ID = 0;
 
-/**
- * @brief 对模块执行字符串加密的主函数
- * @param M 要处理的LLVM模块
- * @return 如果模块被修改返回true
- */
 bool StringEncryption::runOnModule(Module &M) {
 	if (isIRObfuscationDebugEnabled()) {
 		errs() << "[DEBUG] StringEncryption: Starting runOnModule\n";
@@ -863,13 +759,6 @@ bool StringEncryption::runOnModule(Module &M) {
 	return Changed;
 }
 
-/**
- * @brief 生成随机字节
- * @tparam T 字节类型（uint8_t或uint16_t）
- * @param Bytes 输出的字节向量
- * @param MinSize 最小大小
- * @param MaxSize 最大大小
- */
 template <typename T>
 void StringEncryption::getRandomBytes(std::vector<T> &Bytes, uint32_t MinSize, uint32_t MaxSize) {
 	uint32_t N = RandomEngine.get_uint32_t();
@@ -900,12 +789,6 @@ void StringEncryption::getRandomBytes(std::vector<T> &Bytes, uint32_t MinSize, u
 	delete[] Buffer;
 }
 
-/**
- * @brief 构建字符串解密函数
- * @param M LLVM模块
- * @param Entry 常量字符串池条目
- * @return 构建的解密函数
- */
 Function *StringEncryption::buildDecryptFunction(Module *M, const StringEncryption::CSPEntry *Entry) {
 	LLVMContext &Ctx = M->getContext();
 	IRBuilder<> IRB(Ctx);
@@ -1378,12 +1261,6 @@ Function *StringEncryption::buildDecryptFunctionChaCha(Module *M, const StringEn
 	return DecFunc;
 }
 
-/**
- * @brief 构建全局变量初始化函数
- * @param M LLVM模块
- * @param User 常量字符串用户
- * @return 构建的初始化函数
- */
 Function *StringEncryption::buildInitFunction(Module *M, const StringEncryption::CSUser *User) {
 	LLVMContext &Ctx = M->getContext();
 	IRBuilder<> IRB(Ctx);
@@ -1418,13 +1295,6 @@ Function *StringEncryption::buildInitFunction(Module *M, const StringEncryption:
 	return InitFunc;
 }
 
-/**
- * @brief 降低全局常量到运行时初始化
- * @param CV 常量值
- * @param IRB IR构建器
- * @param Ptr 目标指针
- * @param Ty 类型
- */
 void StringEncryption::lowerGlobalConstant(Constant *CV, IRBuilder<> &IRB, Value *Ptr, Type *Ty) {
 	if (isa<ConstantAggregateZero>(CV)) {
 		IRB.CreateStore(CV, Ptr);
@@ -1481,13 +1351,6 @@ void StringEncryption::lowerGlobalConstant(Constant *CV, IRBuilder<> &IRB, Value
 	}
 }
 
-/**
- * @brief 降低数组常量
- * @param CA 数组常量
- * @param IRB IR构建器
- * @param Ptr 目标指针
- * @param Ty 类型
- */
 void StringEncryption::lowerGlobalConstantArray(ConstantArray *CA, IRBuilder<> &IRB, Value *Ptr, Type *Ty) {
 	for (unsigned i = 0, e = CA->getNumOperands(); i != e; ++i) {
 		Constant *CV = CA->getOperand(i);
@@ -1497,13 +1360,6 @@ void StringEncryption::lowerGlobalConstantArray(ConstantArray *CA, IRBuilder<> &
 	}
 }
 
-/**
- * @brief 降低结构体常量
- * @param CS 结构体常量
- * @param IRB IR构建器
- * @param Ptr 目标指针
- * @param Ty 类型
- */
 void StringEncryption::lowerGlobalConstantStruct(ConstantStruct *CS, IRBuilder<> &IRB, Value *Ptr, Type *Ty) {
 	for (unsigned i = 0, e = CS->getNumOperands(); i != e; ++i) {
 		Constant* CV = CS->getOperand(i);
@@ -1533,11 +1389,6 @@ void StringEncryption::collectReferencedEntries(Constant *CV,
 	}
 }
 
-/**
- * @brief 处理函数中的常量字符串使用
- * @param F 要处理的函数
- * @return 如果函数被修改返回true
- */
 bool StringEncryption::processConstantStringUse(Function *F) {
 	auto opt = ArgsOptions->toObfuscate(ArgsOptions->cseOpt(), F);
 	if (!opt.isEnabled()) {
@@ -1566,30 +1417,6 @@ bool StringEncryption::processConstantStringUse(Function *F) {
 		return &*PrevBB->getFirstInsertionPt();
 	};
 
-	auto ensureUserReady = [&](Instruction *InsertBefore, CSUser *User) {
-		if (!InsertBefore || !User || LiveBuffers.count(User->DecGV) > 0) {
-			return;
-		}
-		IRBuilder<> IRB(getSafeInsertPoint(InsertBefore));
-		auto UserEntriesIt = UserReferencedEntries.find(User);
-		if (UserEntriesIt != UserReferencedEntries.end()) {
-			for (CSPEntry *Entry : UserEntriesIt->second) {
-				if (!Entry || LiveBuffers.count(Entry->DecGV) > 0) {
-					continue;
-				}
-				Value *OutBuf = IRB.CreateBitCast(Entry->DecGV, PointerType::get(Ctx, 0));
-				Value *Data = IRB.CreateInBoundsGEP(
-				                  EncryptedStringTable->getValueType(),
-				                  EncryptedStringTable,
-				                  {IRB.getInt32(0), IRB.getInt32(Entry->Offset)});
-				fixEH(IRB.CreateCall(Entry->DecFunc, {OutBuf, Data}));
-				LiveBuffers.insert(Entry->DecGV);
-			}
-		}
-		fixEH(IRB.CreateCall(User->InitFunc, {User->DecGV}));
-		LiveBuffers.insert(User->DecGV);
-	};
-
 	auto ensureEntryReady = [&](Instruction *InsertBefore, CSPEntry *Entry) {
 		if (!InsertBefore || !Entry || LiveBuffers.count(Entry->DecGV) > 0) {
 			return;
@@ -1602,6 +1429,22 @@ bool StringEncryption::processConstantStringUse(Function *F) {
 		                  {IRB.getInt32(0), IRB.getInt32(Entry->Offset)});
 		fixEH(IRB.CreateCall(Entry->DecFunc, {OutBuf, Data}));
 		LiveBuffers.insert(Entry->DecGV);
+	};
+
+	auto ensureUserReady = [&](Instruction *InsertBefore, CSUser *User) {
+		if (!InsertBefore || !User || LiveBuffers.count(User->DecGV) > 0) {
+			return;
+		}
+		InsertBefore = getSafeInsertPoint(InsertBefore);
+		auto UserEntriesIt = UserReferencedEntries.find(User);
+		if (UserEntriesIt != UserReferencedEntries.end()) {
+			for (CSPEntry *Entry : UserEntriesIt->second) {
+				ensureEntryReady(InsertBefore, Entry);
+			}
+		}
+		IRBuilder<> IRB(InsertBefore);
+		fixEH(IRB.CreateCall(User->InitFunc, {User->DecGV}));
+		LiveBuffers.insert(User->DecGV);
 	};
 
 	auto ensureGlobalEntriesReady = [&](Instruction *InsertBefore,
@@ -1719,11 +1562,6 @@ bool StringEncryption::processConstantStringUse(Function *F) {
 	return Changed;
 }
 
-/**
- * @brief 收集使用常量字符串的全局变量
- * @param CString 常量字符串全局变量
- * @param Users 输出的用户集合
- */
 void StringEncryption::collectConstantStringUser(GlobalVariable *CString, std::set<GlobalVariable *> &Users) {
 	SmallPtrSet<Value *, 16> Visited;
 	SmallVector<Value *, 16> ToVisit;
@@ -1803,36 +1641,6 @@ StringEncryption::CSUser *StringEncryption::resolveCSUserGlobal(GlobalVariable *
 	return nullptr;
 }
 
-/**
- * @brief 获取全局变量指向的解密后的全局变量
- * @param GV 全局变量（指针类型）
- * @return 如果该全局变量的初始化器指向加密的字符串，返回对应的解密后全局变量；否则返回nullptr
- */
-GlobalVariable *StringEncryption::getPointedDecryptedGlobal(GlobalVariable *GV) {
-	if (!GV->hasInitializer())
-		return nullptr;
-
-	Constant *Init = GV->getInitializer();
-	if (!Init)
-		return nullptr;
-
-	if (GlobalVariable *StrGV = extractReferencedGlobal(Init)) {
-		if (CSPEntry *Entry = resolveCSPEntryGlobal(StrGV)) {
-			return Entry->DecGV;
-		}
-		if (CSUser *User = resolveCSUserGlobal(StrGV)) {
-			return User->DecGV;
-		}
-	}
-
-	return nullptr;
-}
-
-/**
- * @brief 获取全局变量指向的CSPEntry
- * @param GV 全局变量（指针类型）
- * @return 如果该全局变量的初始化器指向加密的字符串，返回对应的CSPEntry；否则返回nullptr
- */
 StringEncryption::CSPEntry *StringEncryption::getPointedCSPEntry(GlobalVariable *GV) {
 	if (!GV->hasInitializer())
 		return nullptr;
@@ -1848,11 +1656,6 @@ StringEncryption::CSPEntry *StringEncryption::getPointedCSPEntry(GlobalVariable 
 	return nullptr;
 }
 
-/**
- * @brief 获取全局变量指向的CSUser
- * @param GV 全局变量（指针类型）
- * @return 如果该全局变量的初始化器指向加密的字符串，返回对应的CSUser；否则返回nullptr
- */
 StringEncryption::CSUser *StringEncryption::getPointedCSUser(GlobalVariable *GV) {
 	if (!GV->hasInitializer())
 		return nullptr;
@@ -1868,11 +1671,6 @@ StringEncryption::CSUser *StringEncryption::getPointedCSUser(GlobalVariable *GV)
 	return nullptr;
 }
 
-/**
- * @brief 检查全局变量是否适合加密
- * @param GV 要检查的全局变量
- * @return 如果适合加密返回true
- */
 bool StringEncryption::isValidToEncrypt(GlobalVariable *GV) {
 	if (GV->isConstant() && GV->hasInitializer()) {
 		StringRef Name = GV->getName();
@@ -1887,9 +1685,6 @@ bool StringEncryption::isValidToEncrypt(GlobalVariable *GV) {
 	}
 }
 
-/**
- * @brief 删除未使用的全局变量
- */
 void StringEncryption::deleteUnusedGlobalVariable() {
 	for (GlobalVariable *GV : MaybeDeadGlobalVars) {
 		if (!GV->hasLocalLinkage() && !GV->hasPrivateLinkage()) {
@@ -1911,11 +1706,6 @@ void StringEncryption::deleteUnusedGlobalVariable() {
 	}
 }
 
-/**
- * @brief 创建字符串加密Pass
- * @param argsOptions 混淆选项配置对象
- * @return 字符串加密Pass实例
- */
 ModulePass *llvm::createStringEncryptionPass(ObfuscationOptions *argsOptions) {
 	return new StringEncryption(argsOptions);
 }

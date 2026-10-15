@@ -971,8 +971,7 @@ class GOVMTranslator {
 // GlobalVariable * code_seg_addr;
 
 static GlobalVariable *getOrCreateSharedGV(Module *M, Type *Ty, Constant *Init,
-                                            StringRef Name,
-                                            StringRef Section = ".AProtect.data");
+                                            StringRef Name);
 
 void GOVMTranslator::construct_gv() {
     // construct code global array from vm_code
@@ -1020,40 +1019,40 @@ void GOVMTranslator::construct_gv() {
 
     ip = getOrCreateSharedGV(Mod, Type::getInt32Ty(Mod->getContext()),
                              ConstantInt::get(Type::getInt32Ty(Mod->getContext()), 0),
-                             "vmp_shared_ip", ".AProtect.data");
+                             "vmp_shared_ip");
 
     data_seg_addr = getOrCreateSharedGV(Mod, Type::getInt64Ty(Mod->getContext()),
                                         ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-                                        "vmp_shared_data_seg_addr", ".AProtect.data");
+                                        "vmp_shared_data_seg_addr");
 
     code_seg_addr = getOrCreateSharedGV(Mod, Type::getInt64Ty(Mod->getContext()),
                                         ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-                                        "vmp_shared_code_seg_addr", ".AProtect.data");
+                                        "vmp_shared_code_seg_addr");
 
     exception_thrown = getOrCreateSharedGV(Mod, Type::getInt8Ty(Mod->getContext()),
                                            ConstantInt::get(Type::getInt8Ty(Mod->getContext()), 0),
-                                           "vmp_shared_exception_thrown", ".AProtect.data");
+                                           "vmp_shared_exception_thrown");
 
     exception_ptr_global = getOrCreateSharedGV(Mod, PointerType::get(Mod->getContext(), 0),
                                                ConstantPointerNull::get(PointerType::get(Mod->getContext(), 0)),
-                                               "vmp_shared_exception_ptr", ".AProtect.data");
+                                               "vmp_shared_exception_ptr");
 
     exception_selector_global = getOrCreateSharedGV(Mod, Type::getInt32Ty(Mod->getContext()),
                                                     ConstantInt::get(Type::getInt32Ty(Mod->getContext()), 0),
-                                                    "vmp_shared_exception_selector", ".AProtect.data");
+                                                    "vmp_shared_exception_selector");
 
     last_br_from_bb_id = getOrCreateSharedGV(Mod, Type::getInt64Ty(Mod->getContext()),
                                              ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-                                             "vmp_shared_last_br_from_bb_id", ".AProtect.data");
+                                             "vmp_shared_last_br_from_bb_id");
 
     current_bb_id = getOrCreateSharedGV(Mod, Type::getInt64Ty(Mod->getContext()),
                                         ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-                                        "vmp_shared_current_bb_id", ".AProtect.data");
+                                        "vmp_shared_current_bb_id");
 
     uint8_t debug_enabled = isIRObfuscationDebugEnabled() ? 1 : 0;
     vmp_debug_enabled_gv = getOrCreateSharedGV(Mod, Type::getInt8Ty(Mod->getContext()),
                                                ConstantInt::get(Type::getInt8Ty(Mod->getContext()), debug_enabled),
-                                               "vmp_shared_debug_enabled", ".AProtect.data");
+                                               "vmp_shared_debug_enabled");
 }
 
 void GOVMTranslator::setup_callinst_handler() {
@@ -4223,8 +4222,7 @@ const std::set<std::string> interpreter_function_names{
 */
 
 static GlobalVariable *getOrCreateSharedGV(Module *M, Type *Ty, Constant *Init,
-                                            StringRef Name,
-                                            StringRef Section) {
+                                            StringRef Name) {
     if (GlobalVariable *GV = M->getGlobalVariable(Name, true)) {
         return GV;
     }
@@ -4240,37 +4238,37 @@ void GOVMInterpreter::construct_gv() {
     dispatch_code_seg_addr = getOrCreateSharedGV(
         Mod, Type::getInt64Ty(Mod->getContext()),
         ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-        "vmp_shared_dispatch_code_seg_addr", ".AProtect.data");
+        "vmp_shared_dispatch_code_seg_addr");
 
     pointer_size_gv = getOrCreateSharedGV(
         Mod, Type::getInt32Ty(Mod->getContext()),
         ConstantInt::get(Type::getInt32Ty(Mod->getContext()), ptr_size),
-        "vmp_shared_pointer_size", ".AProtect.data");
+        "vmp_shared_pointer_size");
 
     opcode_xorshift32_state = getOrCreateSharedGV(
         Mod, Type::getInt64Ty(Mod->getContext()),
         ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-        "vmp_shared_opcode_xorshift32_state", ".AProtect.data");
+        "vmp_shared_opcode_xorshift32_state");
 
     vm_code_state = getOrCreateSharedGV(
         Mod, Type::getInt64Ty(Mod->getContext()),
         ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-        "vmp_shared_vm_code_state", ".AProtect.data");
+        "vmp_shared_vm_code_state");
 
     vm_function_key_gv = getOrCreateSharedGV(
         Mod, Type::getInt64Ty(Mod->getContext()),
         ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-        "vmp_shared_vm_function_key", ".AProtect.data");
+        "vmp_shared_vm_function_key");
 
     vm_block_chain_state_gv = getOrCreateSharedGV(
         Mod, Type::getInt64Ty(Mod->getContext()),
         ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-        "vmp_shared_vm_block_chain_state", ".AProtect.data");
+        "vmp_shared_vm_block_chain_state");
 
     expected_bb_token_gv = getOrCreateSharedGV(
         Mod, Type::getInt64Ty(Mod->getContext()),
         ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-        "vmp_shared_expected_bb_token", ".AProtect.data");
+        "vmp_shared_expected_bb_token");
 
     assert(exc_thrown_gv && "missing shared exception_thrown global");
     assert(exc_ptr_gv && "missing shared exception_ptr global");
@@ -4279,18 +4277,18 @@ void GOVMInterpreter::construct_gv() {
     last_bb_gv = getOrCreateSharedGV(
         Mod, Type::getInt64Ty(Mod->getContext()),
         ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-        "vmp_shared_last_br_from_bb_id", ".AProtect.data");
+        "vmp_shared_last_br_from_bb_id");
 
     curr_bb_gv = getOrCreateSharedGV(
         Mod, Type::getInt64Ty(Mod->getContext()),
         ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0),
-        "vmp_shared_current_bb_id", ".AProtect.data");
+        "vmp_shared_current_bb_id");
 
     uint8_t debug_enabled = isIRObfuscationDebugEnabled() ? 1 : 0;
     vmp_debug_enabled_gv = getOrCreateSharedGV(
         Mod, Type::getInt8Ty(Mod->getContext()),
         ConstantInt::get(Type::getInt8Ty(Mod->getContext()), debug_enabled),
-        "vmp_shared_debug_enabled", ".AProtect.data");
+        "vmp_shared_debug_enabled");
 }
 
 // Function *govm_interpreter;
@@ -4715,20 +4713,7 @@ static Function *cloneVmInterpreterForFunction(Module *M,
     return Clone;
 }
 
-// 将预编译的解释器 bitcode 合并进用户模块。
-//
-// 历史实现（见下方 #if 0 的 legacy 版本）用一份按名字白名单（is_interpreter_function）
-// 的手工 CloneFunctionInto 逐个克隆解释器函数。它在 LLVM 21 上根本性 fragile：
-// 白名单外、但被解释器传递调用的函数（如 C++ 静态初始化 __cxx_global_var_init、
-// EH 收尾 __clang_call_terminate 等）只得到"internal 链接 + 无函数体"的悬空声明，
-// verifier 报 "Global is external, but doesn't have external or weak linkage"；带 EH 的
-// 简单函数则因跨模块 personality/_Unwind_Resume 引用而崩溃。增量补丁跨 4 层不收敛。
-//
-// 现改用 Linker::linkModules 全量链入解释器模块：Linker 自动带入完整调用闭包
-// （helper/EH/静态初始化）为合法定义，运行时外部符号（memcpy/_Unwind_Resume/
-// personality）保持为合法的 external 声明（链接期解析到 libc/libc++/libunwind）。
-// 链入后再把解释器自带的共享全局 RAUW 到 pass 侧（每函数/共享）全局，并把两个下游
-// 按名引用的入口重命名为 *_shared。
+// 全量链接解释器，以保留间接调用的 helper、异常处理和静态初始化依赖。
 void GOVMInterpreter::run() {
 
     if (isIRObfuscationDebugEnabled()) {
@@ -4748,8 +4733,6 @@ void GOVMInterpreter::run() {
     for (GlobalVariable &GV : Mod->globals())
         pre_link_globals.insert(GV.getName().str());
 
-    // 记录：① Mod 中链入前已有的函数名（用于链入后甄别哪些函数来自解释器）；
-    //       ② 解释器模块里"有函数体"的函数数量（仅调试用）。
     std::set<std::string> pre_link_functions;
     for (Function &EF : *Mod) {
         pre_link_functions.insert(EF.getName().str());
@@ -4766,12 +4749,10 @@ void GOVMInterpreter::run() {
         errs() << "[GOVMInterpreter] Step 2: Linking interpreter module into target...\n";
     }
 
-    // ***核心***：全量链入。失败即中止（不产坏 IR）。
     if (Linker::linkModules(*Mod, std::move(interpreter_module_ptr))) {
         errs() << "[GOVMInterpreter] ERROR: Linker::linkModules failed; skipping VMP for this module\n";
         return;
     }
-    // interpreter_module_ptr 已被 Linker 消费；以下均在 Mod 中按名字操作。
 
     // Isolate interpreter-owned mutable caches and the recursive call stack.
     // Apply this after linking so constant remapping sees the original globals.
@@ -4789,32 +4770,49 @@ void GOVMInterpreter::run() {
         errs() << "[GOVMInterpreter] Step 3: Remapping shared globals...\n";
     }
 
-    // 3. 把解释器自带的 18 个共享全局重定向到 pass 侧全局，删除解释器原全局。
-    //    opaque pointer 下两侧全局值类型均为 ptr，RAUW 类型安全。
-    {
-        std::vector<std::string> gv_list = {"gv_data_seg", "gv_code_seg", "ip", "data_seg_addr", "code_seg_addr", "dispatch_code_seg_addr", "pointer_size", "opcode_xorshift32_state", "vm_code_state", "vm_function_key", "vm_block_chain_state", "expected_bb_token", "exception_thrown", "exception_ptr", "exception_selector", "last_br_from_bb_id", "current_bb_id", "vmp_debug_enabled"};
-        std::vector<GlobalVariable *> new_gv_list = {gv_data_seg, gv_code_seg, ip, data_seg_addr, code_seg_addr, dispatch_code_seg_addr, pointer_size_gv, opcode_xorshift32_state, vm_code_state, vm_function_key_gv, vm_block_chain_state_gv, expected_bb_token_gv, exc_thrown_gv, exc_ptr_gv, exc_sel_gv, last_bb_gv, curr_bb_gv, vmp_debug_enabled_gv};
-        for (unsigned i = 0; i < gv_list.size(); ++i) {
-            GlobalVariable *old_gv = Mod->getGlobalVariable(gv_list[i], /*AllowInternal=*/true);
-            GlobalVariable *new_gv = new_gv_list[i];
-            if (!old_gv || !new_gv || old_gv == new_gv)
-                continue;
-            if (old_gv->getType() != new_gv->getType()) {
-                if (isIRObfuscationDebugEnabled())
-                    errs() << "[GOVMInterpreter]   WARNING: type mismatch remapping '"
-                           << gv_list[i] << "', skipped\n";
-                continue;
-            }
-            old_gv->replaceAllUsesWith(new_gv);
-            old_gv->eraseFromParent();
+    const struct {
+        const char *Name;
+        GlobalVariable *Replacement;
+    } SharedGlobals[] = {
+        {"gv_data_seg", gv_data_seg},
+        {"gv_code_seg", gv_code_seg},
+        {"ip", ip},
+        {"data_seg_addr", data_seg_addr},
+        {"code_seg_addr", code_seg_addr},
+        {"dispatch_code_seg_addr", dispatch_code_seg_addr},
+        {"pointer_size", pointer_size_gv},
+        {"opcode_xorshift32_state", opcode_xorshift32_state},
+        {"vm_code_state", vm_code_state},
+        {"vm_function_key", vm_function_key_gv},
+        {"vm_block_chain_state", vm_block_chain_state_gv},
+        {"expected_bb_token", expected_bb_token_gv},
+        {"exception_thrown", exc_thrown_gv},
+        {"exception_ptr", exc_ptr_gv},
+        {"exception_selector", exc_sel_gv},
+        {"last_br_from_bb_id", last_bb_gv},
+        {"current_bb_id", curr_bb_gv},
+        {"vmp_debug_enabled", vmp_debug_enabled_gv},
+    };
+    for (const auto &Entry : SharedGlobals) {
+        GlobalVariable *Old = Mod->getGlobalVariable(Entry.Name, /*AllowInternal=*/true);
+        GlobalVariable *Replacement = Entry.Replacement;
+        if (!Old || !Replacement || Old == Replacement)
+            continue;
+        if (Old->getType() != Replacement->getType()) {
+            if (isIRObfuscationDebugEnabled())
+                errs() << "[GOVMInterpreter]   WARNING: type mismatch remapping '"
+                       << Entry.Name << "', skipped\n";
+            continue;
         }
+        Old->replaceAllUsesWith(Replacement);
+        Old->eraseFromParent();
     }
 
     if (isIRObfuscationDebugEnabled()) {
         errs() << "[GOVMInterpreter] Step 4: Wiring call_handler + vmp_debug_id...\n";
     }
 
-    // 4. call_handler（解释器里的外部声明）→ 共享调用分发器（callinst_handler）。
+    // 将解释器的外部调用入口接到共享分发器。
     if (Function *ch = Mod->getFunction("call_handler")) {
         if (callinst_handler && ch != callinst_handler) {
             ch->replaceAllUsesWith(callinst_handler);
@@ -4822,7 +4820,7 @@ void GOVMInterpreter::run() {
         }
     }
 
-    // 5. vmp_debug_id（外部声明）→ 每函数 debug 桩（debug 关闭时为 no-op）。
+    // debug 关闭时仍需提供 no-op 定义以解析外部引用。
     std::string debugFuncName = "vmp_debug_id_" + F->getName().str();
     Function *DebugIdFunc = createVmpDebugId(Mod, isIRObfuscationDebugEnabled(), debugFuncName);
     if (Function *dbg = Mod->getFunction("vmp_debug_id")) {
@@ -4836,10 +4834,7 @@ void GOVMInterpreter::run() {
         errs() << "[GOVMInterpreter] Step 5: Internalizing interpreter functions...\n";
     }
 
-    // 6. 把所有"链入后新增且有函数体"的函数（即来自解释器的定义）内部化并归入
-    //    .AProtect.text，避免最终链接期符号泄漏/冲突。运行时外部声明
-    //    （memcpy/_Unwind_Resume/personality 等）为无体的 external 声明——合法，
-    //    不在此集合内，保持不动。用"链入前已有的名字集"甄别，避免误伤用户函数。
+    // 只内部化新导入的定义，保留用户函数和运行库外部声明。
     for (Function &Fn : *Mod) {
         if (Fn.isDeclaration())
             continue;
@@ -4851,8 +4846,7 @@ void GOVMInterpreter::run() {
         normalizeLocalDefaultVisibility(&Fn);
     }
 
-    // 7. 把下游按名引用的两个入口改成 *_shared 名（cloneVmInterpreterForFunction /
-    //    modifier 依赖）。其余 helper 仍以原名互相调用，无需改名。
+    // cloneVmInterpreterForFunction 和 modifier 按 *_shared 名查找入口。
     if (Function *vi = Mod->getFunction("vm_interpreter")) {
         if (!Mod->getFunction("vm_interpreter_shared"))
             vi->setName("vm_interpreter_shared");
@@ -4862,7 +4856,6 @@ void GOVMInterpreter::run() {
             ru->setName("vmp_resume_unwind_shared");
     }
 
-    // 8. Release 模式：清除解释器调试串 helper 及其 .rodata 字面量。
     if (!isIRObfuscationDebugEnabled())
         stripVmpDebugStrings(Mod);
 
@@ -5079,7 +5072,7 @@ struct VMProtect : public ModulePass {
       GlobalVariable *dispatch_code_seg_addr = getOrCreateSharedGV(
           &M, Type::getInt64Ty(M.getContext()),
           ConstantInt::get(Type::getInt64Ty(M.getContext()), 0),
-          "vmp_shared_dispatch_code_seg_addr", ".AProtect.data");
+          "vmp_shared_dispatch_code_seg_addr");
       std::vector<VMPDispatchTarget> dispatch_targets;
       dispatch_targets.reserve(translators.size());
       for (GOVMTranslator *translator : translators) {
@@ -5195,7 +5188,7 @@ PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM)
   GlobalVariable *dispatch_code_seg_addr = getOrCreateSharedGV(
       &M, Type::getInt64Ty(M.getContext()),
       ConstantInt::get(Type::getInt64Ty(M.getContext()), 0),
-      "vmp_shared_dispatch_code_seg_addr", ".AProtect.data");
+      "vmp_shared_dispatch_code_seg_addr");
   std::vector<VMPDispatchTarget> dispatch_targets;
   dispatch_targets.reserve(translators.size());
   for (GOVMTranslator *translator : translators) {
@@ -5252,13 +5245,8 @@ PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM)
   return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
-// 早期标记 pass（PipelineStartEP）实现：给每个 VMP 目标函数打 NoInline +
-// llvm.compiler.used。关键：compiler.used 使 hasAddressTaken() 为真 → IPSCCP 的
-// canTrackArgumentsInterprocedurally 返回 false → 参数相关的返回值变 overdefined →
-// 调用点不被折成常量、也不被删除；NoInline 阻止内联进调用方。二者合力保证 VMP
-// 目标以真实 call 存活到 OptimizerLast，届时 VMProtect 才虚拟化它，调用方真正走 VM。
-// 不用 optnone：它不阻 IPSCCP，且与 GOVMModifier 给 wrapper 加的 AlwaysInline 冲突
-// （verifier 失败），还会让字节码体膨胀。
+// NoInline 阻止内联，compiler.used 阻止 IPSCCP 折叠调用，保留目标供 OptimizerLast 虚拟化。
+// optnone 不能阻止 IPSCCP，且与后续 wrapper 的 AlwaysInline 冲突。
 PreservedAnalyses llvm::VMProtectPreparePass::run(Module &M,
                                                   ModuleAnalysisManager &AM) {
   SmallVector<GlobalValue *, 8> Marked;
