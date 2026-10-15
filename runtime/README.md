@@ -71,6 +71,16 @@ apksigner verify --print-certs your-signed.apk   # 看 "certificate SHA-256 dige
 - `-irobf-cert-bind` 开但 `-irobf-cert-file` 缺失/不可读 ⇒ **构建期 fail-closed 报错**。
 - 与包名绑定（`-irobf-cse-bind`）互相独立、可叠加。
 
+## 注入场景（Xposed / LSPosed 模块）
+
+模块 `.so` 被框架加载进**宿主 App 进程**时，进程里第一个 `/data/app/.../base.apk`
+是宿主的 APK，原双源共识会读到**错误的证书**（宿主签名），令正当模块的全部绑定
+字符串 fail-closed 解出乱码（2026-10-16 真机实测）。`apkcert.h` 现对此做了库锚定：
+`dladdr` 取本 `.so` 自己的映射路径（`.../base.apk!/lib/<abi>/libxxx.so`），反推本库
+所在的 APK 并改读其签名证书；防重定向由"新开 fd 的 inode 必须 equals 内核在
+`/proc/self/maps` 里记录的映射 inode"承担（运行时对模块 APK 不持有 fd，fd oracle
+不适用）。库与宿主同 APK 的普通 App 路径完全不变，仍是完整双源共识。
+
 ## 设备回归
 
 `tests/cert-bind/device_roundtrip.py` 构建临时 APK，分别验证 CSE、VMP、CSE+VMP+SelfCheck 的正确/错误签名。需要 patched NDK、Android SDK build-tools/platform、JDK 17+、OpenSSL 和 arm64 adb 设备：

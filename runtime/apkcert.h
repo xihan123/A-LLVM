@@ -30,12 +30,14 @@
 #define STRINGARMOR_APKCERT_H
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -317,10 +319,101 @@ inline bool sameInode(const struct stat& a, const struct stat& b) {
     return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
 }
 
+// Injected-library anchor (Xposed/LSPosed module scenario): the host process's APK is NOT
+// the APK this library was packaged in. dladdr() gives this .so's own mapped path
+// (.../<module>/base.apk!/lib/arm64-v8a/libfoo.so for in-APK loading); the /data/app
+// base.apk whose path prefixes that (with a '!' boundary) is the APK whose signing
+// certificate the build folded. On success also reports the inode the kernel recorded in
+// maps for that mapping — the caller cross-checks a fresh open() against it, catching the
+// same open()-redirect / bind-mount class the fd oracle covers in the host-APK case.
+inline bool libAnchoredApkFromMaps(char* out, size_t cap, unsigned long long* mapsInode) {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&endsWithBaseApk), &info) == 0 ||
+        info.dli_fname == nullptr) {
+        return false;
+    }
+    const char* libPath = info.dli_fname;
+    const size_t libLen = std::strlen(libPath);
+    const int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return false;
+    }
+    char buf[4096];
+    char line[1024];
+    size_t lineLen = 0;
+    bool found = false;
+    ssize_t r;
+    while (!found && (r = read(fd, buf, sizeof buf)) > 0) {
+        for (ssize_t i = 0; i < r; ++i) {
+            const char ch = buf[i];
+            if (ch == '\n' || lineLen + 1 >= sizeof line) {
+                line[lineLen] = '\0';
+                const char* path = std::strchr(line, '/');
+                if (path != nullptr && endsWithBaseApk(path)) {
+                    const size_t n = std::strlen(path);
+                    // path must be a real prefix of the library path with a '!' boundary
+                    // (…/base.apk!/lib/…), not a coincidental directory prefix.
+                    if (n < libLen && libPath[n] == '!' &&
+                        std::strncmp(libPath, path, n) == 0 && n < cap) {
+                        unsigned long long ino = 0;
+                        // maps fields: start-end perms offset dev inode pathname
+                        if (std::sscanf(line, "%*s %*s %*s %*s %llu", &ino) == 1 && ino != 0) {
+                            std::strcpy(out, path);
+                            *mapsInode = ino;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                lineLen = 0;
+            } else {
+                line[lineLen++] = ch;
+            }
+        }
+    }
+    close(fd);
+    return found;
+}
+
 // Fetch SHA-256(signer cert) via the two independent paths and trust only their consensus.
 // Returns true and fills out[32] iff both parse, both resolve to the same inode, and both
 // digests match; otherwise false (caller fails closed).
 inline bool certSha256Consensus(uint8_t out[32]) {
+    // Injected-library case (Xposed/LSPosed module): our .so was packaged in a DIFFERENT
+    // APK than the host process's own. The first base.apk in maps (and the ART fd oracle)
+    // then belongs to the host app, so the original consensus would read the WRONG
+    // certificate and every bound string would decode to garbage on a perfectly genuine
+    // module. Anchor on the APK backing our own mapping instead; verify a fresh open()
+    // against the kernel-recorded maps inode (redirect/bind-mount catcher of the same
+    // class as the fd oracle, which cannot apply here — the runtime holds no fd to the
+    // module APK). Normal apps (library and host share one APK) keep the full two-oracle
+    // consensus below, untouched.
+    {
+        char libApk[1024];
+        char hostApk[1024];
+        unsigned long long libIno = 0;
+        if (libAnchoredApkFromMaps(libApk, sizeof libApk, &libIno) &&
+            !(selfApkPathFromMaps(hostApk, sizeof hostApk) &&
+              std::strcmp(hostApk, libApk) == 0)) {
+            const int fd = open(libApk, O_RDONLY | O_CLOEXEC);
+            if (fd < 0) {
+                return false;
+            }
+            struct stat st;
+            uint8_t h[32];
+            const bool ok =
+                fstat(fd, &st) == 0 &&
+                static_cast<unsigned long long>(st.st_ino) == libIno &&
+                parseSignerCertSha256Fd(fd, static_cast<uint64_t>(st.st_size), h);
+            close(fd);
+            if (!ok) {
+                return false;
+            }
+            std::memcpy(out, h, 32);
+            return true;
+        }
+    }
+
     char pathMaps[1024];
     char pathFd[1024];
     if (!selfApkPathFromMaps(pathMaps, sizeof pathMaps)) {
