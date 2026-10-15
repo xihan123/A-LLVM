@@ -1,6 +1,17 @@
 # 稳定性修复验证记录（2026-10-15）
 
-本记录对应当前工作区 p1 修复；不代表这些修改已在 GitHub Actions 上构建或发布。
+本记录对应 p1 修复及后续代码清理；CI 验证版本为 `5634b305effd549161211d36f6e7bf91235d46e9`。
+
+## CI 构建（已启动，结果待定）
+
+| NDK / LLVM | Linux | Windows |
+| --- | --- | --- |
+| r30 / LLVM 21 | [38742852164](https://github.com/xihan123/A-LLVM/actions/runs/38742852164) | [38742858923](https://github.com/xihan123/A-LLVM/actions/runs/38742858923) |
+| r29-beta1 / LLVM 20 | [38743051472](https://github.com/xihan123/A-LLVM/actions/runs/38743051472) | [38743058073](https://github.com/xihan123/A-LLVM/actions/runs/38743058073) |
+
+四组均使用 `mode=build`、`patchset=p1`、`AArch64;ARM;X86`，只生成验证产物。该提交的 [checks](https://github.com/xihan123/A-LLVM/actions/runs/38742592937) 已通过。
+
+LLVM 20 基线已从官方 r29-beta1 Linux 安装包确认：`AndroidVersion.txt` 为 `20.0.0 / r547379`，`clang_source_info.md` 的 Base revision 为 `f142f8afe21bceb00fb495468aa0b5043e98c419`。`registration.patch` 已在该提交的 `llvm/lib/Transforms/CMakeLists.txt` 上通过 `git apply --check`；完整编译和语义回归以 CI 结果为准。
 
 ## 环境
 
@@ -65,8 +76,8 @@ python tests/cert-bind/device_roundtrip.py \
 - 证书 helper 必须单独编译、不带混淆并关闭 LTO；集成示例见 [runtime/README.md](../runtime/README.md)。
 - VMP 解释器仍仅支持 arm64，C 输入也需链接 libc++；本轮未验证信号处理器重入或异常传播。
 - CSE/FLA 正向注解不是函数白名单；所有功能仍需要开关。此次未引入 annotation-only 模式。
-- 本轮未在 Linux、LLVM 20 或 r30 较新 LLVM 21 基线上重新构建。两套 overlay 字节一致不代替各自基线测试。
-- CI 新增宿主语义测试与 Android VMP 编链，尚未运行当前工作区的 Actions；CI 不自动执行 adb 设备测试。
+- Linux、LLVM 20 与 r30 较新 LLVM 21 基线的完整构建已启动，尚无最终结果。两套 overlay 字节一致不代替各自基线测试。
+- CI 新增宿主语义测试与 Android VMP 编链；CI 不自动执行 adb 设备测试。
 - anti-tamper 本轮做了静态检查及未篡改的组合语义回归，未重跑篡改后终止的设备矩阵。
 
-下一步先跑当前 p1 的 Linux/Windows CI，并在 LLVM 20 对应 NDK Base revision 上构建与回归；通过后再推进 [路线图](../ROADMAP.md) 中的性能/体积基准及功能扩展。
+下一步检查四组 CI 的构建与回归结果；通过后再推进 [路线图](../ROADMAP.md) 中的性能/体积基准及功能扩展。

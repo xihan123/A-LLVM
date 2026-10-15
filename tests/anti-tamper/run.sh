@@ -29,10 +29,14 @@ fail=0
 TGT="--target=aarch64-linux-android21 -shared -fPIC -O2"
 VMP="-mllvm -irobf -mllvm -irobf-vmp -mllvm -irobf-vm_functions=ndkp_secret_len"
 SELF="-mllvm -irobf-selfcheck"
+# 回归：cse 与 selfcheck 同开。曾因字符串池把 gv_code_seg_* blob 当字符串加密搬运，
+# 令 SelfCheck 扫不到 blob 而静默 no-op（修复见 StringEncryption 的 VMP 产物排除）。
+CSE="-mllvm -irobf-cse"
 
 "$CLANG" $TGT $VMP $SELF -o "$OUT/vmp_self.so"     "$SRC"
 "$CLANG" $TGT $VMP       -o "$OUT/vmp_only.so"     "$SRC"
 "$CLANG" $TGT -mllvm -irobf $SELF -o "$OUT/self_novmp.so" "$SRC"
+"$CLANG" $TGT $VMP $SELF $CSE -o "$OUT/vmp_self_cse.so" "$SRC"
 
 has_sym() { "$NM" "$1" 2>/dev/null | grep -q "$2"; }
 
@@ -63,6 +67,14 @@ if "$READELF" -S "$OUT/vmp_self.so" | grep -q '\.init_array'; then
   echo "[ok]   vmp+selfcheck 含 .init_array（构造器已注册，加载期即校验）"
 else
   echo "[FAIL] vmp+selfcheck 缺 .init_array（构造器未注册）"; fail=1
+fi
+
+# 5) cse 与 selfcheck 同开：字符串加密不得吞掉 VMP blob（回归）
+if has_sym "$OUT/vmp_self_cse.so" ndkp_selfcheck_verify && \
+   has_sym "$OUT/vmp_self_cse.so" gv_code_seg_ndkp_secret_len; then
+  echo "[ok]   vmp+selfcheck+cse 含自校验符号与字节码 blob"
+else
+  echo "[FAIL] vmp+selfcheck+cse 缺自校验符号或 blob（字符串池吞掉 VMP 产物）"; fail=1
 fi
 
 echo "[note] 动态「篡改字节码 → SIGKILL」在真机 arm64-v8a 验证（见 DESIGN.md 设备验证门）"

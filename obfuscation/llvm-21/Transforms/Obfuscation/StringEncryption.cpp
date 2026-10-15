@@ -350,6 +350,15 @@ bool StringEncryption::runOnModule(Module &M) {
 		    GV.hasDLLExportStorageClass() || GV.isDLLImportDependent()) {
 			continue;
 		}
+		// VMP 产物不得入字符串池：gv_code_seg_* 等字节码 blob 是 SelfCheck 的校验
+		// 对象（.AProtect.data 常量），入池会被加密搬进密文表并删除原常量，SelfCheck
+		// 随后扫不到 blob 而静默 no-op。名单与 isValidToEncrypt 的排除保持一致。
+		StringRef GVName = GV.getName();
+		if (GVName.contains("gv_code_seg") || GVName.contains("gv_data_seg") ||
+		    GVName.contains("vm_code_seg") || GVName.contains("vm_data_seg") ||
+		    GVName.contains("scase_code_seg") || GVName.contains("scase_data_seg")) {
+			continue;
+		}
 		Constant *Init = GV.getInitializer();
 		if (Init == nullptr)
 			continue;

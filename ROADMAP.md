@@ -80,10 +80,11 @@
 
 按优先级排列：
 
-1. 在 Linux/Windows Actions 上验证当前 p1 修复，重点覆盖 r30 较新 LLVM 21 基线；本轮已完成 Windows r29 LLVM 21 构建及设备回归。
-2. 在 LLVM 20 对应 NDK 的实际 `Base revision` 上重新检查补丁、构建与运行回归。双目录内容一致不等于双版本都已验证。
+1. 等待并检查当前 p1 的 Linux/Windows Actions 结果：r30 LLVM 21 两组构建已启动，链接见 [验证记录](./tests/VALIDATION.md)。本地 Windows r29 LLVM 21 构建及设备回归已通过。
+2. LLVM 20 对应 r29-beta1（`20.0.0 / r547379`），实际 Base revision 为 `f142f8afe21bceb00fb495468aa0b5043e98c419`。补丁检查已通过，Linux/Windows 完整构建与回归已启动。双目录内容一致不等于双版本都已验证。
 3. 新增宿主字符串生命周期、常量/证书往返，以及 VMP 样本编链已接入 `build.yml`；Android 设备测试仍需显式运行，发布前按 [验证记录](./tests/VALIDATION.md) 复测。
 4. 注解独立开启 pass / annotation-only 模式暂缓；保持现有 opt-in 开关行为。完成稳定性门槛后再推进性能/体积基准、其他 ABI 解释器及后端扩展。
+5. 构建加速按 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md) 推进：先实现增量 overlay 同步，再验证 Linux/Windows 快照恢复；准备检查已完成，流水线尚未修改。
 
 ## 发版前必做
 
