@@ -11,12 +11,11 @@ on:
   pull_request:
     paths:
     - "obfuscation/**"
+    - "runtime/**"
+    - "include/**"
     - "scripts/apply_overlay.sh"
     - "scripts/overlay_ndk.sh"
-    - "tests/string-enc/**"
-    - "tests/abi-smoke/**"
-    - "tests/build-system-smoke/**"
-    - "tests/discover/**"
+    - "tests/**"
     - "scripts/discover_ndk.py"
     - ".github/workflows/build.yml"
     - ".github/workflows/patch-check.yml"

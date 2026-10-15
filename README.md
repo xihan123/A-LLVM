@@ -9,7 +9,7 @@
 
 ## 项目简介
 
-本项目根据 Android NDK Release 中记录的上游 LLVM 版本构建带混淆 pass 的 clang/lld，再覆盖到官方 NDK 中打包发布。自动发现支持 Stable、Beta 和 RC。
+本项目根据 Android NDK Release 中记录的上游 LLVM 版本构建带混淆 pass 的 clang，再覆盖到官方 NDK 中打包发布。自动发现支持 Stable、Beta 和 RC。
 
 > 产物是第三方 Custom NDK，不是 Google 官方构建。采用 GPL-3.0。
 
@@ -17,7 +17,7 @@
 
 ## 主要功能
 
-- 按 NDK 包内的 LLVM `Base revision` 构建对应 clang/lld；
+- 按 NDK 包内的 LLVM `Base revision` 构建对应 clang；
 - 支持字符串加密、控制流平坦化、间接跳转/调用和常量加密；
 - 支持函数级虚拟化（VMP）与反分析检测注入（反调试/Root/模拟器/反转储/maps 隐藏）；
 - 支持代码完整性自校验（`-irobf-selfcheck`）与 APK 签名证书绑定（`-irobf-cert-bind`：把签名证书折进字符串/VMP 密钥，换签名或重打包即解密失败）；
@@ -47,14 +47,14 @@ target_compile_options(mylib PRIVATE
 
 ndk-build（`Android.mk`）：`LOCAL_CFLAGS += -mllvm -irobf-cse -mllvm -irobf-fla`
 
-注解（仅对指定函数启用，需配合对应总开关）：
+注解（需配合功能开关；CSE/FLA 开关默认处理全部符合条件的函数，正向注解不构成白名单；VMP 按注解或名称列表选择）：
 
 ```c
 #include "ndkp.h"
 NDKP_STR_ENCRYPT void secret() { const char* k = "token"; /* ... */ }
 ```
 
-一期开关：`-irobf-cse`（字符串）、`-irobf-cie`/`-irobf-cfe`（整/浮点常量）、`-irobf-fla`、`-irobf-indbr`/`-icall`/`-indgv`。字符串加密可叠加强化开关 `-irobf-cse-perkey`（隐藏 pepper 派生 per-string ChaCha8 密钥，密文不再内联密钥）与 `-irobf-cse-bind`（包名绑定，`.so` 仅在目标 App 内解出明文，配合 `-irobf-cse-bind-package=<包名>`，或 `NDKP_STR_BIND` 注解）。函数级虚拟化 `-irobf-vmp` 与反分析检测 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}` 已实现（详见 [obfuscation/README.md](./obfuscation/README.md)）。APK 签名证书绑定 `-irobf-cert-bind`（配合 `-irobf-cert-file=<cert.der>`）把签名证书 SHA-256 折进字符串与 VMP 密钥，换签名/重打包即 fail-closed；运行期读证书需 app 侧链接 `runtime/ndkp_apkcert.cpp`（见 [runtime/README.md](./runtime/README.md)）。不加任何开关时 overlay 不主动变换 IR；这不代表自建 clang 与官方 Android Clang 完全一致。字符串包名绑定与 VMP 已本地验证但设备语义验证前不发布；AArch64 后端机器码混淆（`-aarch64-obfuscate-*`）属后续阶段。
+一期开关：`-irobf-cse`（字符串）、`-irobf-cie`/`-irobf-cfe`（整/浮点常量）、`-irobf-fla`、`-irobf-indbr`/`-icall`/`-indgv`。字符串加密可叠加强化开关 `-irobf-cse-perkey`（隐藏 pepper 派生 per-string ChaCha8 密钥，密文不再内联密钥）与 `-irobf-cse-bind`（包名绑定，`.so` 仅在目标 App 内解出明文，配合 `-irobf-cse-bind-package=<包名>`，或 `NDKP_STR_BIND` 注解）。函数级虚拟化 `-irobf-vmp` 与反分析检测 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}` 已实现（详见 [obfuscation/README.md](./obfuscation/README.md)）。APK 签名证书绑定 `-irobf-cert-bind`（配合 `-irobf-cert-file=<cert.der>`）把签名证书 SHA-256 折进字符串与 VMP 密钥，换签名/重打包即 fail-closed；运行期读证书需 app 侧链接 `runtime/ndkp_apkcert.cpp`（见 [runtime/README.md](./runtime/README.md)）。不加任何开关时 overlay 不主动变换 IR；这不代表自建 clang 与官方 Android Clang 完全一致。字符串包名绑定与 VMP 有历史 arm64 设备验证，运行语义变更仍需重新验证；AArch64 后端机器码混淆（`-aarch64-obfuscate-*`）属后续阶段。
 
 ## 构建流程
 
@@ -83,7 +83,7 @@ tests/              package-layout / string-enc / abi-smoke / build-system-smoke
 
 ## 当前状态
 
-阶段 0、1a 已就绪；1b/1c 已完成代码和本地验证，但 GitHub Actions 端到端尚未跑通。VMP（`-irobf-vmp`）与反分析检测 pass 已实现并本地编译验证（VMP 待设备语义验证）。后端扩展和 macOS 尚未实现，见 [ROADMAP.md](./ROADMAP.md)。
+阶段 0、1a、1b 已跑通，Linux/Windows 双 Host build 已于 2026-09-09 成功发布。1c、VMP 与扩展保护已实现；2026-10-15 修复了字符串生命周期/并发、VMP 线程隔离/递归、证书初始化循环与常量加密兼容性。Windows LLVM 21 及 Android arm64（含证书绑定完整 APK）回归通过，本轮 Linux/Windows CI 和 LLVM 20 验证仍待完成。见 [验证记录](./tests/VALIDATION.md) 与 [路线图](./ROADMAP.md)。
 
 ## 许可证
 

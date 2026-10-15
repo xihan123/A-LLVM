@@ -141,6 +141,35 @@ static uint64_t ndkpFnv1a64(const char *p, size_t n) {
 	return h;
 }
 
+// 0 = uninitialized, 1 = initializing, 2 = published. Only the winning
+// thread writes the buffer; acquire/release also publishes non-atomic bytes.
+static BasicBlock *emitOnceGuard(IRBuilder<> &B, GlobalVariable *State,
+                                 BasicBlock *Body, BasicBlock *Done) {
+  Function *F = Body->getParent();
+  LLVMContext &Ctx = F->getContext();
+  BasicBlock *Claim = BasicBlock::Create(Ctx, "once.claim", F);
+  BasicBlock *Wait = BasicBlock::Create(Ctx, "once.wait", F);
+  State->setAlignment(Align(4));
+  auto *Ready = B.CreateLoad(B.getInt32Ty(), State);
+  Ready->setAtomic(AtomicOrdering::Acquire);
+  B.CreateCondBr(B.CreateICmpEQ(Ready, B.getInt32(2)), Done, Claim);
+  B.SetInsertPoint(Claim);
+  auto *Lock = B.CreateAtomicCmpXchg(State, B.getInt32(0), B.getInt32(1),
+                                    MaybeAlign(4), AtomicOrdering::Acquire,
+                                    AtomicOrdering::Monotonic);
+  B.CreateCondBr(B.CreateExtractValue(Lock, 1), Body, Wait);
+  B.SetInsertPoint(Wait);
+  auto *Published = B.CreateLoad(B.getInt32Ty(), State);
+  Published->setAtomic(AtomicOrdering::Acquire);
+  B.CreateCondBr(B.CreateICmpEQ(Published, B.getInt32(2)), Done, Wait);
+  return Claim;
+}
+
+static void emitOncePublish(IRBuilder<> &B, GlobalVariable *State) {
+  auto *Store = B.CreateStore(B.getInt32(2), State);
+  Store->setAtomic(AtomicOrdering::Release);
+}
+
 } // namespace
 
 namespace {
@@ -189,7 +218,6 @@ namespace {
 		std::map<GlobalVariable *, CSUser *> DecryptedCSUserMap;  ///< 解密用户缓冲区到用户的反向映射
 		std::map<const CSUser *, SmallVector<CSPEntry *, 8>> UserReferencedEntries;  ///< 每个全局用户依赖的底层字符串
 		std::map<GlobalVariable *, SmallVector<CSPEntry *, 8>> GlobalReferencedEntries;  ///< 任意全局变量依赖的底层字符串
-		SmallPtrSet<CSPEntry *, 16> PinnedEntries;  ///< 被指针表/聚合引用的条目，不能激进擦除
 		GlobalVariable *EncryptedStringTable = nullptr;  ///< 加密字符串表全局变量
 		std::set<GlobalVariable *> MaybeDeadGlobalVars;  ///< 可能死亡的全局变量集合
 
@@ -238,7 +266,6 @@ namespace {
 			DecryptedCSUserMap.clear();
 			UserReferencedEntries.clear();
 			GlobalReferencedEntries.clear();
-			PinnedEntries.clear();
 			MaybeDeadGlobalVars.clear();
 			return false;
 		}
@@ -371,17 +398,8 @@ namespace {
 		 * @param Ty 类型
 		 */
 		void lowerGlobalConstantArray(ConstantArray *CA, IRBuilder<> &IRB, Value *Ptr, Type *Ty);
-		void collectPinnedEntries(Constant *CV, SmallPtrSetImpl<Constant *> &Visited);
 		void collectReferencedEntries(Constant *CV, SmallPtrSetImpl<Constant *> &Visited,
 		                             SmallPtrSetImpl<CSPEntry *> &Entries);
-
-		/**
-		 * @brief 在当前基本块结束前擦除解密缓冲区，避免明文长期驻留
-		 * @param BB 需要插入擦除逻辑的基本块
-		 * @param GV 需要擦除的全局缓冲区
-		 */
-		void scheduleWipeAtBlockEnd(BasicBlock *BB, GlobalVariable *GV);
-		static bool shouldSkipBlockEndWipe(BasicBlock *BB, Instruction *InsertBefore);
 	};
 } // namespace llvm
 
@@ -634,10 +652,6 @@ bool StringEncryption::runOnModule(Module &M) {
 
 	for (GlobalVariable *GV : ConstantStringUsers) {
 		if (isValidToEncrypt(GV)) {
-			if (GV->hasInitializer()) {
-				SmallPtrSet<Constant *, 16> Visited;
-				collectPinnedEntries(GV->getInitializer(), Visited);
-			}
 			Type *EltType = GV->getValueType();
 			Constant *ZeroInit = Constant::getNullValue(EltType);
 			GlobalVariable *DecGV = new GlobalVariable(M, EltType, false, GlobalValue::PrivateLinkage,
@@ -925,6 +939,7 @@ Function *StringEncryption::buildDecryptFunction(Module *M, const StringEncrypti
 	BasicBlock *LoopBr0 = BasicBlock::Create(Ctx, "LoopBr0", DecFunc);
 	BasicBlock *LoopBr1 = BasicBlock::Create(Ctx, "LoopBr1", DecFunc);
 	BasicBlock *LoopEnd = BasicBlock::Create(Ctx, "LoopEnd", DecFunc);
+	BasicBlock *Publish = BasicBlock::Create(Ctx, "Publish", DecFunc);
 	BasicBlock *Exit = BasicBlock::Create(Ctx, "Exit", DecFunc);
 
 	IRB.SetInsertPoint(Enter);
@@ -933,16 +948,14 @@ Function *StringEncryption::buildDecryptFunction(Module *M, const StringEncrypti
 	ConstantInt *KeySizeBytesConst = ConstantInt::get(Type::getInt32Ty(Ctx), KeySizeInBytes);
 
 	Value *EncPtr = IRB.CreateInBoundsGEP(IRB.getInt8Ty(), Data, KeySizeBytesConst);
-	Value *DecStatus = IRB.CreateLoad(Type::getInt32Ty(Ctx), Entry->DecStatus, "dec_status");
-	Value *AlreadyDecrypted = IRB.CreateICmpEQ(DecStatus, IRB.getInt32(1), "already_decrypted");
-	IRB.CreateCondBr(AlreadyDecrypted, Exit, LoopBody);
+	BasicBlock *Claim = emitOnceGuard(IRB, Entry->DecStatus, LoopBody, Exit);
 
 	IRB.SetInsertPoint(LoopBody);
 	PHINode *LoopCounter = IRB.CreatePHI(IRB.getInt32Ty(), 2);
-	LoopCounter->addIncoming(IRB.getInt32(0), Enter);
+	LoopCounter->addIncoming(IRB.getInt32(0), Claim);
 
 	PHINode *LastDecrypted = IRB.CreatePHI(PlainEltTy, 2);
-	LastDecrypted->addIncoming(Constant::getNullValue(PlainEltTy), Enter);
+	LastDecrypted->addIncoming(Constant::getNullValue(PlainEltTy), Claim);
 
 	Value *KeyIdx = IRB.CreateURem(LoopCounter, KeyElemSize);
 
@@ -1026,10 +1039,12 @@ Function *StringEncryption::buildDecryptFunction(Module *M, const StringEncrypti
 
 	uint32_t DataSize = Entry->IsUTF16 ? static_cast<uint32_t>(Entry->Data16.size()) : static_cast<uint32_t>(Entry->Data.size());
 	Value *Cond = IRB.CreateICmpEQ(NewCounter, IRB.getInt32(static_cast<uint32_t>(DataSize)));
-	IRB.CreateCondBr(Cond, Exit, LoopBody);
+	IRB.CreateCondBr(Cond, Publish, LoopBody);
 
+	IRB.SetInsertPoint(Publish);
+	emitOncePublish(IRB, Entry->DecStatus);
+	IRB.CreateBr(Exit);
 	IRB.SetInsertPoint(Exit);
-	IRB.CreateStore(IRB.getInt32(1), Entry->DecStatus);
 	IRB.CreateRetVoid();
 
 	return DecFunc;
@@ -1123,8 +1138,7 @@ Function *StringEncryption::buildPkgKeyFunc(Module &M) {
 	IRBuilder<> B(Entry);
 	Value *Buf = B.CreateAlloca(ArrayType::get(I8, 256), nullptr, "cmdline");
 	Value *BufPtr = B.CreateBitCast(Buf, Ptr);
-	Value *Ready = B.CreateLoad(I32, ReadyG);
-	B.CreateCondBr(B.CreateICmpEQ(Ready, ConstantInt::get(I32, 1)), Done, Open);
+	emitOnceGuard(B, ReadyG, Open, Done);
 
 	B.SetInsertPoint(Open);
 	Value *Fp = B.CreateCall(Fopen, {mkString("/proc/self/cmdline", "ndkp_cse_cmdpath"),
@@ -1166,12 +1180,12 @@ Function *StringEncryption::buildPkgKeyFunc(Module &M) {
 	// HashPhi 在此可直接用。
 	B.SetInsertPoint(StoreBB);
 	B.CreateStore(HashPhi, PkgKeyG);
-	B.CreateStore(ConstantInt::get(I32, 1), ReadyG);
+	emitOncePublish(B, ReadyG);
 	B.CreateBr(Done);
 
 	B.SetInsertPoint(FailBB);
 	B.CreateStore(ConstantInt::get(I64, 0), PkgKeyG);
-	B.CreateStore(ConstantInt::get(I32, 1), ReadyG);
+	emitOncePublish(B, ReadyG);
 	B.CreateBr(Done);
 
 	B.SetInsertPoint(Done);
@@ -1331,7 +1345,6 @@ Function *StringEncryption::buildChaChaDecodeFunc(Module &M) {
 Function *StringEncryption::buildDecryptFunctionChaCha(Module *M, const StringEncryption::CSPEntry *Entry) {
 	LLVMContext &Ctx = M->getContext();
 	PointerType *Ptr = PointerType::get(Ctx, 0);
-	IntegerType *I32 = Type::getInt32Ty(Ctx);
 
 	Function *DecFunc = Function::Create(
 	    FunctionType::get(Type::getVoidTy(Ctx), {Ptr, Ptr}, false),
@@ -1352,13 +1365,12 @@ Function *StringEncryption::buildDecryptFunctionChaCha(Module *M, const StringEn
 	BasicBlock *Exit = BasicBlock::Create(Ctx, "Exit", DecFunc);
 
 	IRBuilder<> IRB(Enter);
-	Value *St = IRB.CreateLoad(I32, Entry->DecStatus, "dec_status");
-	IRB.CreateCondBr(IRB.CreateICmpEQ(St, IRB.getInt32(1)), Exit, Body);
+	emitOnceGuard(IRB, Entry->DecStatus, Body, Exit);
 
 	IRB.SetInsertPoint(Body);
 	IRB.CreateCall(SharedDecodeFunc,
 	               {Plain, Data, IRB.getInt32(LenBytes), IRB.getInt32(Entry->ID)});
-	IRB.CreateStore(IRB.getInt32(1), Entry->DecStatus);
+	emitOncePublish(IRB, Entry->DecStatus);
 	IRB.CreateBr(Exit);
 
 	IRB.SetInsertPoint(Exit);
@@ -1393,14 +1405,12 @@ Function *StringEncryption::buildInitFunction(Module *M, const StringEncryption:
 	BasicBlock *Exit = BasicBlock::Create(Ctx, "Exit", InitFunc);
 
 	IRB.SetInsertPoint(Enter);
-	Value *DecStatus = IRB.CreateLoad(Type::getInt32Ty(Ctx), User->DecStatus, "dec_status");
-	Value *AlreadyInitialized = IRB.CreateICmpEQ(DecStatus, IRB.getInt32(1), "already_initialized");
-	IRB.CreateCondBr(AlreadyInitialized, Exit, InitBody);
+	emitOnceGuard(IRB, User->DecStatus, InitBody, Exit);
 
 	IRB.SetInsertPoint(InitBody);
 	Constant *Init = User->GV->getInitializer();
 	lowerGlobalConstant(Init, IRB, User->DecGV, User->Ty);
-	IRB.CreateStore(IRB.getInt32(1), User->DecStatus);
+	emitOncePublish(IRB, User->DecStatus);
 	IRB.CreateBr(Exit);
 
 	IRB.SetInsertPoint(Exit);
@@ -1503,25 +1513,6 @@ void StringEncryption::lowerGlobalConstantStruct(ConstantStruct *CS, IRBuilder<>
 	}
 }
 
-void StringEncryption::collectPinnedEntries(Constant *CV, SmallPtrSetImpl<Constant *> &Visited) {
-	if (!CV || !Visited.insert(CV).second) {
-		return;
-	}
-
-	if (auto *GV = dyn_cast<GlobalVariable>(CV)) {
-		auto Iter = CSPEntryMap.find(GV);
-		if (Iter != CSPEntryMap.end()) {
-			PinnedEntries.insert(Iter->second);
-		}
-	}
-
-	for (unsigned i = 0; i < CV->getNumOperands(); ++i) {
-		if (auto *Nested = dyn_cast<Constant>(CV->getOperand(i))) {
-			collectPinnedEntries(Nested, Visited);
-		}
-	}
-}
-
 void StringEncryption::collectReferencedEntries(Constant *CV,
                                                SmallPtrSetImpl<Constant *> &Visited,
                                                SmallPtrSetImpl<CSPEntry *> &Entries) {
@@ -1540,65 +1531,6 @@ void StringEncryption::collectReferencedEntries(Constant *CV,
 			collectReferencedEntries(Nested, Visited, Entries);
 		}
 	}
-}
-
-void StringEncryption::scheduleWipeAtBlockEnd(BasicBlock *BB, GlobalVariable *GV) {
-	if (!BB || !GV || !BB->getTerminator()) {
-		return;
-	}
-
-	const Module *M = BB->getModule();
-	if (!M) {
-		return;
-	}
-
-	const DataLayout &DL = M->getDataLayout();
-	uint64_t Size = DL.getTypeAllocSize(GV->getValueType());
-	if (Size == 0) {
-		return;
-	}
-
-	IRBuilder<> IRB(BB->getTerminator());
-	Value *Buf = IRB.CreateBitCast(GV, PointerType::get(BB->getContext(), 0));
-	IRB.CreateMemSet(Buf, IRB.getInt8(0), Size, MaybeAlign(GV->getAlignment()));
-
-	if (CSPEntry *Entry = resolveCSPEntryGlobal(GV)) {
-		if (Entry->DecStatus) {
-			IRB.CreateStore(IRB.getInt32(0), Entry->DecStatus);
-		}
-		return;
-	}
-	if (CSUser *User = resolveCSUserGlobal(GV)) {
-		if (User->DecStatus) {
-			IRB.CreateStore(IRB.getInt32(0), User->DecStatus);
-		}
-	}
-}
-
-bool StringEncryption::shouldSkipBlockEndWipe(BasicBlock *BB, Instruction *InsertBefore) {
-	if (!BB) {
-		return true;
-	}
-	Instruction *Term = BB->getTerminator();
-	if (!Term) {
-		return true;
-	}
-	// If the current use is the terminator itself (most notably an invoke),
-	// inserting the wipe "at block end" would place it before the use.
-	if (InsertBefore && InsertBefore == Term) {
-		return true;
-	}
-	if (Function *F = BB->getParent()) {
-		if (F->getReturnType()->isPointerTy()) {
-			return true;
-		}
-	}
-	if (auto *Ret = dyn_cast<ReturnInst>(Term)) {
-		if (Value *RetVal = Ret->getReturnValue()) {
-			return RetVal->getType()->isPointerTy();
-		}
-	}
-	return false;
 }
 
 /**
@@ -1634,8 +1566,8 @@ bool StringEncryption::processConstantStringUse(Function *F) {
 		return &*PrevBB->getFirstInsertionPt();
 	};
 
-	auto ensureUserReady = [&](Instruction *InsertBefore, BasicBlock *WipeBB, CSUser *User) {
-		if (!InsertBefore || !WipeBB || !User || LiveBuffers.count(User->DecGV) > 0) {
+	auto ensureUserReady = [&](Instruction *InsertBefore, CSUser *User) {
+		if (!InsertBefore || !User || LiveBuffers.count(User->DecGV) > 0) {
 			return;
 		}
 		IRBuilder<> IRB(getSafeInsertPoint(InsertBefore));
@@ -1651,21 +1583,15 @@ bool StringEncryption::processConstantStringUse(Function *F) {
 				                  EncryptedStringTable,
 				                  {IRB.getInt32(0), IRB.getInt32(Entry->Offset)});
 				fixEH(IRB.CreateCall(Entry->DecFunc, {OutBuf, Data}));
-				if (PinnedEntries.count(Entry) == 0 && !shouldSkipBlockEndWipe(WipeBB, InsertBefore)) {
-					scheduleWipeAtBlockEnd(WipeBB, Entry->DecGV);
-				}
 				LiveBuffers.insert(Entry->DecGV);
 			}
 		}
 		fixEH(IRB.CreateCall(User->InitFunc, {User->DecGV}));
-		if (!shouldSkipBlockEndWipe(WipeBB, InsertBefore)) {
-			scheduleWipeAtBlockEnd(WipeBB, User->DecGV);
-		}
 		LiveBuffers.insert(User->DecGV);
 	};
 
-	auto ensureEntryReady = [&](Instruction *InsertBefore, BasicBlock *WipeBB, CSPEntry *Entry) {
-		if (!InsertBefore || !WipeBB || !Entry || LiveBuffers.count(Entry->DecGV) > 0) {
+	auto ensureEntryReady = [&](Instruction *InsertBefore, CSPEntry *Entry) {
+		if (!InsertBefore || !Entry || LiveBuffers.count(Entry->DecGV) > 0) {
 			return;
 		}
 		IRBuilder<> IRB(getSafeInsertPoint(InsertBefore));
@@ -1675,15 +1601,12 @@ bool StringEncryption::processConstantStringUse(Function *F) {
 		                  EncryptedStringTable,
 		                  {IRB.getInt32(0), IRB.getInt32(Entry->Offset)});
 		fixEH(IRB.CreateCall(Entry->DecFunc, {OutBuf, Data}));
-		if (PinnedEntries.count(Entry) == 0 && !shouldSkipBlockEndWipe(WipeBB, InsertBefore)) {
-			scheduleWipeAtBlockEnd(WipeBB, Entry->DecGV);
-		}
 		LiveBuffers.insert(Entry->DecGV);
 	};
 
-	auto ensureGlobalEntriesReady = [&](Instruction *InsertBefore, BasicBlock *WipeBB,
+	auto ensureGlobalEntriesReady = [&](Instruction *InsertBefore,
 	                                    GlobalVariable *GV) {
-		if (!InsertBefore || !WipeBB || !GV) {
+		if (!InsertBefore || !GV) {
 			return;
 		}
 		auto It = GlobalReferencedEntries.find(GV);
@@ -1691,7 +1614,7 @@ bool StringEncryption::processConstantStringUse(Function *F) {
 			return;
 		}
 		for (CSPEntry *Entry : It->second) {
-			ensureEntryReady(InsertBefore, WipeBB, Entry);
+			ensureEntryReady(InsertBefore, Entry);
 		}
 	};
 
@@ -1732,25 +1655,25 @@ bool StringEncryption::processConstantStringUse(Function *F) {
 	};
 
 	auto handleResolvedOperand = [&](Instruction &Inst, Value *Carrier,
-	                                 Instruction *InsertBefore, BasicBlock *WipeBB) {
+	                                 Instruction *InsertBefore) {
 		GlobalVariable *GV = extractReferencedGlobal(Carrier);
 		if (!GV) {
 			return false;
 		}
 
-		ensureGlobalEntriesReady(InsertBefore, WipeBB, GV);
+		ensureGlobalEntriesReady(InsertBefore, GV);
 
 		if (CSUser *User = resolveCSUserGlobal(GV)) {
 			if (F == User->InitFunc) {
 				return false;
 			}
-			ensureUserReady(InsertBefore, WipeBB, User);
+			ensureUserReady(InsertBefore, User);
 			rewriteResolvedGlobal(Inst, Carrier, GV, User->DecGV);
 			return true;
 		}
 
 		if (CSPEntry *Entry = resolveCSPEntryGlobal(GV)) {
-			ensureEntryReady(InsertBefore, WipeBB, Entry);
+			ensureEntryReady(InsertBefore, Entry);
 			rewriteResolvedGlobal(Inst, Carrier, GV, Entry->DecGV);
 			return true;
 		}
@@ -1761,7 +1684,7 @@ bool StringEncryption::processConstantStringUse(Function *F) {
 					errs() << "[DEBUG] CSE: Found pointer to encrypted string: " << DirectGV->getName()
 					       << " -> " << PointedEntry->DecGV->getName() << "\n";
 				}
-				ensureEntryReady(InsertBefore, WipeBB, PointedEntry);
+				ensureEntryReady(InsertBefore, PointedEntry);
 				return true;
 			}
 			if (CSUser *PointedUser = getPointedCSUser(DirectGV)) {
@@ -1769,7 +1692,7 @@ bool StringEncryption::processConstantStringUse(Function *F) {
 					errs() << "[DEBUG] CSE: Found pointer to CSUser string: " << DirectGV->getName()
 					       << " -> " << PointedUser->DecGV->getName() << "\n";
 				}
-				ensureUserReady(InsertBefore, WipeBB, PointedUser);
+				ensureUserReady(InsertBefore, PointedUser);
 				return true;
 			}
 		}
@@ -1784,11 +1707,11 @@ bool StringEncryption::processConstantStringUse(Function *F) {
 			if (PHINode *PHI = dyn_cast<PHINode>(&Inst)) {
 				for (unsigned int i = 0; i < PHI->getNumIncomingValues(); ++i) {
 					Changed |= handleResolvedOperand(Inst, PHI->getIncomingValue(i),
-					                                 BlockInsertPoint, &BB);
+					                                 BlockInsertPoint);
 				}
 			} else {
 				for (User::op_iterator op = Inst.op_begin(); op != Inst.op_end(); ++op) {
-					Changed |= handleResolvedOperand(Inst, *op, &Inst, &BB);
+					Changed |= handleResolvedOperand(Inst, *op, &Inst);
 				}
 			}
 		}

@@ -21,7 +21,7 @@ INC="$ROOT/runtime"
 SECRET="NDKP_ROUNDTRIP_secret_2b7f"
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 
-command -v openssl >/dev/null 2>&1 || { echo "[skip] 无 openssl，跳过证书绑定往返"; exit 0; }
+command -v openssl >/dev/null 2>&1 || { echo "[FAIL] 无 openssl，无法执行证书绑定往返"; exit 1; }
 CERT="$OUT/cert.der"
 # 私钥写临时文件：Windows 原生 openssl 不接受 -keyout /dev/null。
 # -subj 用 //CN=…：Git Bash/MSYS 会把 "/CN=…" 误当成 Unix 路径转成
@@ -66,7 +66,7 @@ EOF
 
 EXE="$OUT/rt"; EXEB="$OUT/rtbad"
 IS_WIN=0
-case "$("$CLANG" -dumpmachine 2>/dev/null || true)" in
+case "$("$CLANG" "$@" -dumpmachine 2>/dev/null || true)" in
   *windows*|*mingw*) EXE="$OUT/rt.exe"; EXEB="$OUT/rtbad.exe"; IS_WIN=1 ;;
 esac
 
@@ -81,9 +81,15 @@ CB_ARGS=(-mllvm -irobf -mllvm -irobf-cse -mllvm -irobf-cert-bind \
   -mllvm "-irobf-cert-file=${CERT_NATIVE}")
 fail=0
 
+# 运行期 provider 必须独立编译，否则其 fopen 路径也会依赖尚未初始化的证书。
+"$CLANG" "$@" -O2 -std=c++17 -fno-lto -I "$INC_NATIVE" \
+  -DNDKP_CERT_PATH="\"${CERT_NATIVE}\"" -c "$OUT/stub.cpp" -o "$OUT/stub.o"
+"$CLANG" "$@" -O2 -std=c++17 -fno-lto -I "$INC_NATIVE" \
+  -DNDKP_STUB_ZERO -c "$OUT/stub.cpp" -o "$OUT/stubbad.o"
+
 # 正例：stub 返回与构建期相同的混合值 → 抵消 → 正确解密。
 "$CLANG" "$@" -O2 "${CB_ARGS[@]}" -I "$INC_NATIVE" -DNDKP_CERT_PATH="\"${CERT_NATIVE}\"" \
-  -o "$EXE" "$RT" "$OUT/stub.cpp"
+  -o "$EXE" "$RT" "$OUT/stub.o"
 GOT="$("$EXE")"
 if [ "$GOT" = "$SECRET" ]; then
   echo "[ok]   证书匹配：运行期解密 == 明文：$SECRET"
@@ -93,7 +99,7 @@ fi
 
 # 负例：stub 返回 (0,0)（换签名/缺证书）→ 不抵消 → 应乱码（不得等于明文）。
 "$CLANG" "$@" -O2 "${CB_ARGS[@]}" -I "$INC_NATIVE" -DNDKP_STUB_ZERO \
-  -o "$EXEB" "$RT" "$OUT/stub.cpp"
+  -o "$EXEB" "$RT" "$OUT/stubbad.o"
 GOTB="$("$EXEB" || true)"
 if [ "$GOTB" = "$SECRET" ]; then
   echo "[FAIL] 错证书竟解出明文（fail-closed 失效）"; fail=1
@@ -101,4 +107,13 @@ else
   echo "[ok]   错/缺证书解出乱码（fail-closed 成立）"
 fi
 
+# 错误集成必须在编译期失败，而不是交付无法初始化的库。
+if "$CLANG" "$@" -O2 "${CB_ARGS[@]}" -I "$INC_NATIVE" -DNDKP_STUB_ZERO \
+     -c "$OUT/stub.cpp" -o "$OUT/unsafe.o" >"$OUT/unsafe.log" 2>&1; then
+  echo "[FAIL] 证书 provider 与业务共同绑定竟编译成功"; fail=1
+elif ! grep -q 'compile ndkp_certbind_mix separately' "$OUT/unsafe.log"; then
+  cat "$OUT/unsafe.log"; fail=1
+else
+  echo "[ok]   错误的 provider 编译方式被明确拒绝"
+fi
 exit $fail

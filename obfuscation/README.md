@@ -78,7 +78,7 @@ Transforms/Obfuscation/
 
 > **多进程说明**：解码器把 `/proc/self/cmdline` 截到首个 `:` 前再算哈希，因此**主进程与所有 `android:process=":suffix"` 私有子进程**都能正确解密（私有子进程 cmdline 为 `包名:suffix`，去后缀即包名；合法包名不含 `:`，截断无歧义）。**不支持**全局命名子进程（`android:process="some.other.name"`，无前导 `:`）——其进程名与包名无关，绑定串在该进程内会 fail-closed 解出乱码；请勿在此类进程放置绑定字符串。
 >
-> **运行期开销**：包名哈希每进程只算一次（`ready` 缓存），文件 I/O 一次性；每条串受 `dec_status` 幂等守卫，**每进程至多解密一次**（惰性、首次使用时），无逐次访问开销。派生的 ChaCha 主密钥仅依赖 pepper（+包名），每串重算而**不缓存**——刻意让主密钥不常驻 RW 内存，避免一次内存 dump 离线解出整表。
+> **运行期开销**：包名哈希每进程只算一次（`ready` 缓存），文件 I/O 一次性；每条串受 `dec_status` 幂等守卫，**每进程至多解密一次**（惰性、首次使用时，原子 acquire/release 发布），后续访问保留原子状态检查。解密后的字符串保持静态存储期，不在基本块结束时擦除，以支持保存指针和跨线程读取。派生的 ChaCha 主密钥仅依赖 pepper（+包名），每串重算而**不缓存**——刻意让主密钥不常驻 RW 内存，避免一次内存 dump 离线解出整表。
 | `-irobf-cie` | 整数常量加密 |
 | `-irobf-cfe` | 浮点常量加密 |
 | `-irobf-fla` | 控制流平坦化 |
@@ -113,7 +113,7 @@ Transforms/Obfuscation/
 
 > **关于 `.comment` 的彻底清零**：编译期只能去掉**本模块**的贡献。最终 `.so` 的 `.comment` 还来自官方 NDK 的 CRT/libc++/compiler-rt 目标与 lld，工具链把链接后的 `.so` 直接交给用户、没有 link 后处理入口，故无法在 clang 内清零。需要时在 link 后自行执行 `llvm-strip -R .comment <输出.so>`（该工具已随 NDK 提供）。注意本项目的 clang 版本串与官方 NDK clang 相同，`.comment` **并非**混淆工具链的唯一指纹，此项为纵深防御。
 
-VMP 已实现并本地验证（IR + clang codegen → 原生 aarch64 `.so`），设备语义等价验证前不发布（见 `DESIGN.md`）。检测类 pass（`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`）注入到 `main`；构建为可执行文件时生效，构建为 `.so`（无 `main`）时自动跳过。
+VMP 执行状态、每函数数据缓冲区及解释器可变缓存按线程隔离；解释器链接后统一设置 TLS，内嵌只读字节码保持共享。2026-10-15 的 Android arm64 并发、按名称选择的递归及 VM→native→VM 回调回归通过。运行语义变更须重新跑 `bash tests/vmp/roundtrip.sh <ndk> <host> <adb-serial>`（见 [验证记录](../tests/VALIDATION.md)）。即使输入为 C，VMP 产物也需用 `clang++` 链接或等效配置 libc++，因为解释器使用 C++ 异常辅助函数。检测类 pass（`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`）注入到 `main`；构建为可执行文件时生效，构建为 `.so`（无 `main`）时自动跳过。
 
 AArch64 后端混淆和对应的 Driver 参数尚未实现。
 

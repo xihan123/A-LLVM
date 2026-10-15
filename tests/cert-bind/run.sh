@@ -42,7 +42,7 @@ TGT="--target=aarch64-linux-android21 -shared -fPIC -O2"
 # 无 openssl 则跳过（CI host 一般都有）。
 CERT="$OUT/cert.der"
 if ! command -v openssl >/dev/null 2>&1; then
-  echo "[skip] 未找到 openssl，无法生成测试证书 DER，跳过证书绑定测试"; exit 0
+  echo "[FAIL] 未找到 openssl，无法执行证书绑定测试"; exit 1
 fi
 # 私钥写到临时文件：Windows 原生 openssl 不接受 -keyout /dev/null。
 # -subj 用 //CN=…：Git Bash/MSYS 会把 "/CN=…" 误当成 Unix 路径转成
@@ -72,16 +72,18 @@ esac
 # 单独引住 -irobf-cert-file=…，避免路径含空格时被词法拆开。
 CERTBIND_ARGS=(-mllvm -irobf-cert-bind -mllvm "-irobf-cert-file=${CERT_FOR_CLANG}")
 
-# 编入 helper（提供 ndkp_certbind_mix）以满足 --no-undefined，即真实集成方式。
+# helper 在证书初始化之前运行，必须独立编译且不带混淆或 LTO。
+"$CLANG" --target=aarch64-linux-android21 -fPIC -O2 -std=c++17 -fno-lto \
+  -I "$INC_FOR_CLANG" -c "$HELPER" -o "$OUT/helper.o"
 "$CLANG" $TGT -mllvm -irobf -mllvm -irobf-cse "${CERTBIND_ARGS[@]}" -I "$INC_FOR_CLANG" \
-  -o "$OUT/cse_cert.so" "$SRC" "$HELPER"
+  -o "$OUT/cse_cert.so" "$SRC" "$OUT/helper.o"
 # cse-only 无需 helper（不引用 ndkp_certbind_mix）。
 "$CLANG" $TGT -mllvm -irobf -mllvm -irobf-cse \
   -o "$OUT/cse_only.so" "$SRC"
 # vmp + cert-bind：VMP 密钥折入路径亦应建运行期基座。
 "$CLANG" $TGT -mllvm -irobf -mllvm -irobf-vmp \
   -mllvm -irobf-vm_functions=ndkp_secret_len "${CERTBIND_ARGS[@]}" -I "$INC_FOR_CLANG" \
-  -o "$OUT/vmp_cert.so" "$SRC" "$HELPER"
+  -o "$OUT/vmp_cert.so" "$SRC" "$OUT/helper.o"
 
 has_sym() { "$NM" "$1" 2>/dev/null | grep -q "$2"; }
 
@@ -123,7 +125,7 @@ fi
 
 # 6) 缺 -irobf-cert-file ⇒ 构建 fail-closed（预期 clang 非零退出）
 if "$CLANG" $TGT -mllvm -irobf -mllvm -irobf-cse -mllvm -irobf-cert-bind -I "$INC_FOR_CLANG" \
-     -o "$OUT/nofile.so" "$SRC" "$HELPER" >/dev/null 2>&1; then
+     -o "$OUT/nofile.so" "$SRC" "$OUT/helper.o" >/dev/null 2>&1; then
   echo "[FAIL] -irobf-cert-bind 缺 -irobf-cert-file 竟构建成功（应 fail-closed）"; fail=1
 else
   echo "[ok]   -irobf-cert-bind 缺 -irobf-cert-file 构建失败（fail-closed）"

@@ -22,7 +22,7 @@ SECRET="NDKP_ROUNDTRIP_secret_2b7f"
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 
 EXE="$OUT/rt"
-case "$("$CLANG" -dumpmachine 2>/dev/null || true)" in
+case "$("$CLANG" "$@" -dumpmachine 2>/dev/null || true)" in
   *windows*|*mingw*) EXE="$OUT/rt.exe" ;;
 esac
 
