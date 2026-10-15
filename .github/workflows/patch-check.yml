@@ -14,6 +14,7 @@ on:
     - "runtime/**"
     - "include/**"
     - "scripts/apply_overlay.sh"
+    - "scripts/sync_overlay.py"
     - "scripts/overlay_ndk.sh"
     - "tests/**"
     - "scripts/discover_ndk.py"
@@ -33,6 +34,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: python tests/discover/test_discover.py
+      - run: python -m unittest discover -s tests/overlay -p 'test_*.py' -v
 
   verify:
     uses: ./.github/workflows/build.yml
