@@ -88,7 +88,7 @@
 
 已在同一 `build.yml` 接入 `use_snapshot=false` 开关、Linux 精确键恢复、完整清单校验、受信任分支成功后的保存，以及各构建阶段计时。全部现有回归保持启用。新元数据记录当前仓库提交、快照来源和当前 overlay 摘要，patchset 递增为 p2。
 
-[快照测试与操作说明](./tests/build-snapshot/README.md)：Linux/WSL 18 项通过；Windows 17 项通过、跳过 GNU tar 专项。覆盖文件/时间戳损坏、不完整恢复、实际 CMake 配置与 LLVM 基线检查、键兼容性、编译错误透传、纳秒时间戳归档往返和构建追溯。工作流通过 actionlint 检查。
+[快照测试与操作说明](./tests/build-snapshot/README.md)：Linux/WSL 19 项通过；Windows 18 项通过、跳过 GNU tar 专项。覆盖文件/时间戳损坏、不完整恢复、实际 CMake 配置与 LLVM 基线检查、Python 绝对路径及版本兼容性、键兼容性、编译错误透传、纳秒时间戳归档往返和构建追溯。工作流通过 actionlint 检查。
 
 阶段 2 仍需真实 CI 完成冷构建保存、同代码恢复、单 Pass 修改恢复三轮。首次冷构建完成并成功保存前，不能报告 CI 加速比例；Linux/Windows 四组矩阵也尚未推广。
 

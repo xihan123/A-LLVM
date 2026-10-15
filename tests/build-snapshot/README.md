@@ -13,7 +13,7 @@ python -m unittest discover -s tests/build-snapshot -p 'test_*.py' -v
 ## 快照边界
 
 - 缓存仅包含 `llvm-project/`、`build/`、`.llvm-build-snapshot.json`。官方 NDK 和发布 ZIP 每次重新组装。
-- 精确键包含绝对工作路径、Base revision、major、host/架构、runner 镜像、已安装系统包版本、编译器/链接器/CMake/Ninja 的路径、版本和二进制摘要、有效 CMake 参数、注册补丁、overlay CMake 文件及构建辅助脚本摘要。
+- 精确键包含绝对工作路径、Base revision、major、host/架构、runner 镜像、已安装系统包版本、编译器/链接器/CMake/Ninja/Python 的路径、版本和二进制摘要、有效 CMake 参数、注册补丁、overlay CMake 文件及构建辅助脚本摘要。CMake 使用被记录的 Python 绝对路径，防止浮动补丁版本留下失效路径。
 - Pass 文件、仓库提交和 patchset 不进入键；来源提交与完整 overlay 摘要写入快照来源记录。恢复后仍同步当前提交的 overlay。
 - 清单检查所有文件的 SHA-256、大小、mtime 和权限，以及目录、符号链接目标；另检查 LLVM HEAD、实际 CMakeCache 和关键生成文件。时间戳恢复丢失精度也会拒绝复用。
 - 缺失、不完整或不兼容快照只清除工作区内两个固定构建目录，再走冷构建。当前提交的补丁、配置、编译和测试错误不会触发冷构建重试。
