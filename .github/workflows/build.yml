@@ -12,6 +12,7 @@ on:
       patchset: { type: string, default: "" }
       mode: { type: string, default: "build" } # build=自建clang并混淆; repack=原样重打包
       targets: { type: string, default: "AArch64;ARM;X86" } # 四个主流 Android ABI 所需后端
+      use_snapshot: { type: boolean, default: false } # Linux 试点，默认冷构建
   workflow_dispatch:
     inputs:
       ndk_tag: { description: "上游 tag；与 internal 同时留空则自动取所选通道最新版", required: false, default: "" }
@@ -28,6 +29,7 @@ on:
       patchset: { description: "patchset（留空则 tag 不含后缀）", required: false, default: "" }
       mode: { description: "build / repack", required: false, default: "build" }
       targets: { description: "LLVM_TARGETS_TO_BUILD（默认覆盖四个主流 Android ABI）", required: false, default: "AArch64;ARM;X86" }
+      use_snapshot: { description: "复用 LLVM 构建快照（仅 Linux build 试点）", type: boolean, default: false }
 
 permissions:
   contents: read
@@ -52,6 +54,7 @@ jobs:
       PATCHSET_VERSION: ${{ inputs.patchset }}
       DOWNLOAD_URL: ${{ inputs.download_url }}
       LLVM_TARGETS: ${{ inputs.targets }}
+      USE_SNAPSHOT: ${{ inputs.use_snapshot && 'true' || 'false' }}
     steps:
     - uses: actions/checkout@v7
 
@@ -93,6 +96,9 @@ jobs:
           build|repack) ;;
           *) echo "::error::不支持的 mode=$MODE（仅 build / repack）"; exit 1 ;;
         esac
+        if [ "$USE_SNAPSHOT" = true ] && { [ "$MODE" != build ] || [ "$HOST" != linux-x86_64 ]; }; then
+          echo "::error::快照试点仅支持 Linux build 模式"; exit 1
+        fi
         if [ "$MODE" = build ]; then
           for target in AArch64 ARM X86; do
             case ";$LLVM_TARGETS;" in
@@ -117,12 +123,19 @@ jobs:
       with:
         python-version: "3.11"
 
-    - name: 下载并解压官方 NDK
+    - name: 下载官方 NDK
       run: |
-        set -euo pipefail
-        curl -fL --retry 3 -o ndk.zip "${{ steps.vars.outputs.download_url }}"
+        python scripts/build_snapshot.py run --phase ndk-download -- \
+          curl -fL --retry 3 -o ndk.zip "${{ steps.vars.outputs.download_url }}"
         echo "下载 sha256: $(sha256sum ndk.zip | cut -d' ' -f1)"
-        if [ "$RUNNER_OS" = "Windows" ]; then 7z x -y ndk.zip >/dev/null; else unzip -q ndk.zip; fi
+
+    - name: 解压官方 NDK
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          python scripts/build_snapshot.py run --phase ndk-unpack -- 7z x -y ndk.zip
+        else
+          python scripts/build_snapshot.py run --phase ndk-unpack -- unzip -q ndk.zip
+        fi
         NDK_DIR="$(find . -maxdepth 1 -type d -name 'android-ndk-*' | head -n1)"
         [ -n "$NDK_DIR" ] || { echo "::error::未找到解压后的 NDK 目录"; exit 1; }
         NDK_DIR="$(cd "$NDK_DIR" && pwd -P)"
@@ -151,9 +164,37 @@ jobs:
       run: |
         python scripts/locate_llvm.py --ndk-dir "$NDK_DIR" --host "$HOST"
 
-    - name: 浅克隆 llvm-project @ base commit
-      if: ${{ inputs.mode == 'build' }}
+    - name: 计算 Linux 构建配置与快照精确键
+      if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
+      id: snapshot_key
       run: |
+        SNAPSHOT_ARGS=()
+        if [ "$USE_SNAPSHOT" = true ]; then SNAPSHOT_ARGS+=(--enabled); fi
+        python scripts/build_snapshot.py prepare \
+          --base "${{ steps.loc.outputs.base_commit }}" \
+          --major "${{ steps.loc.outputs.llvm_major }}" --targets "$LLVM_TARGETS" "${SNAPSHOT_ARGS[@]}"
+
+    - name: 恢复 LLVM 构建快照
+      if: ${{ inputs.mode == 'build' && inputs.use_snapshot && runner.os == 'Linux' }}
+      id: restore_snapshot
+      continue-on-error: true
+      uses: actions/cache/restore@v5
+      with:
+        key: ${{ steps.snapshot_key.outputs.key }}
+        path: |
+          llvm-project
+          build
+          .llvm-build-snapshot.json
+
+    - name: 校验快照，不兼容或不完整时清理并冷构建
+      if: ${{ inputs.mode == 'build' && inputs.use_snapshot && runner.os == 'Linux' }}
+      id: snapshot
+      run: python scripts/build_snapshot.py validate --cache-hit "${{ steps.restore_snapshot.outputs.cache-hit }}"
+
+    - name: 浅克隆 llvm-project @ base commit
+      if: ${{ inputs.mode == 'build' && steps.snapshot.outputs.hit != 'true' }}
+      run: |
+        python scripts/build_snapshot.py run --phase clone -- "$BASH" -euo pipefail <<'BUILD_STEP'
         set -euo pipefail
         BASE="${{ steps.loc.outputs.base_commit }}"
         [ -n "$BASE" ] || { echo "::error::base_commit 为空"; exit 1; }
@@ -163,11 +204,13 @@ jobs:
         git fetch -q --depth=1 origin "$BASE"
         git reset -q --hard FETCH_HEAD
         echo "llvm-project @ $BASE"
+        BUILD_STEP
 
     - name: 应用混淆 overlay（build 模式必须存在）
       if: ${{ inputs.mode == 'build' }}
       id: overlay
       run: |
+        python scripts/build_snapshot.py run --phase overlay -- "$BASH" -euo pipefail <<'BUILD_STEP'
         set -euo pipefail
         MAJOR="${{ steps.loc.outputs.llvm_major }}"
         [ -d "obfuscation/llvm-$MAJOR/Transforms/Obfuscation" ] || {
@@ -178,21 +221,16 @@ jobs:
         }
         bash scripts/apply_overlay.sh --llvm-src "$PWD/llvm-project" --major "$MAJOR"
         echo "overlay_applied=true" >> "$GITHUB_OUTPUT"
+        BUILD_STEP
 
     - name: 配置并编译 clang（Linux）
       if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
       run: |
         set -euo pipefail
-        cmake -S llvm-project/llvm -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DLLVM_ENABLE_ASSERTIONS=OFF \
-          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-          -DLLVM_USE_LINKER=lld \
-          -DLLVM_PARALLEL_LINK_JOBS=1 \
-          -DLLVM_OBFUSCATION_LINK_INTO_TOOLS=ON \
-          -DLLVM_ENABLE_PROJECTS="clang" \
-          -DLLVM_TARGETS_TO_BUILD="$LLVM_TARGETS"
-        ninja -C build clang clang-resource-headers
+        if [ "${{ steps.snapshot.outputs.hit }}" != true ]; then
+          python scripts/build_snapshot.py configure
+        fi
+        python scripts/build_snapshot.py run --phase compile -- ninja -C build clang clang-resource-headers
 
     - name: 配置并编译 clang（Windows / MSVC）
       if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
@@ -212,8 +250,11 @@ jobs:
     - name: 用自建二进制覆盖 NDK
       if: ${{ inputs.mode == 'build' }}
       run: |
+        python scripts/build_snapshot.py run --phase assemble -- "$BASH" -euo pipefail <<'BUILD_STEP'
         bash scripts/overlay_ndk.sh --built "$PWD/build" --ndk "$NDK_DIR" \
           --host "$HOST" --major "${{ steps.loc.outputs.llvm_major }}"
+
+        BUILD_STEP
 
     # ---------------- 公共：元数据 / 测试 / 打包 ----------------
     - name: 写入可追溯元数据
@@ -225,11 +266,13 @@ jobs:
           --clang-rev "${{ steps.loc.outputs.clang_rev }}" \
           --base-commit "${{ steps.loc.outputs.base_commit }}" \
           --overlay-applied "${{ steps.overlay.outputs.overlay_applied || 'false' }}" \
+          --snapshot-state .snapshot/state.json \
           --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
     - name: 宿主运行语义回归（build 模式）
       if: ${{ inputs.mode == 'build' }}
       run: |
+        python scripts/build_snapshot.py run --phase host-tests -- "$BASH" -euo pipefail <<'BUILD_STEP'
         set -euo pipefail
         case "$HOST" in
           windows-x86_64) CLANG="$PWD/build/bin/clang.exe"; TARGET=x86_64-pc-windows-msvc ;;
@@ -239,40 +282,42 @@ jobs:
         bash tests/string-enc/lifetime.sh "$CLANG" --target="$TARGET"
         bash tests/constant-enc/roundtrip.sh "$CLANG" --target="$TARGET"
         bash tests/cert-bind/roundtrip.sh "$CLANG" --target="$TARGET"
+        BUILD_STEP
 
     - name: 包结构测试
-      run: bash tests/package-layout/check_layout.sh "$NDK_DIR" "$HOST"
+      run: python scripts/build_snapshot.py run --phase test-layout -- "$BASH" tests/package-layout/check_layout.sh "$NDK_DIR" "$HOST"
 
     - name: 四 ABI 编链冒烟
       if: ${{ inputs.mode == 'build' }}
-      run: bash tests/abi-smoke/run.sh "$NDK_DIR" "$HOST"
+      run: python scripts/build_snapshot.py run --phase test-abi -- "$BASH" tests/abi-smoke/run.sh "$NDK_DIR" "$HOST"
 
     - name: CMake / ndk-build 冒烟
       if: ${{ inputs.mode == 'build' }}
-      run: bash tests/build-system-smoke/run.sh "$NDK_DIR" "$HOST"
+      run: python scripts/build_snapshot.py run --phase test-build-system -- "$BASH" tests/build-system-smoke/run.sh "$NDK_DIR" "$HOST"
 
     - name: 字符串加密测试（build 模式）
       if: ${{ inputs.mode == 'build' }}
-      run: bash tests/string-enc/check.sh "$NDK_DIR" "$HOST"
+      run: python scripts/build_snapshot.py run --phase test-strings -- "$BASH" tests/string-enc/check.sh "$NDK_DIR" "$HOST"
 
     - name: 去指纹测试（build 模式）
       if: ${{ inputs.mode == 'build' }}
-      run: bash tests/fingerprint-scrub/run.sh "$NDK_DIR" "$HOST"
+      run: python scripts/build_snapshot.py run --phase test-fingerprint -- "$BASH" tests/fingerprint-scrub/run.sh "$NDK_DIR" "$HOST"
 
     - name: 代码完整性自校验测试（build 模式）
       if: ${{ inputs.mode == 'build' }}
-      run: bash tests/anti-tamper/run.sh "$NDK_DIR" "$HOST"
+      run: python scripts/build_snapshot.py run --phase test-self-check -- "$BASH" tests/anti-tamper/run.sh "$NDK_DIR" "$HOST"
 
     - name: 证书绑定测试（build 模式）
       if: ${{ inputs.mode == 'build' }}
-      run: bash tests/cert-bind/run.sh "$NDK_DIR" "$HOST"
+      run: python scripts/build_snapshot.py run --phase test-certificate -- "$BASH" tests/cert-bind/run.sh "$NDK_DIR" "$HOST"
 
     - name: VMP 并发语义样本编链（build 模式）
       if: ${{ inputs.mode == 'build' }}
-      run: bash tests/vmp/roundtrip.sh "$NDK_DIR" "$HOST"
+      run: python scripts/build_snapshot.py run --phase test-vmp-compile -- "$BASH" tests/vmp/roundtrip.sh "$NDK_DIR" "$HOST"
 
     - name: 打包
       run: |
+        python scripts/build_snapshot.py run --phase package -- "$BASH" -euo pipefail <<'BUILD_STEP'
         set -euo pipefail
         mkdir -p dist
         ZIP="android-ndk-${OUR_TAG}-${HOST}.zip"
@@ -283,9 +328,46 @@ jobs:
         fi
         ( cd dist && sha256sum *.zip > SHA256SUMS )
         ls -lh dist/
+        BUILD_STEP
 
     - uses: actions/upload-artifact@v7
       with:
         name: ndk-${{ steps.vars.outputs.our_tag }}-${{ inputs.host }}
         path: dist/*.zip
         retention-days: 7
+
+    # Immutable snapshots are written only after all existing tests and artifact upload succeed.
+    - name: 生成完整快照清单
+      if: >-
+        ${{ inputs.mode == 'build' && inputs.use_snapshot && runner.os == 'Linux' &&
+            steps.restore_snapshot.outputs.cache-hit != 'true' &&
+            github.event_name != 'pull_request' && github.event_name != 'pull_request_target' &&
+            (github.ref == 'refs/heads/dev' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+      id: seal_snapshot
+      run: python scripts/build_snapshot.py seal
+
+    - name: 保存已通过回归的 LLVM 构建快照
+      if: ${{ steps.seal_snapshot.outcome == 'success' }}
+      id: save_snapshot
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        key: ${{ steps.snapshot_key.outputs.key }}
+        path: |
+          llvm-project
+          build
+          .llvm-build-snapshot.json
+
+    - name: 汇总构建耗时
+      if: always()
+      run: python scripts/build_snapshot.py report --save-outcome "${{ steps.save_snapshot.outcome }}"
+
+    - name: 上传构建耗时与快照信息
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: build-metrics-${{ steps.vars.outputs.our_tag }}-${{ inputs.host }}
+        path: .snapshot/*.json
+        include-hidden-files: true
+        retention-days: 14
+        if-no-files-found: ignore

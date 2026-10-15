@@ -15,6 +15,8 @@ on:
     - "include/**"
     - "scripts/apply_overlay.sh"
     - "scripts/sync_overlay.py"
+    - "scripts/build_snapshot.py"
+    - "scripts/make_release_meta.py"
     - "scripts/overlay_ndk.sh"
     - "tests/**"
     - "scripts/discover_ndk.py"
@@ -35,6 +37,7 @@ jobs:
           python-version: "3.11"
       - run: python tests/discover/test_discover.py
       - run: python -m unittest discover -s tests/overlay -p 'test_*.py' -v
+      - run: python -m unittest discover -s tests/build-snapshot -p 'test_*.py' -v
 
   verify:
     uses: ./.github/workflows/build.yml

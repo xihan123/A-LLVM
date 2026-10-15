@@ -59,6 +59,7 @@ def main():
     )
     ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     ap.add_argument("--run-url", default=os.environ.get("RUN_URL", ""))
+    ap.add_argument("--snapshot-state", help="Optional state from the Linux snapshot pilot")
     args = ap.parse_args()
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -92,8 +93,16 @@ def main():
         "obfuscation_overlay_applied": overlay_applied,
         "obfuscation_source": args.overlay_source if overlay_applied else None,
         "build_run": args.run_url,
+        "repository_commit": os.environ.get("GITHUB_SHA", ""),
         "source_date_epoch": int(os.environ.get("SOURCE_DATE_EPOCH", "0")),
     }
+    if args.snapshot_state and os.path.isfile(args.snapshot_state):
+        with open(args.snapshot_state, encoding="utf-8") as stream:
+            snapshot = json.load(stream)
+        build_info["build_snapshot"] = {
+            key: snapshot.get(key)
+            for key in ("requested", "hit", "key", "reason", "snapshot_origin", "overlay_sha256")
+        }
     with open(
         os.path.join(args.ndk_dir, "NDKP-build-info.json"), "w", encoding="utf-8"
     ) as f:
