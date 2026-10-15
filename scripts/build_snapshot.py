@@ -60,6 +60,7 @@ def cmake_args(root, targets, tools):
         "-DCMAKE_BUILD_TYPE=Release", "-DLLVM_ENABLE_ASSERTIONS=OFF",
         f"-DCMAKE_C_COMPILER={tools['clang']['path']}",
         f"-DCMAKE_CXX_COMPILER={tools['clang++']['path']}",
+        f"-DPython3_EXECUTABLE={tools['python']['path']}",
         "-DLLVM_USE_LINKER=lld", "-DLLVM_PARALLEL_LINK_JOBS=1",
         "-DLLVM_OBFUSCATION_LINK_INTO_TOOLS=ON", "-DLLVM_ENABLE_PROJECTS=clang",
         f"-DLLVM_TARGETS_TO_BUILD={targets}",
@@ -83,6 +84,8 @@ def prepare(args):
             raise ValueError(f"missing host tool: {name}")
         tools[name] = {"path": executable, "resolved_path": str(Path(executable).resolve()),
                        "version": capture(executable, "--version"), "sha256": digest(executable)}
+    tools["python"] = {"path": sys.executable, "resolved_path": str(Path(sys.executable).resolve()),
+                       "version": sys.version, "sha256": digest(sys.executable)}
     config_files = [overlay / "registration.patch", *overlay.rglob("CMakeLists.txt"),
                     *overlay.rglob("*.cmake"), root / "scripts/apply_overlay.sh",
                     root / "scripts/sync_overlay.py", root / "scripts/build_snapshot.py"]

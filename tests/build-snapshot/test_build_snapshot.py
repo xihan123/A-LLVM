@@ -35,7 +35,7 @@ class SnapshotTest(unittest.TestCase):
         self.capture = mock.patch.object(snapshot, "capture", return_value="a" * 40)
         self.capture.start()
         self.addCleanup(self.capture.stop)
-        tools = {name: {"path": "/host/" + name} for name in ("clang", "clang++", "cmake")}
+        tools = {name: {"path": "/host/" + name} for name in ("clang", "clang++", "cmake", "python")}
         self.identity = {"format": snapshot.FORMAT, "base_commit": "a" * 40, "llvm_major": 21,
                          "root": str(self.root), "host": "linux-x86_64", "image_version": "test-1",
                          "tools": tools, "cmake_args": snapshot.cmake_args(self.root, "AArch64;ARM;X86", tools)}
@@ -141,6 +141,12 @@ class SnapshotTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Base revision"):
                 snapshot.seal()
 
+    def test_actual_python_path_must_match(self):
+        path = self.root / "build/CMakeCache.txt"
+        path.write_text(path.read_text().replace("=/host/python", "=/another/python"))
+        with self.assertRaisesRegex(ValueError, "Python3_EXECUTABLE"):
+            snapshot.seal()
+
     def test_compatibility_key_changes_for_build_environment(self):
         original = snapshot.cache_key(self.identity)
         for field, value in (("base_commit", "d" * 40), ("root", "/another/root"),
@@ -156,13 +162,14 @@ class SnapshotTest(unittest.TestCase):
         for name in ("obfuscation/llvm-21/registration.patch",
                      "obfuscation/llvm-21/Transforms/Obfuscation/CMakeLists.txt",
                      "obfuscation/llvm-21/Transforms/Obfuscation/Pass.cpp",
-                     "scripts/apply_overlay.sh", "scripts/sync_overlay.py", "scripts/build_snapshot.py", "host-tool"):
+                     "scripts/apply_overlay.sh", "scripts/sync_overlay.py", "scripts/build_snapshot.py", "host-tool", "python-tool"):
             self.write(name, b"original")
         args = argparse.Namespace(base="a" * 40, major=21, targets="AArch64;ARM;X86", enabled=True)
         original_read = Path.read_text
         with mock.patch.object(snapshot.platform, "system", return_value="Linux"), \
                 mock.patch.object(snapshot.platform, "machine", return_value="x86_64"), \
                 mock.patch.object(snapshot.shutil, "which", return_value=str(self.root / "host-tool")), \
+                mock.patch.object(snapshot.sys, "executable", str(self.root / "python-tool")), \
                 mock.patch.object(Path, "read_text", autospec=True, side_effect=lambda p, **k: "Linux" if p.as_posix() == "/etc/os-release" else original_read(p, **k)), \
                 mock.patch.dict(os.environ, {"ImageOS": "ubuntu24", "ImageVersion": "20261015.1"}), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -175,12 +182,16 @@ class SnapshotTest(unittest.TestCase):
             self.assertEqual(first["key"], second["key"])
             self.assertNotEqual(first["overlay_sha256"], second["overlay_sha256"])
             for filename in ("obfuscation/llvm-21/registration.patch",
-                             "obfuscation/llvm-21/Transforms/Obfuscation/CMakeLists.txt", "host-tool"):
+                             "obfuscation/llvm-21/Transforms/Obfuscation/CMakeLists.txt", "host-tool", "python-tool"):
                 self.write(filename, b"changed configuration")
                 snapshot.prepare(args)
                 third = snapshot.read_json(snapshot.STATE_DIR / "state.json")
                 self.assertNotEqual(second["key"], third["key"])
                 second = third
+            self.write("another-python", (self.root / "python-tool").read_bytes())
+            with mock.patch.object(snapshot.sys, "executable", str(self.root / "another-python")):
+                snapshot.prepare(args)
+            self.assertNotEqual(second["key"], snapshot.read_json(snapshot.STATE_DIR / "state.json")["key"])
 
     def test_failed_build_is_recorded_and_propagated(self):
         result = snapshot.run_timed("compile", [sys.executable, "-c", "raise SystemExit(13)"])
