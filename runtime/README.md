@@ -20,15 +20,30 @@ patch 的 `if`）。
 
 ## 集成（三步）
 
-**1. 把 `ndkp_apkcert.cpp` 编进你的 native 库**（C++17，POSIX，无第三方依赖）。
+**1. 将 `ndkp_apkcert.cpp` 单独编译，再链接进 native 库**（C++17，POSIX，无第三方依赖）。
+
+读取证书的代码必须不带混淆开关，并关闭 LTO。否则 `/proc/self/maps` 等路径也会被证书绑定加密，形成初始化循环。编译器会拒绝在定义 `ndkp_certbind_mix` 的翻译单元上开启 `-irobf-cert-bind`。
 
 CMake（`externalNativeBuild`）：
 ```cmake
-target_sources(your_lib PRIVATE ${CMAKE_SOURCE_DIR}/path/to/runtime/ndkp_apkcert.cpp)
-target_include_directories(your_lib PRIVATE ${CMAKE_SOURCE_DIR}/path/to/runtime)
+add_library(ndkp_cert_runtime OBJECT path/to/runtime/ndkp_apkcert.cpp)
+target_compile_features(ndkp_cert_runtime PRIVATE cxx_std_17)
+set_target_properties(ndkp_cert_runtime PROPERTIES
+  POSITION_INDEPENDENT_CODE ON INTERPROCEDURAL_OPTIMIZATION OFF)
+target_compile_options(ndkp_cert_runtime PRIVATE -fno-lto)
+target_sources(your_lib PRIVATE $<TARGET_OBJECTS:ndkp_cert_runtime>)
+# 混淆参数只加到 your_lib，不能放进全局 CMAKE_CXX_FLAGS 或 add_compile_options。
 ```
-ndk-build（`Android.mk`）：把 `ndkp_apkcert.cpp` 加进 `LOCAL_SRC_FILES`，`runtime/` 加进
-`LOCAL_C_INCLUDES`。
+
+ndk-build（`Android.mk`）：为 helper 建独立静态库模块，随后将其添加到业务模块的 `LOCAL_STATIC_LIBRARIES`：
+```make
+include $(CLEAR_VARS)
+LOCAL_MODULE := ndkp_cert_runtime
+LOCAL_SRC_FILES := path/to/runtime/ndkp_apkcert.cpp
+LOCAL_CPPFLAGS := -std=c++17 -fno-lto
+include $(BUILD_STATIC_LIBRARY)
+```
+业务模块的混淆参数只放进该模块的 `LOCAL_CFLAGS` / `LOCAL_CPPFLAGS`，不要放进全局 `APP_CFLAGS` / `APP_CPPFLAGS`。
 
 `ndkp_certbind_mix` 是 `extern "C"` + hidden visibility：不进你库的公开 ABI，但库内可解析；
 未开 `-irobf-cert-bind` 的构建里没人引用它，`--gc-sections` 会丢掉。
@@ -55,6 +70,20 @@ apksigner verify --print-certs your-signed.apk   # 看 "certificate SHA-256 dige
 - 字符串绑定需要同时开 `-irobf-cse`；VMP 密钥绑定需要同时开 `-irobf-vmp`。两者可单开。
 - `-irobf-cert-bind` 开但 `-irobf-cert-file` 缺失/不可读 ⇒ **构建期 fail-closed 报错**。
 - 与包名绑定（`-irobf-cse-bind`）互相独立、可叠加。
+
+## 设备回归
+
+`tests/cert-bind/device_roundtrip.py` 构建临时 APK，分别验证 CSE、VMP、CSE+VMP+SelfCheck 的正确/错误签名。需要 patched NDK、Android SDK build-tools/platform、JDK 17+、OpenSSL 和 arm64 adb 设备：
+
+```bash
+python tests/cert-bind/device_roundtrip.py \
+  --ndk "$NDK" --build-tools "$BUILD_TOOLS" --android-jar "$ANDROID_JAR" \
+  --java-home "$JAVA_HOME" --serial "$SERIAL" --openssl openssl
+```
+
+测试使用随机包名并在结束时卸载该测试包。正确签名须返回 `OK`；错误签名须返回 `BAD` 或停留在受保护调用前的 `START` 标记（后者只说明未完成成功路径，不判定具体信号）。2026-10-15 的结果见 [验证记录](../tests/VALIDATION.md)。
+
+VMP 解释器依赖 libc++ 异常辅助函数，即使业务输入是 C，也需用 `clang++` 链接或等效配置 C++ runtime。
 
 ## 威胁模型（诚实声明）
 

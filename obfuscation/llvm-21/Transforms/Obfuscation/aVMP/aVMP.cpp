@@ -254,49 +254,8 @@ static bool isKnownStdlibLikeFunctionName(const std::string &funcName) {
     return false;
 }
 
-static bool hasFunctionAnnotationKeyword(Function *F, StringRef keyword) {
-    if (!F || !F->getParent()) {
-        return false;
-    }
-
-    GlobalVariable *glob = F->getParent()->getGlobalVariable("llvm.global.annotations");
-    if (!glob || !glob->hasInitializer()) {
-        return false;
-    }
-
-    auto *ca = dyn_cast<ConstantArray>(glob->getInitializer());
-    if (!ca) {
-        return false;
-    }
-
-    for (unsigned i = 0; i < ca->getNumOperands(); ++i) {
-        auto *cs = dyn_cast<ConstantStruct>(ca->getOperand(i));
-        if (!cs || cs->getNumOperands() < 2) {
-            continue;
-        }
-
-        Value *annotated = cs->getOperand(0)->stripPointerCasts();
-        if (annotated != F) {
-            continue;
-        }
-
-        Value *annotationValue = cs->getOperand(1)->stripPointerCasts();
-        auto *annotationGV = dyn_cast<GlobalVariable>(annotationValue);
-        if (!annotationGV || !annotationGV->hasInitializer()) {
-            continue;
-        }
-
-        auto *annotationData = dyn_cast<ConstantDataSequential>(annotationGV->getInitializer());
-        if (!annotationData || !annotationData->isCString()) {
-            continue;
-        }
-
-        if (annotationData->getAsCString().contains(keyword)) {
-            return true;
-        }
-    }
-
-    return false;
+namespace {
+bool isVMProtectTarget(Function *F);
 }
 
 // data and code seg size
@@ -1054,8 +1013,8 @@ void GOVMTranslator::construct_gv() {
                                                     /*Initializer=*/data_seg_init, // has initializer, specified
                                                                                     // below
                                                     /*Name=*/"gv_data_seg_"+F->getName());
-    // 设置段名为 .AProtect.bss
-    gv_data_seg->setSection(".AProtect.bss");
+    // Values outlive an interpreter call for recursion, but never cross threads.
+    gv_data_seg->setThreadLocalMode(GlobalVariable::GeneralDynamicTLSModel);
     gv_data_seg->setAlignment(Align(16));
 
 
@@ -1691,8 +1650,7 @@ void GOVMTranslator::handle_callinst(CallBase *inst, long long curr_func_id) {
             // 只有真正会进入另一套 VM 上下文的 VMP callee，才需要恢复 caller data_seg。
             // 普通本地 helper（如析构/构造/通过指针修改 caller 内存的函数）必须保留写入结果。
             bool calleeUsesVmWrapper = !is_stdlib &&
-                hasFunctionAnnotationKeyword(callee, "vmp") &&
-                !hasFunctionAnnotationKeyword(callee, "novmp");
+                isVMProtectTarget(callee);
             should_restore_caller_data_seg = calleeUsesVmWrapper;
 
             if (should_restore_caller_data_seg) {
@@ -4268,16 +4226,12 @@ static GlobalVariable *getOrCreateSharedGV(Module *M, Type *Ty, Constant *Init,
                                             StringRef Name,
                                             StringRef Section) {
     if (GlobalVariable *GV = M->getGlobalVariable(Name, true)) {
-        if (!Section.empty()) {
-            GV->setSection(Section);
-        }
         return GV;
     }
     GlobalVariable *GV = new GlobalVariable(*M, Ty, false, GlobalValue::InternalLinkage,
                                             Init, Name);
-    if (!Section.empty()) {
-        GV->setSection(Section);
-    }
+    GV->setThreadLocalMode(GlobalVariable::GeneralDynamicTLSModel);
+    // Use the target's TLS sections; mixing TLS and ordinary .AProtect.data is invalid.
     return GV;
 }
 
@@ -4790,6 +4744,10 @@ void GOVMInterpreter::run() {
     }
     std::unique_ptr<Module> interpreter_module_ptr(interpreter_raw);
 
+    std::set<std::string> pre_link_globals;
+    for (GlobalVariable &GV : Mod->globals())
+        pre_link_globals.insert(GV.getName().str());
+
     // 记录：① Mod 中链入前已有的函数名（用于链入后甄别哪些函数来自解释器）；
     //       ② 解释器模块里"有函数体"的函数数量（仅调试用）。
     std::set<std::string> pre_link_functions;
@@ -4814,6 +4772,17 @@ void GOVMInterpreter::run() {
         return;
     }
     // interpreter_module_ptr 已被 Linker 消费；以下均在 Mod 中按名字操作。
+
+    // Isolate interpreter-owned mutable caches and the recursive call stack.
+    // Apply this after linking so constant remapping sees the original globals.
+    for (GlobalVariable &GV : Mod->globals()) {
+        if (!GV.isDeclaration() && !GV.isConstant() &&
+            !GV.hasAppendingLinkage() &&
+            !pre_link_globals.count(GV.getName().str())) {
+            GV.setThreadLocalMode(GlobalVariable::GeneralDynamicTLSModel);
+            GV.setSection("");
+        }
+    }
 
     if (isIRObfuscationDebugEnabled()) {
         errs() << "[GOVMInterpreter] Step 2: Link complete\n";

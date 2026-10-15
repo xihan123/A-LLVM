@@ -227,6 +227,19 @@ jobs:
           --overlay-applied "${{ steps.overlay.outputs.overlay_applied || 'false' }}" \
           --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+    - name: 宿主运行语义回归（build 模式）
+      if: ${{ inputs.mode == 'build' }}
+      run: |
+        set -euo pipefail
+        case "$HOST" in
+          windows-x86_64) CLANG="$PWD/build/bin/clang.exe"; TARGET=x86_64-pc-windows-msvc ;;
+          linux-x86_64) CLANG="$PWD/build/bin/clang"; TARGET=x86_64-unknown-linux-gnu ;;
+        esac
+        bash tests/string-enc/roundtrip.sh "$CLANG" --target="$TARGET"
+        bash tests/string-enc/lifetime.sh "$CLANG" --target="$TARGET"
+        bash tests/constant-enc/roundtrip.sh "$CLANG" --target="$TARGET"
+        bash tests/cert-bind/roundtrip.sh "$CLANG" --target="$TARGET"
+
     - name: 包结构测试
       run: bash tests/package-layout/check_layout.sh "$NDK_DIR" "$HOST"
 
@@ -253,6 +266,10 @@ jobs:
     - name: 证书绑定测试（build 模式）
       if: ${{ inputs.mode == 'build' }}
       run: bash tests/cert-bind/run.sh "$NDK_DIR" "$HOST"
+
+    - name: VMP 并发语义样本编链（build 模式）
+      if: ${{ inputs.mode == 'build' }}
+      run: bash tests/vmp/roundtrip.sh "$NDK_DIR" "$HOST"
 
     - name: 打包
       run: |

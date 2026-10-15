@@ -490,7 +490,9 @@ Value * encryptConstant(Constant *plainConstant, Instruction *insertBefore, Cryp
     XorKey = ConstantInt::get(Key->getType(), randomEngine->get_uint64_t());
     Enc = ConstantExpr::getXor(Enc, XorKey);
     if (level > 1) {
-      Enc = ConstantExpr::getXor(Enc, ConstantExpr::get(Instruction::Mul, XorKey, Key));
+      // Newer LLVM 21 baselines do not permit Mul ConstantExpr.
+      auto Product = cast<llvm::ConstantInt>(XorKey)->getValue() * Key->getValue();
+      Enc = ConstantExpr::getXor(Enc, ConstantInt::get(Ctx, Product));
     }
     if (level > 2) {
       Enc = ConstantExpr::getXor(Enc, ConstantExpr::getNeg(XorKey));

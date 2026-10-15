@@ -4,7 +4,7 @@
 
 - LLVM 20/21 overlay 已实现并通过本地编译测试。
 - `tests/string-enc` 已在本机 NDK 上通过。
-- GitHub Actions 完整构建和 Windows CI 尚未跑通。
+- GitHub Actions Linux/Windows 完整构建已跑通（2026-09-09，run 34327396203）。
 - 阶段状态和已知问题见 [ROADMAP.md](./ROADMAP.md)。
 
 ## 开发环境

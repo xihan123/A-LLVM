@@ -5,8 +5,8 @@
 | 目标 | 构建带 IR 混淆 pass 的第三方 Android NDK |
 | Host | `linux-x86_64`、`windows-x86_64` |
 | 构建 | GitHub Actions，CMake + Ninja |
-| 已实现 | 发现、重打包、自建 clang/lld、LLVM 20/21 overlay、本地测试 |
-| 待验证 | GitHub Actions 完整构建、Windows CI |
+| 已实现 | 发现、重打包、自建 clang、LLVM 20/21 overlay、本地测试 |
+| 待验证 | 当前 p1 修复的 Linux/Windows CI、LLVM 20 基线；Windows LLVM 21 与 Android arm64 结果见 `tests/VALIDATION.md` |
 | 许可 | 项目新增代码 GPL-3.0；overlay 保留上游许可 |
 
 ## 1. 范围
@@ -16,7 +16,7 @@
 1. 从 Android NDK Releases 获取 Stable、Beta 和 RC 版本。
 2. 从 NDK 包内读取 LLVM major 和上游 `Base revision`。
 3. 按 LLVM major 应用混淆 overlay。
-4. 构建 clang、lld、llvm-strip 和 llvm-objcopy。
+4. 构建 clang 和 clang-resource-headers；lld、llvm-strip、llvm-objcopy 当前保留官方版本。
 5. 用自建工具覆盖官方 NDK 中对应的 Host 工具，保留 sysroot、libc++ 和各 ABI runtime。
 6. 通过测试后打包并发布。
 
@@ -92,7 +92,7 @@ ROADMAP.md             实现状态和待办
 
 Linux 使用 runner 自带 clang/lld 作为宿主编译器。Windows 使用 MSVC。默认构建 `AArch64;ARM;X86`，覆盖 arm64-v8a、armeabi-v7a、x86 和 x86_64。
 
-构建只替换白名单中的 clang/lld/strip/objcopy 及 `lib/clang/<major>/include`。官方 NDK 的 sysroot、libc++、compiler-rt 和构建脚本保持不变。
+覆盖脚本允许白名单中的 clang/lld/strip/objcopy，但当前流水线只构建并替换 clang 及 `lib/clang/<major>/include`。官方 NDK 的 sysroot、libc++、compiler-rt 和构建脚本保持不变。
 
 LLVM major 从包内 `AndroidVersion.txt` 读取，不根据 NDK tag 推测。当前仓库维护 LLVM 20 和 21 overlay；遇到其他 major 时 `build` 失败。
 
@@ -139,7 +139,7 @@ obfuscation/llvm-<major>/
 - `-irobf-idadetect`、`-irobf-timedetect`、`-irobf-rootdetect`、`-irobf-vmdetect`、`-irobf-bandump`、`-irobf-hidemaps`、`-irobf-fakemaps`（反分析检测注入，注入到 `main`）。
 - `-irobf-debug`（默认关）：调试模式。**关闭时（release，默认）**在所有 pass 跑完后对整模块去指纹——把 `.AProtect.*` 段改名为 `.s0/.s1/.s2/.s3`（标志由符号种类推导，逐位不变）、删除 VMP 解释器的 `vm_debug_log_*` 调试串（`[vm-debug]…`、`vm-entry` 等 stage 令牌）、剥除本模块 `llvm.ident`。开启时保留上述特征以便诊断。最终 `.so` 的 `.comment` 还含 NDK CRT/libc++/lld 贡献（无 link 后处理入口，且与官方 clang 同版本、非唯一指纹），彻底清零需 link 后 `llvm-strip -R .comment <输出.so>`。
 
-`include/ndkp.h` 提供 `NDKP_STR_ENCRYPT`、`NDKP_STR_BIND`、`NDKP_FLATTEN`、`NDKP_VMP` 四个注解宏，分别写入标签 `ndkp.string_encrypt`、`ndkp.str_bind`、`ndkp.fla`、`ndkp.vmp`。`ndkp.string_encrypt` / `ndkp.str_bind` 折叠为 `+cse`、`ndkp.fla` 折叠为 `+fla`；`ndkp.vmp` 按函数名匹配，等价于 `-irobf-vm_functions=`。这些注解只圈定作用函数，仍需配合对应命令行开关（`-irobf-cse` / `-irobf-fla` / `-irobf-vmp`）。例外：`NDKP_STR_BIND` 只要出现在模块任一函数上即会模块级开启 bind 模式（字符串加密对全模块生效），但仍需 `-irobf-cse` 与 `-irobf-cse-bind-package=<包名>`。
+`include/ndkp.h` 提供 `NDKP_STR_ENCRYPT`、`NDKP_STR_BIND`、`NDKP_FLATTEN`、`NDKP_VMP` 四个选择/配置注解宏及 `NDKP_SELFCHECK` 标记，分别写入标签 `ndkp.string_encrypt`、`ndkp.str_bind`、`ndkp.fla`、`ndkp.vmp`。`ndkp.string_encrypt` / `ndkp.str_bind` 折叠为 `+cse`、`ndkp.fla` 折叠为 `+fla`；`ndkp.vmp` 按函数名匹配，等价于 `-irobf-vm_functions=`。CSE/FLA 正向注解不构成白名单，未标记函数仍继承功能开关；VMP 按注解或函数名选择。所有注解仍需配合对应命令行开关（`-irobf-cse` / `-irobf-fla` / `-irobf-vmp`）。例外：`NDKP_STR_BIND` 只要出现在模块任一函数上即会模块级开启 bind 模式（字符串加密对全模块生效），但仍需 `-irobf-cse` 与 `-irobf-cse-bind-package=<包名>`。
 
 AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 
@@ -151,9 +151,11 @@ AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 - 四个 Android ABI 编链；
 - CMake toolchain 构建；
 - ndk-build 构建；
-- `-O0`、`-O2`、`-Oz` 字符串加密扫描。
+- `-O0`、`-O2`、`-Oz` 字符串加密扫描；
+- 宿主字符串往返、生命周期/并发、常量加密与证书绑定语义测试；
+- Android arm64 VMP 并发/递归/回调样本编链。
 
-这些测试确认工具链可构建目标文件且指定明文不出现在 ELF 中。Android 运行时行为仍需设备或模拟器测试。
+宿主测试实际运行编译产物；Android 样本在 CI 中仅编链，设备语义需显式运行。2026-10-15 已完成 Windows LLVM 21、Android arm64 VMP/CSE 并发和证书绑定完整 APK 回归，命令及覆盖边界见 [验证记录](./tests/VALIDATION.md)。
 
 ## 9. 元数据与许可
 
@@ -174,10 +176,10 @@ AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 
 | 功能 | 发布前置条件 |
 | --- | --- |
-| 字符串 per-key / 包名绑定（`-irobf-cse-perkey` / `-irobf-cse-bind`） | 已实现（ChaCha8 派生密钥 + `/proc/self/cmdline` 包名折入 pepper）；host 往返 + IR 校验 + **真机 arm64-v8a 与 armeabi-v7a**（perkey 正确、bind 包名 happy-path 正确、错包名 fail-closed 乱码）均通过。体积开销 perkey +3.1KB / bind +3.8KB（解码一次性缓存，运行期 ~0）；多进程 `:suffix` 私有子进程经 `:` 截断还原基础包名，真机验证正确解密（错包名仍 fail-closed）。待 CI patch-check 实跑 |
+| 字符串 per-key / 包名绑定（`-irobf-cse-perkey` / `-irobf-cse-bind`） | 已实现（ChaCha8 派生密钥 + `/proc/self/cmdline` 包名折入 pepper）；host 往返 + IR 校验 + **真机 arm64-v8a 与 armeabi-v7a**（perkey 正确、bind 包名 happy-path 正确、错包名 fail-closed 乱码）均通过。历史测量体积开销 perkey +3.1KB / bind +3.8KB；当前解码一次性缓存并以原子状态发布，明文保留静态存储期；多进程 `:suffix` 私有子进程经 `:` 截断还原基础包名，真机验证正确解密（错包名仍 fail-closed）。本轮并发/生命周期修复已通过 Windows 与 arm64 设备回归，当前 p1 仍待 CI |
 | 反分析探针（`-irobf-*detect`/`bandump`/`*maps`） | 已实现（注入 `main`）；待误报测试 + `.so` 场景改注入 `.init_array` |
 | 代码完整性自校验（`-irobf-selfcheck`） | 已实现（**VMP 字节码内部校验**）：只校验 VMP 产出的每函数字节码 blob（`gv_code_seg_<fn>`，编译期已知的常量字节、段 `.AProtect.data`）。Pass 编译期算出各 blob 的 FNV-1a64 并内嵌，注入 ELF 构造器（`ndkp_selfcheck_verify`，`llvm.global_ctors` 优先级 101）加载期 volatile 读重算比对，不符即调 `DetectUtils` 的 report/kill（`getpid`+`kill(SIGKILL)`+`brk`）终止（**主响应**）。**纵深防御层（现已真机验证生效）**：把哈希 XOR 累加折进 `vmp_shared_vm_function_key` 入口桩存——`store (realkey^expected_acc)^load(runtime_acc)`；篡改任一 blob 字节 → `runtime_acc≠expected_acc` → key 错 → VMP 解释器解出乱码 → 崩溃。**真正的密码学绑定、非分支门禁**（即便 kill 分支被 patch，篡改仍经此层破坏执行；真机实测中和 kill 后未篡改正确/篡改 rc=137）。此前误判为"惰性"是因 VMP 被 inline/fold 绕过、VM 根本没执行；`VMProtectPreparePass` 修复后本层生效。因 blob 是数据段纯常量、运行期只读不写 → **无需重定位归一化、无需链接后回填工具**。范围：只覆盖 VMP 字节码，不含解释器 `.text` 或非 VMP 代码 |
-| VMP（`-irobf-vmp`） | 已实现且**真机验证真正经解释器执行**。**关键修复（2026-07）**：VMP 在 OptimizerLast 运行，早于 inliner/IPSCCP，导致被保护函数在到达 VM 桩前被内联/常量折叠掉、VM 桩沦为死代码（此前"~1.0× 原生"实为函数根本没走 VM）。新增 `VMProtectPreparePass`（PipelineStartEP 早期给目标打 `NoInline`+`llvm.compiler.used`，后者令 IPSCCP 停止参数追踪→调用点不被折叠）修复此绕过。**并修复 translator 的循环/PHI 前向引用 bug**（`basicblock_map` 用 `.insert()` 被 operator[] 污染的 0 卡住→分支全跳 BB0 死循环；PHI 回边 incoming 值未分配槽 `packValue` 报错；PHI bb_id 未回填）——改 `basicblock_map[bb]=` 覆盖 + PHI 值提前分配槽 + `phi_bb_map` 回填。真机 arm64-v8a：直线 64-bit、循环(LCG/FNV)、递归(fib)、内存(alloca/load/store/gep)、switch、VM→native 调用、float/double 全部 == 原生；旧"compute 挂死"已修。**性能**：真正解释后 hot 循环 ~10000× 原生（hot(1000) 54ms vs 0.005ms）——故仅虚拟化小型/关键函数；向量指令 translator 拒绝→安全回退原生。体积 +~1.8MB 解释器/模块；待各 ABI 解释器扩展 |
+| VMP（`-irobf-vmp`） | 已实现且**真机验证真正经解释器执行**。**关键修复（2026-07）**：VMP 在 OptimizerLast 运行，晚于 inliner/IPSCCP，导致被保护函数在到达 VM 桩前被内联/常量折叠掉、VM 桩沦为死代码（此前"~1.0× 原生"实为函数根本没走 VM）。新增 `VMProtectPreparePass`（PipelineStartEP 早期给目标打 `NoInline`+`llvm.compiler.used`，后者令 IPSCCP 停止参数追踪→调用点不被折叠）修复此绕过。**并修复 translator 的循环/PHI 前向引用 bug**（`basicblock_map` 用 `.insert()` 被 operator[] 污染的 0 卡住→分支全跳 BB0 死循环；PHI 回边 incoming 值未分配槽 `packValue` 报错；PHI bb_id 未回填）——改 `basicblock_map[bb]=` 覆盖 + PHI 值提前分配槽 + `phi_bb_map` 回填。真机 arm64-v8a：直线 64-bit、循环(LCG/FNV)、递归(fib)、内存(alloca/load/store/gep)、switch、VM→native 调用、float/double 全部 == 原生；旧"compute 挂死"已修。**性能**：真正解释后 hot 循环 ~10000× 原生（hot(1000) 54ms vs 0.005ms）——故仅虚拟化小型/关键函数；向量指令 translator 拒绝→安全回退原生。体积 +~1.8MB 解释器/模块；待各 ABI 解释器扩展 |
 | AArch64 后端混淆 | 独立补丁和机器码测试 |
 | macOS Host | runner、dmg 打包和签名处理 |
 

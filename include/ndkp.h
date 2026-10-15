@@ -6,7 +6,8 @@
  * 对哪些函数施加变换。
  *
  * 用法：用 patched clang 编译，并在编译参数里打开总开关 -mllvm -irobf 以及对应的
- * 功能开关（见各宏说明）。注解只负责圈定作用函数，不替代开关。非 patched clang
+ * 功能开关（见各宏说明）。CSE/FLA 开关默认作用于全部符合条件的函数，正向注解
+ * 不构成白名单；VMP 则按注解或函数名列表选择。注解不替代开关。非 patched clang
  * 下 annotate 属性被忽略，源码可用普通 NDK 正常编译。
  */
 #ifndef NDKP_H

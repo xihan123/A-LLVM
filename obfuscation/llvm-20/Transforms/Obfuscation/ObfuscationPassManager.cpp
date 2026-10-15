@@ -411,6 +411,14 @@ struct ObfuscationPassManager : public ModulePass {
     if (!EnableIRObfuscation)
       return run(M);
 
+    if (EnableCertBind) {
+      if (Function *Helper = M.getFunction("ndkp_certbind_mix"))
+        if (!Helper->isDeclaration())
+          report_fatal_error("compile ndkp_certbind_mix separately without "
+                             "obfuscation flags and with -fno-lto; certificate "
+                             "initialization must not depend on bound strings");
+    }
+
     const auto Options(getOptions());
     unsigned pointerSize = M.getDataLayout().getTypeAllocSize(
         PointerType::getUnqual(M.getContext()));

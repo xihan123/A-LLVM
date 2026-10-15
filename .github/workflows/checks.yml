@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Python syntax
-        run: python -m py_compile scripts/*.py tests/discover/test_discover.py tests/locate-llvm/test_locate_llvm.py
+        run: python -m py_compile scripts/*.py tests/discover/test_discover.py tests/locate-llvm/test_locate_llvm.py tests/cert-bind/device_roundtrip.py
       - name: Discovery tests
         run: python tests/discover/test_discover.py
       - name: LLVM location tests
@@ -24,4 +24,7 @@ jobs:
       - name: Build-system smoke runner tests
         run: bash tests/build-system-smoke/test_run.sh
       - name: Shell syntax
-        run: bash -n scripts/*.sh tests/*/*.sh
+        run: |
+          for file in scripts/*.sh tests/*/*.sh; do
+            bash -n "$file" || exit 1
+          done
