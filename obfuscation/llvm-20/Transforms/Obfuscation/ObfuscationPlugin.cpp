@@ -24,8 +24,7 @@ llvm::PassPluginLibraryInfo getObfuscationPluginInfo() {
   return {LLVM_PLUGIN_API_VERSION, "Obfuscation", LLVM_VERSION_STRING,
           [](PassBuilder &PB) {
             PB.registerOptimizerLastEPCallback(
-                [](ModulePassManager &MPM, OptimizationLevel,
-                   ThinOrFullLTOPhase) {
+                [](ModulePassManager &MPM, OptimizationLevel) {
                   if (isIRObfuscationEnabled())
                     MPM.addPass(ObfuscationPassManagerPass());
                 });

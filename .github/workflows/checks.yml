@@ -23,6 +23,8 @@ jobs:
         run: python tests/locate-llvm/test_locate_llvm.py
       - name: Overlay sync and patch tests
         run: python -m unittest discover -s tests/overlay -p 'test_*.py' -v
+      - name: VMP bitcode generator tests
+        run: python tests/vmp/test_gen_vm_bitcode.py
       - name: Build snapshot tests
         run: python -m unittest discover -s tests/build-snapshot -p 'test_*.py' -v
       - name: Build-system smoke runner tests

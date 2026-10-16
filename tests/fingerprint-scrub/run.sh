@@ -29,6 +29,25 @@ n_dbg=$("$STRINGS" "$OUT/vmp_dbg.so" | grep -Ec "$NEEDLE" || true)
 if [ "$n_rel" -eq 0 ]; then echo "[ok]   release .so 无 VMP 调试串"; else echo "[FAIL] release .so 仍含 $n_rel 条 VMP 调试串"; fail=1; fi
 if [ "$n_dbg" -gt 0 ]; then echo "[ok]   -irobf-debug .so 保留 $n_dbg 条 VMP 调试串（去指纹确为门控）"; else echo "[FAIL] -irobf-debug .so 未见 VMP 调试串，去指纹疑似无条件/失效"; fail=1; fi
 
+# SelfCheck 失败路径也不得生成框架标识；不开 CSE，防止加密掩盖泄露。
+CHECK="$VMP -mllvm -irobf-selfcheck"
+"$CLANG" $TGT $CHECK                     -o "$OUT/check_rel.so" "$SRC"
+"$CLANG" $TGT $CHECK -mllvm -irobf-debug -o "$OUT/check_dbg.so" "$SRC"
+for marker in 'A-Protector' 'Protection v1.2.0' '.detect.banner' '.detect.version'; do
+  if "$STRINGS" "$OUT/check_rel.so" | grep -F "$marker" > /dev/null; then
+    echo "[FAIL] release SelfCheck 泄露 $marker"; fail=1
+  else
+    echo "[ok]   release SelfCheck 不生成 $marker"
+  fi
+done
+for marker in 'A-Protector' 'Protection v1.2.0'; do
+  if "$STRINGS" "$OUT/check_dbg.so" | grep -F "$marker" > /dev/null; then
+    echo "[ok]   debug SelfCheck 保留 $marker"
+  else
+    echo "[FAIL] debug SelfCheck 缺少 $marker"; fail=1
+  fi
+done
+
 # ---- 2) 段名改名：VMP+CSE 覆盖四类段（.text/.data/.bss 来自 VMP，.rodata 来自 CSE）----
 FULL="$VMP -mllvm -irobf-cse"
 "$CLANG" $TGT $FULL                     -o "$OUT/full_rel.so" "$SRC"
