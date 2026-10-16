@@ -201,7 +201,11 @@ def check_build(root, expected):
 
 
 def is_reparse_point(path):
-    return bool(getattr(path.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT) if path.exists() or path.is_symlink() else False
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    return bool(getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def remove_readonly(function, path, exc_info):
