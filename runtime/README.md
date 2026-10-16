@@ -6,7 +6,7 @@
 patch 的 `if`）。
 
 编译期折入由 overlay pass 自动完成；运行期读证书这一步需要 app 侧链接**一个源文件**
-（证书解析是重活——双源共识 + v2/v3 签名块解析 + SHA-256——不宜以注入 IR 实现，故做成
+（证书解析是重活——本库 APK 定位 + v2/v3 签名块解析 + SHA-256——不宜以注入 IR 实现，故做成
 链接式 helper）。
 
 ## 文件
@@ -14,7 +14,7 @@ patch 的 `if`）。
 | 文件 | 作用 |
 |---|---|
 | `ndkp_apkcert.cpp` | **要编进你的 `.so` 的唯一文件**：定义 `extern "C" void ndkp_certbind_mix(uint64_t* lo, uint64_t* hi)`，pass 注入的加载期构造器会调它。 |
-| `apkcert.h` | 从磁盘 APK 的 v2/v3 签名块**双源共识**读签名证书 DER 并 SHA-256（自 stringarmor2 移植）。刻意不走 `PackageManager.getPackageInfo`——那是 CorePatch/LSPatch/伪造签名 Xposed 模块 hook 的 API。 |
+| `apkcert.h` | 定位**本库所属 APK**，从其 v2/v3 签名块读取证书 DER 并 SHA-256（自 stringarmor2 移植）。刻意不走 `PackageManager.getPackageInfo`——那是 CorePatch/LSPatch/伪造签名 Xposed 模块 hook 的 API。 |
 | `sha256.h` | 头文件版 FIPS 180-4 SHA-256（`apkcert.h` 依赖）。 |
 | `jni.cpp.reference` | stringarmor2 里"在 `JNI_OnLoad` 折证书混合值进 pepper"的**上游参考**（含 `blob.h` 等本仓库没有的依赖，**不编译**），仅示意折入设计。 |
 
@@ -71,19 +71,28 @@ apksigner verify --print-certs your-signed.apk   # 看 "certificate SHA-256 dige
 - `-irobf-cert-bind` 开但 `-irobf-cert-file` 缺失/不可读 ⇒ **构建期 fail-closed 报错**。
 - 与包名绑定（`-irobf-cse-bind`）互相独立、可叠加。
 
-## 注入场景（Xposed / LSPosed 模块）
+## 本库来源定位（含 Xposed / LSPosed 注入）
 
-模块 `.so` 被框架加载进**宿主 App 进程**时，进程里第一个 `/data/app/.../base.apk`
-是宿主的 APK，原双源共识会读到**错误的证书**（宿主签名），令正当模块的全部绑定
-字符串 fail-closed 解出乱码（2026-10-16 真机实测）。`apkcert.h` 现对此做了库锚定：
-`dladdr` 取本 `.so` 自己的映射路径（`.../base.apk!/lib/<abi>/libxxx.so`），反推本库
-所在的 APK 并改读其签名证书；防重定向由"新开 fd 的 inode 必须 equals 内核在
-`/proc/self/maps` 里记录的映射 inode"承担（运行时对模块 APK 不持有 fd，fd oracle
-不适用）。库与宿主同 APK 的普通 App 路径完全不变，仍是完整双源共识。
+`ndkp_certbind_mix` 将自身 hidden 函数地址传给 `certSha256ForLibrary(anchor, out)`，
+以包含该地址的 `/proc/self/maps` 记录确定本库。maps 顺序不代表宿主身份；普通应用
+和注入模块使用相同流程，也不要求 ART 保留 APK fd。
+
+- **APK 内直接加载**：读取承载本库映射的 base 或 split APK；新开 fd 的设备号和
+  inode 必须与该映射一致。
+- **安装目录解压加载**：支持 `/data/app/<安装目录>/lib/<isa>/<库名>`（含 `~~` 随机目录）
+  以及 `/mnt/expand/<卷>/app/…`。先核对磁盘 `.so` 与本库映射的设备号、inode，再仅在
+  同一安装目录内枚举 APK，以精确的 `lib/<abi>/<库名>` ZIP 条目确定唯一来源。
+  APK 已有映射时，额外核对其设备号、inode；条目检查与证书读取使用同一 fd。
+- 零匹配、多重匹配、候选无法读取、损坏/不支持的 ZIP 均失败关闭。支持 stored/deflate，
+  不支持 ZIP64、多卷格式。memfd、已删除映射、缓存中的独立 `.so`、未知安装布局不兜底
+  读取其他包的证书。
+
+定位、校验或解析失败时混合值为 `(0,0)`；读取到其他证书时使用其真实摘要派生混合值。
+两种情况均无法抵消原来的构建期密钥。成功前不修改摘要输出，所有自有 fd 均会关闭。
 
 ## 设备回归
 
-`tests/cert-bind/device_roundtrip.py` 构建临时 APK，分别验证 CSE、VMP、CSE+VMP+SelfCheck 的正确/错误签名。需要 patched NDK、Android SDK build-tools/platform、JDK 17+、OpenSSL 和 arm64 adb 设备：
+`tests/cert-bind/device_roundtrip.py` 构建临时 APK，验证 base/split 的解压与直接加载，并对 CSE、VMP、CSE+VMP+SelfCheck 分别检查正确/错误签名。需要 patched NDK、Android SDK build-tools/platform、JDK 17+、OpenSSL 和 Android 6.0+ arm64 adb 设备（build-tools 需支持 `zipalign -P 16`）：
 
 ```bash
 python tests/cert-bind/device_roundtrip.py \
@@ -91,13 +100,25 @@ python tests/cert-bind/device_roundtrip.py \
   --java-home "$JAVA_HOME" --serial "$SERIAL" --openssl openssl
 ```
 
-测试使用随机包名并在结束时卸载该测试包。正确签名须返回 `OK`；错误签名须返回 `BAD` 或停留在受保护调用前的 `START` 标记（后者只说明未完成成功路径，不判定具体信号）。2026-10-15 的结果见 [验证记录](../tests/VALIDATION.md)。
+每个场景还通过 `dlopen` 加载另一签名的模块 APK，核对本库与模块的真实证书 SHA-256（模块无需 ART 打开 dex）。测试使用随机包名并在结束时卸载该测试包。正确签名须返回 `OK`；错误签名须返回 `BAD` 或停留在受保护调用前的 `START` 标记（后者只说明未完成成功路径，不判定具体信号）。2026-10-15 的结果见 [验证记录](../tests/VALIDATION.md)。
 
 VMP 解释器依赖 libc++ 异常辅助函数，即使业务输入是 C，也需用 `clang++` 链接或等效配置 C++ runtime。
 
+原生来源与解析边界回归（Linux 使用 C++17 编译器，无需 patched Clang）：
+
+```bash
+python tests/cert-bind/test_apkcert.py
+# Windows 等宿主可交叉编译并在 arm64 设备上执行同一组原生用例：
+python tests/cert-bind/test_apkcert.py --ndk "$NDK" --serial "$SERIAL"
+```
+
 ## 威胁模型（诚实声明）
 
-证书绑定拦截的是"重打包/换签名后仍想让加密数据正确解出"这类**静态改包**：单点绕过（框架
-hook、`open()` 重定向、bind-mount）只扰动双源之一即被 `apkcert.h` 的共识发现。它**不**声称
-拦截能一致地 inline-hook `pread` + 伪造 `fstat` 的**动态 root/hook**能力——那种能力本可直接
-hook 解密返回值，非本机制目标。详见 `apkcert.h` 顶部注释与项目威胁模型。
+证书绑定针对重打包、换签名后仍想恢复原绑定数据的情形。它直接读取证书，不调用
+PackageManager，也**不执行 APK 整体签名验证**。ZIP 条目匹配用于确定解压库的归属，
+不证明 APK 内容或解压库没有被修改。
+
+映射存在时，设备号与 inode 校验可以发现指向不同文件的打开重定向或 bind-mount。
+**解压库的 APK 没有映射证据时，不能保证发现单独替换或挂载该 APK**；同 inode 内容
+改写也不属于文件身份校验的保证。任意 native hook、伪造 maps/fstat/pread 或直接修改
+解密结果的动态能力不在本机制的防护范围。
