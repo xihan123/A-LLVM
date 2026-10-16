@@ -41,7 +41,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ndk-${{ inputs.ndk_tag || 'latest' }}-${{ inputs.internal || 'auto' }}-${{ inputs.patchset }}-${{ inputs.host }}
+  group: ndk-${{ github.ref }}-${{ inputs.ndk_tag || 'latest' }}-${{ inputs.internal || 'auto' }}-${{ inputs.patchset }}-${{ inputs.host }}
   cancel-in-progress: false
 
 jobs:
