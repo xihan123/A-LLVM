@@ -85,7 +85,8 @@ CERTBIND_ARGS=(-mllvm -irobf-cert-bind -mllvm "-irobf-cert-file=${CERT_FOR_CLANG
   -mllvm -irobf-vm_functions=ndkp_secret_len "${CERTBIND_ARGS[@]}" -I "$INC_FOR_CLANG" \
   -o "$OUT/vmp_cert.so" "$SRC" "$OUT/helper.o"
 
-has_sym() { "$NM" "$1" 2>/dev/null | grep -q "$2"; }
+# Consume the producer's output: grep -q can cause SIGPIPE and a false failure with pipefail.
+has_sym() { "$NM" "$1" 2>/dev/null | grep "$2" >/dev/null; }
 
 # 1) cse+cert-bind 含注入的运行期基座符号
 if has_sym "$OUT/cse_cert.so" ndkp_certbind_init && \
@@ -103,14 +104,14 @@ else
 fi
 
 # 3) 构造器已注册：.init_array 存在
-if "$READELF" -S "$OUT/cse_cert.so" | grep -q '\.init_array'; then
+if "$READELF" -S "$OUT/cse_cert.so" | grep '\.init_array' >/dev/null; then
   echo "[ok]   cse+cert-bind 含 .init_array（加载期构造器已注册）"
 else
   echo "[FAIL] cse+cert-bind 缺 .init_array（构造器未注册）"; fail=1
 fi
 
 # 4) 明文不泄漏
-if "$STRINGS" "$OUT/cse_cert.so" | grep -q "$NEEDLE"; then
+if "$STRINGS" "$OUT/cse_cert.so" | grep "$NEEDLE" >/dev/null; then
   echo "[FAIL] cse+cert-bind 后仍能在 ELF 中找到明文"; fail=1
 else
   echo "[ok]   cse+cert-bind 后明文已消失"
