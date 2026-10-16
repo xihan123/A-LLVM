@@ -64,13 +64,14 @@ inline uint64_t le64(const uint8_t* b) {
 // inside the VMP-virtualized decrypt(), where JNI upcalls routed through the VM interpreter's
 // external-call bridge (env + by-ref out-params) corrupt memory. decrypt() only reads these.
 // The SHA-256 of the signer cert is read straight from the on-disk APK's v2/v3 signing block
-// over two independent, cross-checked native paths (apkcert.h) — never from the framework's
-// getPackageInfo, the API signature-bypass tools hook. A wrong/absent/redirected cert leaves
-// (0,0): fail-closed — the blob built under pepper ^ buildCertMix then garbles.
+// from this library's own APK, located by its mapped address (apkcert.h) — never from the framework's
+// getPackageInfo, the API signature-bypass tools hook. A read failure leaves (0,0); a
+// different certificate produces a different mix. Either makes the bound blob garble.
 uint64_t g_certLo = 0, g_certHi = 0;
 void initCertMix() {
     uint8_t sha[32];
-    if (stringarmor::apkcert::certSha256Consensus(sha)) {
+    if (stringarmor::apkcert::certSha256ForLibrary(
+            reinterpret_cast<const void*>(&initCertMix), sha)) {
         g_certLo = le64(sha) ^ le64(sha + 16);
         g_certHi = le64(sha + 8) ^ le64(sha + 24);
     }
