@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linux LLVM snapshot identity, integrity checks and build measurements."""
+"""LLVM snapshot identity, integrity checks and build measurements on both hosts."""
 
 import argparse
 import hashlib
@@ -15,7 +15,7 @@ import sys
 import time
 
 
-FORMAT = 1
+FORMAT = 2
 STATE_DIR = Path(".snapshot")
 MANIFEST = ".llvm-build-snapshot.json"
 TREES = ("llvm-project", "build")
@@ -54,22 +54,25 @@ def cache_key(identity):
     return f"llvm-build-v{FORMAT}-" + hashlib.sha256(encoded).hexdigest()
 
 
-def cmake_args(root, targets, tools):
+def cmake_args(root, targets, tools, host="linux-x86_64"):
+    windows = host == "windows-x86_64"
     return [
-        "-S", str(root / "llvm-project/llvm"), "-B", str(root / "build"), "-G", "Ninja",
+        "-S", (root / "llvm-project/llvm").as_posix(), "-B", (root / "build").as_posix(), "-G", "Ninja",
         "-DCMAKE_BUILD_TYPE=Release", "-DLLVM_ENABLE_ASSERTIONS=OFF",
-        f"-DCMAKE_C_COMPILER={tools['clang']['path']}",
-        f"-DCMAKE_CXX_COMPILER={tools['clang++']['path']}",
+        f"-DCMAKE_C_COMPILER={tools['cl' if windows else 'clang']['path']}",
+        f"-DCMAKE_CXX_COMPILER={tools['cl' if windows else 'clang++']['path']}",
         f"-DPython3_EXECUTABLE={tools['python']['path']}",
-        "-DLLVM_USE_LINKER=lld", "-DLLVM_PARALLEL_LINK_JOBS=1",
+        *([] if windows else ["-DLLVM_USE_LINKER=lld", "-DLLVM_PARALLEL_LINK_JOBS=1"]),
         "-DLLVM_OBFUSCATION_LINK_INTO_TOOLS=ON", "-DLLVM_ENABLE_PROJECTS=clang",
         f"-DLLVM_TARGETS_TO_BUILD={targets}",
     ]
 
 
 def prepare(args):
-    if platform.system() != "Linux" or platform.machine() != "x86_64":
-        raise ValueError("the snapshot pilot requires Linux x86_64")
+    host = args.host
+    windows = host == "windows-x86_64"
+    if platform.system() != ("Windows" if windows else "Linux") or platform.machine().lower() not in ("x86_64", "amd64"):
+        raise ValueError(f"the snapshot requires a native {host} host")
     if not re.fullmatch(r"[0-9a-f]{40}", args.base):
         raise ValueError("an exact 40-character LLVM Base revision is required")
     root = Path.cwd().resolve()
@@ -78,25 +81,48 @@ def prepare(args):
         if not path.is_file():
             raise ValueError(f"missing overlay input: {path}")
     tools = {}
-    for name in ("clang", "clang++", "ld.lld", "cmake", "ninja"):
-        executable = shutil.which(name)
+    names = ("cl", "link", "lib", "rc", "mt") if windows else ("clang", "clang++", "ld.lld")
+    for name in (*names, "cmake", "ninja", "tar"):
+        executable = os.environ.get("SNAPSHOT_TAR") if name == "tar" else None
+        executable = executable or shutil.which(name)
+        if windows and name in ("link", "lib"):
+            executable = str(Path(tools["cl"]["path"]).parent / (name + ".exe"))
         if not executable:
             raise ValueError(f"missing host tool: {name}")
-        tools[name] = {"path": executable, "resolved_path": str(Path(executable).resolve()),
-                       "version": capture(executable, "--version"), "sha256": digest(executable)}
-    tools["python"] = {"path": sys.executable, "resolved_path": str(Path(sys.executable).resolve()),
+        if windows and name in names:
+            quoted = executable.replace("'", "''")
+            version = capture("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                              f"(Get-Item -LiteralPath '{quoted}').VersionInfo.ProductVersion")
+            if not version:
+                raise ValueError(f"missing Windows tool version: {executable}")
+        else:
+            version = capture(executable, "--version")
+        tools[name] = {"path": Path(executable).as_posix(), "resolved_path": Path(executable).resolve().as_posix(),
+                       "version": version, "sha256": digest(executable)}
+    if args.enabled and "GNU tar" not in tools["tar"]["version"]:
+        raise ValueError("snapshot archives require GNU tar with PAX timestamp support")
+    tools["python"] = {"path": Path(sys.executable).as_posix(), "resolved_path": Path(sys.executable).resolve().as_posix(),
                        "version": sys.version, "sha256": digest(sys.executable)}
+    environment = {}
+    if windows:
+        for name in ("VCToolsInstallDir", "VCToolsVersion", "WindowsSdkDir", "WindowsSDKVersion",
+                     "UniversalCRTSdkDir", "UCRTVersion", "INCLUDE", "LIB", "LIBPATH",
+                     "VSCMD_ARG_HOST_ARCH", "VSCMD_ARG_TGT_ARCH"):
+            environment[name] = os.environ.get(name, "")
+            if not environment[name]:
+                raise ValueError(f"missing MSVC/SDK environment: {name}")
     config_files = [overlay / "registration.patch", *overlay.rglob("CMakeLists.txt"),
                     *overlay.rglob("*.cmake"), root / "scripts/apply_overlay.sh",
                     root / "scripts/sync_overlay.py", root / "scripts/build_snapshot.py"]
     identity = {
         "format": FORMAT, "base_commit": args.base, "llvm_major": args.major,
-        "host": "linux-x86_64", "architecture": platform.machine(), "root": str(root),
+        "host": host, "architecture": "x86_64", "root": root.as_posix(),
         "image_os": os.environ.get("ImageOS", ""),
         "image_version": os.environ.get("ImageVersion", ""),
-        "os_release": Path("/etc/os-release").read_text(),
-        "packages": capture("dpkg-query", "-W", "-f=${Package}=${Version}\n"),
-        "tools": tools, "cmake_args": cmake_args(root, args.targets, tools),
+        "os_release": platform.version() if windows else Path("/etc/os-release").read_text(),
+        "packages": None if windows else capture("dpkg-query", "-W", "-f=${Package}=${Version}\n"),
+        "environment": environment,
+        "tools": tools, "cmake_args": cmake_args(root, args.targets, tools, host),
         "configuration_files": {p.relative_to(root).as_posix(): digest(p) for p in config_files},
     }
     if args.enabled and (not identity["image_os"] or not identity["image_version"]):
@@ -110,6 +136,7 @@ def prepare(args):
              "reason": "not restored" if args.enabled else "disabled",
              "source_commit": os.environ.get("GITHUB_SHA", capture("git", "rev-parse", "HEAD")),
              "overlay_sha256": overlay_hash.hexdigest(), "snapshot_origin": None,
+             "probe": os.environ.get("SNAPSHOT_PROBE", "none"),
              "restore_started_at": time.time()}
     write_json(STATE_DIR / "state.json", state)
     output("key", state["key"])
@@ -119,7 +146,7 @@ def inventory(root):
     result = {}
     for name in TREES:
         tree = root / name
-        if tree.is_symlink() or not tree.is_dir():
+        if is_reparse_point(tree) or tree.is_symlink() or not tree.is_dir():
             raise ValueError(f"missing or linked snapshot tree: {tree}")
         for directory, dirs, files in os.walk(tree, followlinks=False):
             for entry in sorted(dirs + files):
@@ -128,6 +155,8 @@ def inventory(root):
                 key = path.relative_to(root).as_posix()
                 if stat.S_ISLNK(info.st_mode):
                     result[key] = {"kind": "link", "target": os.readlink(path)}
+                elif getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise ValueError(f"unsupported snapshot reparse point: {path}")
                 elif stat.S_ISDIR(info.st_mode):
                     result[key] = {"kind": "directory"}
                 elif stat.S_ISREG(info.st_mode):
@@ -141,11 +170,12 @@ def inventory(root):
 
 def check_build(root, expected):
     major = expected["llvm_major"]
+    windows = expected["host"] == "windows-x86_64"
     required = ["llvm-project/.git/HEAD", "llvm-project/llvm/CMakeLists.txt",
                 "llvm-project/llvm/lib/Transforms/Obfuscation/.ndkp-overlay-files.json",
                 "llvm-project/llvm/include/llvm/Transforms/Obfuscation/.ndkp-overlay-files.json",
                 "build/CMakeCache.txt", "build/build.ninja", "build/.ninja_log", "build/.ninja_deps",
-                "build/bin/clang", f"build/lib/clang/{major}/include/stddef.h"]
+                "build/bin/clang" + (".exe" if windows else ""), f"build/lib/clang/{major}/include/stddef.h"]
     for name in required:
         if not (root / name).is_file():
             raise ValueError(f"incomplete snapshot: {name}")
@@ -160,8 +190,25 @@ def check_build(root, expected):
               "CMAKE_CACHEFILE_DIR": str(root / "build"), "CMAKE_GENERATOR": "Ninja"}
     wanted.update(option[2:].split("=", 1) for option in expected["cmake_args"] if option.startswith("-D"))
     for name, value in wanted.items():
-        if cache.get(name) != value:
+        actual = cache.get(name)
+        if name in ("CMAKE_HOME_DIRECTORY", "CMAKE_CACHEFILE_DIR", "CMAKE_C_COMPILER",
+                    "CMAKE_CXX_COMPILER", "Python3_EXECUTABLE") and actual is not None:
+            actual, value = (v.replace("\\", "/").rstrip("/") for v in (actual, value))
+            if windows:
+                actual, value = actual.casefold(), value.casefold()
+        if actual != value:
             raise ValueError(f"restored CMake configuration differs: {name}")
+
+
+def is_reparse_point(path):
+    return bool(getattr(path.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT) if path.exists() or path.is_symlink() else False
+
+
+def remove_readonly(function, path, exc_info):
+    if os.name != "nt" or not isinstance(exc_info[1], PermissionError):
+        raise exc_info[1]
+    os.chmod(path, stat.S_IWRITE)
+    function(path)
 
 
 def discard(root):
@@ -171,10 +218,12 @@ def discard(root):
         path = root / name
         if path.is_symlink():
             path.unlink()
+        elif is_reparse_point(path):
+            path.rmdir()
         elif path.exists():
             if path.resolve().parent != root or not path.is_dir():
                 raise ValueError(f"refusing to remove unexpected snapshot path: {path}")
-            shutil.rmtree(path)
+            shutil.rmtree(path, onerror=remove_readonly)
     (root / MANIFEST).unlink(missing_ok=True)
 
 
@@ -229,7 +278,8 @@ def seal():
 def ninja_measurements(before, after):
     previous = set(before.splitlines())
     measurements = {"compile_edges": 0, "link_edges": 0, "other_edges": 0,
-                    "compile_work_seconds": 0.0, "link_work_seconds": 0.0}
+                    "compile_work_seconds": 0.0, "link_work_seconds": 0.0,
+                    "compile_outputs": [], "link_outputs": []}
     for line in after.splitlines():
         if line in previous or line.startswith("#"):
             continue
@@ -241,9 +291,11 @@ def ninja_measurements(before, after):
         if filename.endswith((".o", ".obj")):
             measurements["compile_edges"] += 1
             measurements["compile_work_seconds"] += seconds
+            measurements["compile_outputs"].append(filename)
         elif filename.endswith((".a", ".lib", ".so", ".exe")) or re.fullmatch(r"bin/clang(?:-[0-9]+)?", filename):
             measurements["link_edges"] += 1
             measurements["link_work_seconds"] += seconds
+            measurements["link_outputs"].append(filename)
         else:
             measurements["other_edges"] += 1
     return measurements
@@ -304,6 +356,8 @@ def main():
     prepare_parser.add_argument("--base", required=True)
     prepare_parser.add_argument("--major", required=True, type=int)
     prepare_parser.add_argument("--targets", required=True)
+    prepare_parser.add_argument("--host", choices=("linux-x86_64", "windows-x86_64"),
+                                default="windows-x86_64" if os.name == "nt" else "linux-x86_64")
     prepare_parser.add_argument("--enabled", action="store_true")
     sub.add_parser("validate").add_argument("--cache-hit", default="false")
     sub.add_parser("seal")

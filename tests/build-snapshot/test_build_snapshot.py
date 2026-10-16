@@ -164,12 +164,14 @@ class SnapshotTest(unittest.TestCase):
                      "obfuscation/llvm-21/Transforms/Obfuscation/Pass.cpp",
                      "scripts/apply_overlay.sh", "scripts/sync_overlay.py", "scripts/build_snapshot.py", "host-tool", "python-tool"):
             self.write(name, b"original")
-        args = argparse.Namespace(base="a" * 40, major=21, targets="AArch64;ARM;X86", enabled=True)
+        args = argparse.Namespace(base="a" * 40, major=21, targets="AArch64;ARM;X86", enabled=True,
+                                  host="linux-x86_64")
         original_read = Path.read_text
         with mock.patch.object(snapshot.platform, "system", return_value="Linux"), \
                 mock.patch.object(snapshot.platform, "machine", return_value="x86_64"), \
                 mock.patch.object(snapshot.shutil, "which", return_value=str(self.root / "host-tool")), \
                 mock.patch.object(snapshot.sys, "executable", str(self.root / "python-tool")), \
+                mock.patch.object(snapshot, "capture", return_value="GNU tar test"), \
                 mock.patch.object(Path, "read_text", autospec=True, side_effect=lambda p, **k: "Linux" if p.as_posix() == "/etc/os-release" else original_read(p, **k)), \
                 mock.patch.dict(os.environ, {"ImageOS": "ubuntu24", "ImageVersion": "20261015.1"}), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -225,16 +227,81 @@ class SnapshotTest(unittest.TestCase):
         self.assertAlmostEqual(measured["link_work_seconds"], 1.6)
         self.assertEqual(snapshot.ninja_measurements(after, after)["compile_edges"], 0)
 
-    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("tar"), "GNU tar on Linux")
     def test_actions_posix_tar_roundtrip_preserves_snapshot_timestamps(self):
         # actions/cache uses --posix, which retains nanosecond mtimes through PAX.
+        tar = os.environ.get("SNAPSHOT_TAR") or shutil.which("tar")
+        if not tar or b"GNU tar" not in subprocess.check_output([tar, "--version"]):
+            self.skipTest("GNU tar required; set SNAPSHOT_TAR on Windows")
         path = self.root / "build/Pass.cpp.o"
         os.utime(path, ns=(1_600_000_000_123_456_789,) * 2)
+        self.write("llvm-project/.git/objects/readonly", b"git object")
+        (self.root / "llvm-project/.git/objects/readonly").chmod(0o444)
+        self.write("build/bin/clang.exe", b"executable fixture")
         snapshot.seal()
-        subprocess.run(["tar", "--posix", "-cf", "cache.tar", *snapshot.TREES, snapshot.MANIFEST], check=True)
+        subprocess.run([tar, "--posix", "-cf", "cache.tar", *snapshot.TREES, snapshot.MANIFEST], check=True)
         snapshot.discard(self.root)
-        subprocess.run(["tar", "-xf", "cache.tar"], check=True)
+        subprocess.run([tar, "-xf", "cache.tar"], check=True)
         self.assertTrue(self.validate()["hit"])
+        snapshot.discard(self.root)
+
+    def test_windows_configuration_paths_and_executable(self):
+        self.identity["host"] = "windows-x86_64"
+        self.write("build/bin/clang.exe", b"windows clang")
+        cache_path = self.root / "build/CMakeCache.txt"
+        cache_path.write_text(cache_path.read_text().replace("/host/", "C:/Host/"))
+        self.identity["cmake_args"] = [arg.replace("/host/", "c:\\host\\") for arg in self.identity["cmake_args"]]
+        snapshot.check_build(self.root, self.identity)
+        (self.root / "build/bin/clang.exe").unlink()
+        with self.assertRaisesRegex(ValueError, "clang.exe"):
+            snapshot.check_build(self.root, self.identity)
+
+    def test_windows_prepare_tracks_sdk_and_tools(self):
+        for name in ("obfuscation/llvm-21/registration.patch",
+                     "obfuscation/llvm-21/Transforms/Obfuscation/CMakeLists.txt",
+                     "scripts/apply_overlay.sh", "scripts/sync_overlay.py", "scripts/build_snapshot.py",
+                     "host-tool", "python-tool", "link.exe", "lib.exe"):
+            self.write(name, b"original")
+        environment = {name: "fixture" for name in (
+            "VCToolsInstallDir", "VCToolsVersion", "WindowsSdkDir", "WindowsSDKVersion",
+            "UniversalCRTSdkDir", "UCRTVersion", "INCLUDE", "LIB", "LIBPATH",
+            "VSCMD_ARG_HOST_ARCH", "VSCMD_ARG_TGT_ARCH")}
+        environment.update(ImageOS="win25", ImageVersion="20261015.1", SNAPSHOT_TAR="")
+        args = argparse.Namespace(base="a" * 40, major=21, targets="AArch64;ARM;X86", enabled=True,
+                                  host="windows-x86_64")
+        with mock.patch.object(snapshot.platform, "system", return_value="Windows"), \
+                mock.patch.object(snapshot.platform, "machine", return_value="AMD64"), \
+                mock.patch.object(snapshot.shutil, "which", return_value=str(self.root / "host-tool")), \
+                mock.patch.object(snapshot.sys, "executable", str(self.root / "python-tool")), \
+                mock.patch.object(snapshot, "capture", return_value="GNU tar test"), \
+                mock.patch.dict(os.environ, environment), contextlib.redirect_stdout(io.StringIO()):
+            snapshot.prepare(args)
+            first = snapshot.read_json(snapshot.STATE_DIR / "expected.json")
+            self.assertIn("cl", first["tools"])
+            self.assertNotIn("-DLLVM_USE_LINKER=lld", first["cmake_args"])
+            for variable in ("WindowsSDKVersion", "VCToolsVersion", "LIB", "INCLUDE"):
+                with mock.patch.dict(os.environ, {variable: "changed"}):
+                    snapshot.prepare(args)
+                    self.assertNotEqual(snapshot.cache_key(first),
+                                        snapshot.read_json(snapshot.STATE_DIR / "state.json")["key"])
+            self.write("host-tool", b"changed compiler binary")
+            snapshot.prepare(args)
+            self.assertNotEqual(snapshot.cache_key(first), snapshot.read_json(snapshot.STATE_DIR / "state.json")["key"])
+            with mock.patch.dict(os.environ, {"WindowsSDKVersion": ""}):
+                with self.assertRaisesRegex(ValueError, "WindowsSDKVersion"):
+                    snapshot.prepare(args)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction")
+    def test_junction_is_rejected_and_discard_does_not_follow_it(self):
+        outside = self.root / "keep"
+        outside.mkdir()
+        (outside / "data").write_bytes(b"keep")
+        shutil.rmtree(self.root / "build")
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(self.root / "build"), str(outside)],
+                       check=True, capture_output=True)
+        with self.assertRaisesRegex(ValueError, "linked snapshot"):
+            snapshot.inventory(self.root)
+        snapshot.discard(self.root)
+        self.assertEqual((outside / "data").read_bytes(), b"keep")
 
     def test_discard_does_not_follow_linked_tree(self):
         outside = self.root / "keep"
