@@ -370,7 +370,7 @@ jobs:
         trap 'rm -rf "$CHECK_DIR"' EXIT
         ZIP="dist/android-ndk-${OUR_TAG}-${HOST}.zip"
         if [ "$RUNNER_OS" = Windows ]; then
-          7z x -y "$ZIP" "-o$CHECK_DIR" >/dev/null
+          7z x -y "$ZIP" "-o$(cygpath -w "$CHECK_DIR")" >/dev/null
         else
           unzip -q "$ZIP" -d "$CHECK_DIR"
         fi

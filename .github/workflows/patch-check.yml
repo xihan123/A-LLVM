@@ -66,6 +66,7 @@ jobs:
           PY
 
   verify:
+    name: ${{ matrix.baseline.ndk_tag }} / ${{ matrix.host }}
     needs: discover-unit
     strategy:
       fail-fast: false
