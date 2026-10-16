@@ -11,17 +11,15 @@
  * build-time value (keystore cert.getEncoded() == the DER apksigner embeds == what
  * Signature.toByteArray() returns), so no encoder-side change is needed.
  *
- * Anti-redirect: the certificate is fetched over TWO independent native paths and only the
- * consensus is trusted (see certSha256Consensus):
- *   Source A  base.apk path discovered from /proc/self/maps, then a fresh open()+pread.
- *   Source B  the fd the ART runtime already holds open on base.apk, discovered by scanning
- *             /proc/self/fd (readlinkat), read in place with pread (never closed).
- * Both parses must succeed, both fds/paths must resolve to the same inode (fstat/stat), and
- * both digests must be equal — else fail-closed (garbage decrypt). A single-vector bypass
- * (framework hook, open() redirect, or bind-mount over the path) perturbs exactly one source
- * and is caught. Defeating it requires a consistent inline hook of pread + a forged fstat,
- * i.e. the same root/dynamic capability that could just hook decrypt()'s return value — a
- * threat cert binding never claimed to stop (see the project threat model).
+ * certSha256ForLibrary anchors discovery to an address inside the protected library.
+ * In-APK mappings identify the APK directly; extracted libraries identify their installation
+ * directory, where exactly one APK must contain lib/<abi>/<name>. Fresh fds are checked
+ * against mapped device/inode identities. Neither maps order nor an ART-owned fd identifies
+ * the host or the library's owner. Unknown or ambiguous origins fail closed.
+ * For extracted libraries without an APK mapping, directory/ZIP membership establishes
+ * ownership but cannot detect replacement or a bind-mount of that APK alone. This reads
+ * certificate bytes, not an APK-wide cryptographic signature verification, and does not
+ * defend against arbitrary native hooks.
  *
  * Pure C++/POSIX, no JNI, no third-party deps: /proc/self is always readable by its own
  * process, so this needs neither root nor any hookable framework API.
@@ -30,9 +28,11 @@
 #define STRINGARMOR_APKCERT_H
 
 #include <dirent.h>
-#include <dlfcn.h>
+#include <cerrno>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #include <cstddef>
@@ -46,14 +46,14 @@
 namespace stringarmor {
 namespace apkcert {
 
-// Read exactly n bytes at absolute offset off. pread64 does not move the fd's file offset,
-// so it is safe to use on the ART runtime's own base.apk fd (Source B). Any short read or
-// error -> false.
+// Read exactly n bytes without changing the fd's file offset.
 inline bool readAt(int fd, uint64_t off, void* buf, size_t n) {
+    if (off > INT64_MAX || n > static_cast<uint64_t>(INT64_MAX) - off) return false;
     uint8_t* p = static_cast<uint8_t*>(buf);
     size_t got = 0;
     while (got < n) {
         const ssize_t r = pread64(fd, p + got, n - got, static_cast<off64_t>(off + got));
+        if (r < 0 && errno == EINTR) continue;
         if (r <= 0) {
             return false;
         }
@@ -62,6 +62,9 @@ inline bool readAt(int fd, uint64_t off, void* buf, size_t n) {
     return true;
 }
 
+inline uint16_t le16(const uint8_t* b) {
+    return static_cast<uint16_t>(b[0]) | (static_cast<uint16_t>(b[1]) << 8);
+}
 inline uint32_t le32(const uint8_t* b) {
     return static_cast<uint32_t>(b[0]) | (static_cast<uint32_t>(b[1]) << 8) |
            (static_cast<uint32_t>(b[2]) << 16) | (static_cast<uint32_t>(b[3]) << 24);
@@ -156,13 +159,17 @@ inline bool hashFirstSignerCert(int fd, uint64_t valStart, uint64_t valEnd, uint
     return read;
 }
 
-// Locate the APK Signing Block, find the preferred (v2, else v3) ID-value pair, and hash its
-// signer cert. Reads only what it needs via pread (no whole-file buffering). fail-closed.
-inline bool parseSignerCertSha256Fd(int fd, uint64_t fileSize, uint8_t out[32]) {
+struct ZipDirectory {
+    uint64_t offset;
+    uint64_t size;
+    uint16_t entries;
+};
+
+// Classic single-disk ZIP only. The comment must end at EOF; reject ZIP64 sentinels.
+inline bool zipDirectory(int fd, uint64_t fileSize, ZipDirectory& cd) {
     if (fileSize < 22) {
         return false;
     }
-    // --- End Of Central Directory: scan the tail for signature 0x06054b50, take the last one.
     const uint64_t kMaxEocd = 22 + 0xFFFFu;  // 22-byte record + max ZIP comment
     const uint64_t tailLen = fileSize < kMaxEocd ? fileSize : kMaxEocd;
     uint8_t* tail = static_cast<uint8_t*>(std::malloc(static_cast<size_t>(tailLen)));
@@ -170,24 +177,30 @@ inline bool parseSignerCertSha256Fd(int fd, uint64_t fileSize, uint8_t out[32]) 
         return false;
     }
     const uint64_t tailStart = fileSize - tailLen;
-    uint64_t cdOffset = 0;
     bool haveEocd = false;
     if (readAt(fd, tailStart, tail, static_cast<size_t>(tailLen))) {
         for (uint64_t i = tailLen - 22 + 1; i-- > 0;) {
-            if (tail[i] == 0x50 && tail[i + 1] == 0x4b && tail[i + 2] == 0x05 &&
-                tail[i + 3] == 0x06) {
-                cdOffset = le32(tail + i + 16);
-                if (cdOffset >= 24 && cdOffset <= fileSize) {
-                    haveEocd = true;
-                    break;
-                }
-            }
+            const uint8_t* e = tail + i;
+            if (le32(e) != 0x06054b50 || i + 22 + le16(e + 20) != tailLen) continue;
+            cd = {le32(e + 16), le32(e + 12), le16(e + 10)};
+            haveEocd = le16(e + 4) == 0 && le16(e + 6) == 0 &&
+                       le16(e + 8) == cd.entries && cd.entries != 0xffff &&
+                       cd.offset != 0xffffffffu && cd.size != 0xffffffffu &&
+                       cd.offset + cd.size == tailStart + i;
+            break;
         }
     }
     std::free(tail);
-    if (!haveEocd) {
+    return haveEocd;
+}
+
+// Locate the APK Signing Block, preferring v2 to v3, and hash the first signer cert.
+inline bool parseSignerCertSha256Fd(int fd, uint64_t fileSize, uint8_t out[32]) {
+    ZipDirectory cd{};
+    if (!zipDirectory(fd, fileSize, cd) || cd.offset < 24) {
         return false;
     }
+    const uint64_t cdOffset = cd.offset;
 
     // --- Signing Block footer sits in the 24 bytes just before the central directory:
     //     u64 sizeOfBlock | "APK Sig Block 42" (16 bytes). The same u64 size leads the block.
@@ -243,223 +256,239 @@ inline bool parseSignerCertSha256Fd(int fd, uint64_t fileSize, uint8_t out[32]) 
     return false;
 }
 
-// --- self-APK discovery (two independent oracles) ------------------------------------------
-
-inline bool endsWithBaseApk(const char* s) {
-    const size_t n = std::strlen(s);
-    const char suffix[] = "/base.apk";
-    const size_t m = sizeof(suffix) - 1;
-    return n >= m && std::strncmp(s + n - m, suffix, m) == 0 &&
-           std::strstr(s, "/data/app/") != nullptr;
-}
-
-// Source A path: first /data/app/.../base.apk mapped into this process (/proc/self/maps).
-inline bool selfApkPathFromMaps(char* out, size_t cap) {
-    const int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        return false;
-    }
-    char buf[4096];
-    char line[1024];
-    size_t lineLen = 0;
-    bool found = false;
-    ssize_t r;
-    while (!found && (r = read(fd, buf, sizeof buf)) > 0) {
-        for (ssize_t i = 0; i < r; ++i) {
-            const char ch = buf[i];
-            if (ch == '\n' || lineLen + 1 >= sizeof line) {
-                line[lineLen] = '\0';
-                const char* path = std::strchr(line, '/');
-                if (path != nullptr && endsWithBaseApk(path) && std::strlen(path) < cap) {
-                    std::strcpy(out, path);
-                    found = true;
+// Check central and local record boundaries without inflating file contents.
+inline bool zipHasLibrary(int fd, uint64_t size, const char* entry, bool& found) {
+    ZipDirectory cd{};
+    if (!zipDirectory(fd, size, cd)) return false;
+    uint64_t pos = cd.offset;
+    const uint64_t end = pos + cd.size;
+    const size_t wanted = std::strlen(entry);
+    found = false;
+    for (unsigned i = 0; i < cd.entries; ++i) {
+        uint8_t h[46], local[30];
+        if (end - pos < sizeof h || !readAt(fd, pos, h, sizeof h) ||
+            le32(h) != 0x02014b50) return false;
+        const uint16_t nameLen = le16(h + 28), extraLen = le16(h + 30);
+        const uint64_t recordSize = sizeof h + nameLen + extraLen + le16(h + 32);
+        const uint64_t localPos = le32(h + 42), compressed = le32(h + 20);
+        const uint16_t method = le16(h + 10);
+        if (recordSize > end - pos || nameLen == 0 || le16(h + 34) != 0 ||
+            compressed == 0xffffffffu || le32(h + 24) == 0xffffffffu ||
+            localPos == 0xffffffffu || (le16(h + 8) & 0x41) ||
+            (method != 0 && method != 8) || localPos > cd.offset ||
+            cd.offset - localPos < sizeof local ||
+            !readAt(fd, localPos, local, sizeof local) || le32(local) != 0x04034b50 ||
+            le16(local + 26) != nameLen || le16(local + 8) != method ||
+            le16(local + 6) != le16(h + 8) ||
+            (!(le16(h + 8) & 8) && std::memcmp(local + 14, h + 16, 12) != 0) ||
+            (method == 0 && compressed != le32(h + 24))) return false;
+        const uint64_t data = localPos + sizeof local + nameLen + le16(local + 28);
+        if (data > cd.offset || compressed > cd.offset - data) return false;
+        // Reject malformed extra fields and ZIP64 in either header.
+        const uint64_t extraStarts[] = {pos + sizeof h + nameLen,
+                                        localPos + sizeof local + nameLen};
+        const uint16_t extraSizes[] = {extraLen, le16(local + 28)};
+        for (unsigned j = 0; j < 2; ++j) {
+            uint64_t extra = extraStarts[j], extraEnd = extra + extraSizes[j];
+            while (extra < extraEnd) {
+                if (extraEnd - extra < 4) {
+                    // zipalign pads local extra fields with raw zeros, not another TLV.
+                    uint8_t padding[3]{};
+                    if (j != 1 || !readAt(fd, extra, padding, static_cast<size_t>(extraEnd - extra)) ||
+                        padding[0] != 0 || padding[1] != 0 || padding[2] != 0) return false;
                     break;
                 }
-                lineLen = 0;
-            } else {
-                line[lineLen++] = ch;
+                uint8_t tag[4];
+                if (!readAt(fd, extra, tag, 4) ||
+                    le16(tag) == 1 || le16(tag + 2) > extraEnd - extra - 4) return false;
+                extra += 4 + le16(tag + 2);
             }
         }
+        bool match = nameLen == wanted;
+        for (size_t n = 0; n < nameLen;) {
+            uint8_t a[256], b[256];
+            const size_t count = nameLen - n < sizeof a ? nameLen - n : sizeof a;
+            if (!readAt(fd, pos + sizeof h + n, a, count) ||
+                !readAt(fd, localPos + sizeof local + n, b, count) ||
+                std::memcmp(a, b, count) != 0) return false;
+            if (match && std::memcmp(a, entry + n, count) != 0) match = false;
+            n += count;
+        }
+        if (match) {
+            if (found || le32(h + 24) == 0) return false;
+            found = true;
+        }
+        pos += recordSize;
     }
-    close(fd);
-    return found;
+    return pos == end;
 }
 
-// Source B: the ART runtime's already-open base.apk fd, found by readlink over /proc/self/fd.
-// Returns the fd (do NOT close it — it belongs to the runtime) and its resolved path.
-inline int selfApkOpenFd(char* pathOut, size_t cap) {
-    DIR* d = opendir("/proc/self/fd");
-    if (d == nullptr) {
-        return -1;
-    }
-    const int dfd = dirfd(d);
-    int result = -1;
-    struct dirent* e;
-    while ((e = readdir(d)) != nullptr) {
-        if (e->d_name[0] < '0' || e->d_name[0] > '9') {
-            continue;
+struct Mapping {
+    unsigned long long start, end, inode;
+    unsigned devMajor, devMinor;
+    char path[PATH_MAX];
+};
+
+inline bool mappedIdentity(const Mapping& m, const struct stat& st) {
+    return m.inode != 0 && m.inode == static_cast<unsigned long long>(st.st_ino) &&
+           m.devMajor == major(st.st_dev) && m.devMinor == minor(st.st_dev);
+}
+
+// Either locate the anchor, or check all existing mappings of one APK (absence is allowed).
+inline bool inspectMaps(uintptr_t anchor, Mapping* owner,
+                        const char* apk = nullptr, const struct stat* expected = nullptr) {
+    FILE* maps = std::fopen("/proc/self/maps", "re");
+    if (!maps) return false;
+    char line[PATH_MAX + 256];
+    bool ok = true, found = false;
+    while (std::fgets(line, sizeof line, maps)) {
+        const size_t len = std::strlen(line);
+        if (len == 0 || line[len - 1] != '\n') { ok = false; break; }
+        line[len - 1] = '\0';
+        Mapping m{};
+        unsigned long long offset;
+        char perms[5];
+        int pathStart = 0;
+        if (std::sscanf(line, "%llx-%llx %4s %llx %x:%x %llu %n",
+                        &m.start, &m.end, perms, &offset, &m.devMajor, &m.devMinor,
+                        &m.inode, &pathStart) != 7 || pathStart == 0 || m.start >= m.end ||
+            std::strlen(line + pathStart) >= sizeof m.path) { ok = false; break; }
+        std::strcpy(m.path, line + pathStart);
+        if (owner && anchor >= m.start && anchor < m.end) {
+            if (found) { ok = false; break; }
+            *owner = m;
+            found = true;
         }
-        char target[1024];
-        const ssize_t n = readlinkat(dfd, e->d_name, target, sizeof target - 1);
-        if (n <= 0) {
-            continue;
-        }
-        target[n] = '\0';
-        if (endsWithBaseApk(target) && static_cast<size_t>(n) < cap) {
-            std::strcpy(pathOut, target);
-            result = static_cast<int>(strtol(e->d_name, nullptr, 10));
+        if (apk && std::strcmp(apk, m.path) == 0 && !mappedIdentity(m, *expected)) {
+            ok = false;
             break;
         }
     }
-    closedir(d);
-    return result;
+    ok = ok && !std::ferror(maps) && (!owner || found);
+    std::fclose(maps);
+    return ok;
 }
 
-inline bool sameInode(const struct stat& a, const struct stat& b) {
-    return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+inline bool endsWith(const char* path, const char* suffix) {
+    const size_t n = std::strlen(path), len = std::strlen(suffix);
+    return n >= len && std::memcmp(path + n - len, suffix, len) == 0;
 }
 
-// Injected-library anchor (Xposed/LSPosed module scenario): the host process's APK is NOT
-// the APK this library was packaged in. dladdr() gives this .so's own mapped path
-// (.../<module>/base.apk!/lib/arm64-v8a/libfoo.so for in-APK loading); the /data/app
-// base.apk whose path prefixes that (with a '!' boundary) is the APK whose signing
-// certificate the build folded. On success also reports the inode the kernel recorded in
-// maps for that mapping — the caller cross-checks a fresh open() against it, catching the
-// same open()-redirect / bind-mount class the fd oracle covers in the host-APK case.
-inline bool libAnchoredApkFromMaps(char* out, size_t cap, unsigned long long* mapsInode) {
-    Dl_info info{};
-    if (dladdr(reinterpret_cast<void*>(&endsWithBaseApk), &info) == 0 ||
-        info.dli_fname == nullptr) {
-        return false;
+inline bool cleanAbsolutePath(const char* path) {
+    return path[0] == '/' && !std::strchr(path, '\\') &&
+           !std::strstr(path, " (deleted)") && !std::strstr(path, "/../") &&
+           !std::strstr(path, "/./") && !std::strstr(path, "//");
+}
+
+// Android's installed lib/<instruction-set>/<name> layout, including adopted storage.
+inline bool extractedLibraryPaths(const char* path, char root[PATH_MAX],
+                                  char entry[PATH_MAX], const char*& relative) {
+#if defined(__aarch64__)
+    const char* isa = "arm64"; const char* abi = "arm64-v8a";
+#elif defined(__arm__)
+    const char* isa = "arm"; const char* abi = "armeabi-v7a";
+#elif defined(__x86_64__)
+    const char* isa = "x86_64"; const char* abi = "x86_64";
+#elif defined(__i386__)
+    const char* isa = "x86"; const char* abi = "x86";
+#else
+    const char* isa = ""; const char* abi = "";
+    return false;
+#endif
+    const char* install = nullptr;
+    if (std::strncmp(path, "/data/app/", 10) == 0) install = path + 10;
+    else if (std::strncmp(path, "/mnt/expand/", 12) == 0) {
+        const char* volumeEnd = std::strchr(path + 12, '/');
+        if (volumeEnd && volumeEnd != path + 12 &&
+            std::strncmp(volumeEnd, "/app/", 5) == 0) install = volumeEnd + 5;
     }
-    const char* libPath = info.dli_fname;
-    const size_t libLen = std::strlen(libPath);
-    const int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        return false;
-    }
-    char buf[4096];
-    char line[1024];
-    size_t lineLen = 0;
-    bool found = false;
-    ssize_t r;
-    while (!found && (r = read(fd, buf, sizeof buf)) > 0) {
-        for (ssize_t i = 0; i < r; ++i) {
-            const char ch = buf[i];
-            if (ch == '\n' || lineLen + 1 >= sizeof line) {
-                line[lineLen] = '\0';
-                const char* path = std::strchr(line, '/');
-                if (path != nullptr && endsWithBaseApk(path)) {
-                    const size_t n = std::strlen(path);
-                    // path must be a real prefix of the library path with a '!' boundary
-                    // (…/base.apk!/lib/…), not a coincidental directory prefix.
-                    if (n < libLen && libPath[n] == '!' &&
-                        std::strncmp(libPath, path, n) == 0 && n < cap) {
-                        unsigned long long ino = 0;
-                        // maps fields: start-end perms offset dev inode pathname
-                        if (std::sscanf(line, "%*s %*s %*s %*s %llu", &ino) == 1 && ino != 0) {
-                            std::strcpy(out, path);
-                            *mapsInode = ino;
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-                lineLen = 0;
-            } else {
-                line[lineLen++] = ch;
-            }
+    if (!install || !cleanAbsolutePath(path) || !endsWith(path, ".so")) return false;
+    const char* lib = std::strstr(install, "/lib/");
+    if (!lib || lib == install) return false;
+    const char* slotEnd = std::strchr(install, '/');
+    if (slotEnd != lib && (std::strncmp(install, "~~", 2) != 0 ||
+                          std::strchr(slotEnd + 1, '/') != lib || slotEnd + 1 == lib)) return false;
+    const char* name = lib + 5;
+    const size_t isaLen = std::strlen(isa);
+    if (std::strncmp(name, isa, isaLen) != 0 || name[isaLen] != '/') return false;
+    name += isaLen + 1;
+    if (!*name || std::strchr(name, '/')) return false;
+    const size_t rootLen = lib - path;
+    std::memcpy(root, path, rootLen);
+    root[rootLen] = '\0';
+    relative = lib + 1;
+    const int n = std::snprintf(entry, PATH_MAX, "lib/%s/%s", abi, name);
+    return n > 0 && n < PATH_MAX;
+}
+
+// Retain the sole matching APK fd so discovery and certificate parsing use the same file.
+// Explicit POSIX cleanup avoids introducing C++ exception-unwinding helpers into this runtime.
+inline int openExtractedLibraryApk(const Mapping& owner) {
+    char root[PATH_MAX], entry[PATH_MAX];
+    const char* relative = nullptr;
+    if (!extractedLibraryPaths(owner.path, root, entry, relative)) return -1;
+    const int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (directory < 0) return -1;
+    const int library = openat(directory, relative, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat libStat{};
+    const bool validLibrary = library >= 0 && fstat(library, &libStat) == 0 &&
+        S_ISREG(libStat.st_mode) && libStat.st_size > 0 && mappedIdentity(owner, libStat);
+    if (library >= 0) close(library);
+    if (!validLibrary) { close(directory); return -1; }
+    DIR* dir = fdopendir(directory);
+    if (!dir) { close(directory); return -1; }
+    int selected = -1;
+    char selectedPath[PATH_MAX]{};
+    struct stat selectedStat{};
+    bool ok = true;
+    for (;;) {
+        errno = 0;
+        const dirent* e = readdir(dir);
+        if (!e) { ok = errno == 0; break; }
+        if (!endsWith(e->d_name, ".apk")) continue;
+        const int candidate = openat(directory, e->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        struct stat st{};
+        bool match = false;
+        if (candidate < 0 || fstat(candidate, &st) != 0 ||
+            !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+            !zipHasLibrary(candidate, static_cast<uint64_t>(st.st_size), entry, match)) {
+            if (candidate >= 0) close(candidate);
+            ok = false; break;
         }
+        if (!match) { close(candidate); continue; }
+        const int n = std::snprintf(selectedPath, sizeof selectedPath, "%s/%s", root, e->d_name);
+        if (selected >= 0 || n < 0 || static_cast<size_t>(n) >= sizeof selectedPath) {
+            close(candidate);
+            ok = false; break;
+        }
+        selected = candidate;
+        selectedStat = st;
     }
-    close(fd);
-    return found;
+    closedir(dir); // Also closes the installation directory fd.
+    if (!ok || selected < 0 || !inspectMaps(0, nullptr, selectedPath, &selectedStat)) {
+        if (selected >= 0) close(selected);
+        return -1;
+    }
+    return selected;
 }
 
-// Fetch SHA-256(signer cert) via the two independent paths and trust only their consensus.
-// Returns true and fills out[32] iff both parse, both resolve to the same inode, and both
-// digests match; otherwise false (caller fails closed).
-inline bool certSha256Consensus(uint8_t out[32]) {
-    // Injected-library case (Xposed/LSPosed module): our .so was packaged in a DIFFERENT
-    // APK than the host process's own. The first base.apk in maps (and the ART fd oracle)
-    // then belongs to the host app, so the original consensus would read the WRONG
-    // certificate and every bound string would decode to garbage on a perfectly genuine
-    // module. Anchor on the APK backing our own mapping instead; verify a fresh open()
-    // against the kernel-recorded maps inode (redirect/bind-mount catcher of the same
-    // class as the fd oracle, which cannot apply here — the runtime holds no fd to the
-    // module APK). Normal apps (library and host share one APK) keep the full two-oracle
-    // consensus below, untouched.
-    {
-        char libApk[1024];
-        char hostApk[1024];
-        unsigned long long libIno = 0;
-        if (libAnchoredApkFromMaps(libApk, sizeof libApk, &libIno) &&
-            !(selfApkPathFromMaps(hostApk, sizeof hostApk) &&
-              std::strcmp(hostApk, libApk) == 0)) {
-            const int fd = open(libApk, O_RDONLY | O_CLOEXEC);
-            if (fd < 0) {
-                return false;
-            }
-            struct stat st;
-            uint8_t h[32];
-            const bool ok =
-                fstat(fd, &st) == 0 &&
-                static_cast<unsigned long long>(st.st_ino) == libIno &&
-                parseSignerCertSha256Fd(fd, static_cast<uint64_t>(st.st_size), h);
-            close(fd);
-            if (!ok) {
-                return false;
-            }
-            std::memcpy(out, h, 32);
-            return true;
-        }
-    }
-
-    char pathMaps[1024];
-    char pathFd[1024];
-    if (!selfApkPathFromMaps(pathMaps, sizeof pathMaps)) {
-        return false;
-    }
-    const int runtimeFd = selfApkOpenFd(pathFd, sizeof pathFd);
-    if (runtimeFd < 0) {
-        return false;
-    }
-
-    // Same-inode check across: runtime fd, the maps path, and the fd's own readlink path.
-    // Catches open() redirection and post-open bind-mounts (readlink shows base.apk but a
-    // fresh stat resolves through the overlay to a different inode than the live fd).
-    struct stat stRt, stMaps, stFd;
-    if (fstat(runtimeFd, &stRt) != 0 || stat(pathMaps, &stMaps) != 0 ||
-        stat(pathFd, &stFd) != 0) {
-        return false;
-    }
-    if (!sameInode(stRt, stMaps) || !sameInode(stRt, stFd)) {
-        return false;
-    }
-
-    // Source A: fresh open() of the maps-discovered path.
-    const int freshFd = open(pathMaps, O_RDONLY | O_CLOEXEC);
-    if (freshFd < 0) {
-        return false;
-    }
-    struct stat stFresh;
-    uint8_t hashA[32];
-    const bool okA = fstat(freshFd, &stFresh) == 0 && sameInode(stRt, stFresh) &&
-                     parseSignerCertSha256Fd(freshFd, static_cast<uint64_t>(stFresh.st_size), hashA);
-    close(freshFd);
-    if (!okA) {
-        return false;
-    }
-
-    // Source B: the runtime's live fd, read in place (never closed).
-    uint8_t hashB[32];
-    if (!parseSignerCertSha256Fd(runtimeFd, static_cast<uint64_t>(stRt.st_size), hashB)) {
-        return false;
-    }
-
-    if (std::memcmp(hashA, hashB, 32) != 0) {
-        return false;  // the two read paths disagree -> a redirect/hook is in play
-    }
-    std::memcpy(out, hashA, 32);
+// The anchor must be local/hidden in the protected DSO. Never infer its owner from maps order.
+inline bool certSha256ForLibrary(const void* anchor, uint8_t out[32]) {
+    Mapping owner{};
+    if (!anchor || !inspectMaps(reinterpret_cast<uintptr_t>(anchor), &owner) ||
+        owner.inode == 0 || !cleanAbsolutePath(owner.path)) return false;
+    const bool direct = endsWith(owner.path, ".apk");
+    const int apk = direct ? open(owner.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+                           : openExtractedLibraryApk(owner);
+    if (apk < 0) return false;
+    struct stat st{};
+    uint8_t hash[32];
+    const bool ok = fstat(apk, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 &&
+        (!direct || mappedIdentity(owner, st)) &&
+        parseSignerCertSha256Fd(apk, static_cast<uint64_t>(st.st_size), hash);
+    close(apk);
+    if (!ok) return false;
+    std::memcpy(out, hash, sizeof hash);
     return true;
 }
 
