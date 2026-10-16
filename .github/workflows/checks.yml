@@ -8,6 +8,19 @@ permissions:
   contents: read
 
 jobs:
+  windows-snapshot:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Windows snapshot and GNU tar roundtrip tests
+        shell: bash
+        run: |
+          export SNAPSHOT_TAR="$(cygpath -w /usr/bin/tar.exe)"
+          python -m unittest discover -s tests/build-snapshot -p 'test_*.py' -v
+
   scripts:
     runs-on: ubuntu-latest
     steps:
