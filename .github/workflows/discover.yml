@@ -22,6 +22,10 @@ on:
         type: choice
         options: [ "build", "repack" ]
         default: "build"
+      use_snapshot:
+        description: "复用 LLVM 构建快照（验收前默认关闭；false 强制冷构建）"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -78,6 +82,7 @@ jobs:
       download_url: ${{ matrix.download_url }}
       patchset: ${{ matrix.patchset }}
       mode: ${{ inputs.mode || 'build' }}
+      use_snapshot: ${{ inputs.use_snapshot == true }}
     secrets: inherit
 
   release:

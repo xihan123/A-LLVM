@@ -1,6 +1,26 @@
 # LLVM 构建加速计划
 
-日期：2026-10-15。状态：阶段 1 已完成；阶段 2 Linux 快照试点已实现并通过本地测试，正在准备 CI 冷/热构建实测。快照默认关闭。
+日期：2026-10-16。状态：双 Host 快照与流水线加速已实现，四组真实 CI 验收进行中。全部达标前快照默认关闭。
+
+## 10 分钟实施与验收
+
+- 目标：Linux/Windows × LLVM 20/21，兼容快照命中后，单 Host job 从启动到测试、打包、上传完成小于 600 秒。排队、发现及独立 Release job 不计入；冷构建明确列为例外。
+- 继续复用完整源码和构建目录，Windows 保留 MSVC，新增 SDK/工具版本及路径身份、GNU tar/PAX 往返检查；不改变混淆算法、后端和 Release 优化。
+- 磁盘不足 20 GiB 才清理；Linux ZIP 使用 `-1`，Windows 使用 `-mx=1`，上传已压缩 ZIP 使用 `compression-level: 0`。打包后重新解压验证布局、四 ABI 和构建系统。
+- `build`、`discover`、`patch-check` 均提供 `use_snapshot`，默认暂为 false；repack 不恢复快照。`patch-check` 默认四组矩阵，保留自定义 NDK 输入。
+- `snapshot_probe=none/strings/vmp/multi` 提供可重复的热构建样本：在工作区源文件追加带 run ID 的注释，确保同步和编译真实发生；不修改仓库提交、不保存样本快照、不发布 Release。
+- 精确键与清单格式升级为 v2，旧缓存不会误用。可信 dev/default 分支成功构建可保存，PR 只读；默认分支需建立相同配置基线后，PR 才能稳定读取默认分支缓存。
+- 因打包参数改变产物，patchset 更新为 p4。现有 Release 保持不变。
+
+预算：准备 60 秒、恢复校验 120 秒、增量编译链接 120 秒、组装测试 60 秒、打包上传 120 秒，余量 120 秒。阶段预算是目标，不是实测结论。
+
+已确认历史 Linux 冷构建 [38751978627](https://github.com/xihan123/A-LLVM/actions/runs/38751978627) 共 98 分 38 秒，编译 5414 秒；快照压缩后 677,327,132 字节。清理磁盘 166 秒，但清理前已有约 86 GiB 可用；打包 147 秒，原有测试约 12 秒。
+
+本地验证：Windows 快照 22 项、overlay 25 项、discovery 10 项、locate-llvm 1 项及 build-system-smoke runner 通过；GNU tar 在 Windows 实际归档往返保留纳秒级时间戳、只读 Git 对象和可执行文件属性；actionlint 通过。
+
+完成条件：每组冷构建保存、无修改恢复及 strings/vmp/multi 三次热构建均运行完整回归；无修改恢复 C++ 编译数为零，样本仅重编真实依赖；三个修改样本各自 job 耗时均小于 600 秒。计时取 Actions API 的 started_at/completed_at，并报告未命中比例。当前还不能宣布 CI 达标或默认启用。
+
+下文保留前两阶段的设计和历史验证记录。
 
 ## 目标与现状
 

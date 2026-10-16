@@ -5,9 +5,15 @@ name: patch-check
 on:
   workflow_dispatch:
     inputs:
-      ndk_tag: { description: "取基线 LLVM 源码所用的 NDK tag", required: false, default: "r29" }
-      internal: { description: "该 NDK 内部版本号", required: false, default: "29.0.14206865" }
+      ndk_tag: { description: "与 internal 同时留空则验证 LLVM 20/21；填写则验证指定 NDK", required: false, default: "" }
+      internal: { description: "自定义 NDK 内部版本号；与 ndk_tag 同时填写", required: false, default: "" }
       targets: { description: "LLVM_TARGETS_TO_BUILD（需覆盖四 ABI）", required: false, default: "AArch64;ARM;X86" }
+      use_snapshot: { description: "复用双 Host 快照（验收前默认关闭）", type: boolean, default: false }
+      snapshot_probe:
+        description: "热构建样本"
+        type: choice
+        options: ["none", "strings", "vmp", "multi"]
+        default: "none"
   pull_request:
     paths:
     - "obfuscation/**"
@@ -30,6 +36,8 @@ permissions:
 jobs:
   discover-unit:
     runs-on: ubuntu-latest
+    outputs:
+      baselines: ${{ steps.matrix.outputs.baselines }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -38,15 +46,42 @@ jobs:
       - run: python tests/discover/test_discover.py
       - run: python -m unittest discover -s tests/overlay -p 'test_*.py' -v
       - run: python -m unittest discover -s tests/build-snapshot -p 'test_*.py' -v
+      - name: 选择 LLVM 基线
+        id: matrix
+        env:
+          CUSTOM_NDK: ${{ inputs.ndk_tag }}
+          CUSTOM_INTERNAL: ${{ inputs.internal }}
+        run: |
+          python - <<'PY'
+          import json, os
+          tag, internal = os.environ['CUSTOM_NDK'], os.environ['CUSTOM_INTERNAL']
+          if bool(tag) != bool(internal):
+              raise SystemExit('ndk_tag 与 internal 必须同时填写')
+          baselines = [{'ndk_tag': 'r29-beta1', 'internal': '29.0.13113456-beta1'},
+                       {'ndk_tag': 'r30', 'internal': '30.0.16248370'}]
+          if tag:
+              baselines = [{'ndk_tag': tag, 'internal': internal}]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              stream.write('baselines=' + json.dumps(baselines) + '\n')
+          PY
 
   verify:
+    needs: discover-unit
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [linux-x86_64, windows-x86_64]
+        baseline: ${{ fromJSON(needs.discover-unit.outputs.baselines) }}
     uses: ./.github/workflows/build.yml
     with:
-      ndk_tag: ${{ github.event.inputs.ndk_tag || 'r29' }}
-      our_tag: patch-check
-      internal: ${{ github.event.inputs.internal || '29.0.14206865' }}
+      ndk_tag: ${{ matrix.baseline.ndk_tag }}
+      our_tag: patch-check-${{ matrix.baseline.ndk_tag }}
+      internal: ${{ matrix.baseline.internal }}
       channel: stable
-      host: linux-x86_64
+      host: ${{ matrix.host }}
       mode: build
+      patchset: p4
+      use_snapshot: ${{ inputs.use_snapshot == true }}
+      snapshot_probe: ${{ inputs.snapshot_probe || 'none' }}
       targets: ${{ github.event.inputs.targets || 'AArch64;ARM;X86' }}
       download_url: ""
