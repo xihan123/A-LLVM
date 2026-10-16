@@ -1,22 +1,30 @@
 #!/usr/bin/env bash
-#
-# gen_vm_bitcode.sh — 生成 VMP 解释器 bitcode 头 vm.h（按 ABI）。
-#
-# 维护者工具，非发布路径：用一个能交叉出 LLVM bitcode 的 clang（如官方 NDK 的
-# clang）把 obfuscation/aVMPInterpreter/aVMPInterpreter.cpp 编成目标 ABI 的 .bc，
-# 再转成上游同格式的字节数组头（binary_ir_length + binary_ir_data[]），覆盖写入
-# 两个 overlay 的 include/aVMP/vm.h。
-#
-# 用法: scripts/gen_vm_bitcode.sh <clang> [abi_tag]
-#   <clang>   交叉编译器（须支持 --target=<triple> -emit-llvm）
-#   abi_tag   aarch64|arm|x86|x86_64（默认 aarch64；垂直切片只需 aarch64）
-#
+# 将解释器编译为 bitcode，写入所选 LLVM overlay 的 vm.h。
+# 用法: scripts/gen_vm_bitcode.sh <clang> [abi_tag] [20|21|all]
+# clang 需配置 Android sysroot；ABI 默认 aarch64，支持 arm、x86、x86_64。
 set -euo pipefail
 
-CLANG="${1:?usage: gen_vm_bitcode.sh <clang> [abi_tag]}"
+CLANG="${1:?usage: gen_vm_bitcode.sh <clang> [abi_tag] [20|21|all]}"
 ABI="${2:-aarch64}"
+MAJOR="${3:-all}"
 here="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$here/obfuscation/aVMPInterpreter/aVMPInterpreter.cpp"
+
+case "$MAJOR" in
+  all) majors=(20 21) ;;
+  20|21) majors=("$MAJOR") ;;
+  *) echo "unknown overlay: $MAJOR (want 20|21|all)" >&2; exit 2 ;;
+esac
+# 新 LLVM 生成的属性可能无法被旧 bitcode reader 读取。
+producer=$("$CLANG" -dumpversion)
+producer=${producer%%.*}
+[[ "$producer" =~ ^[0-9]+$ ]] || { echo "cannot determine clang major" >&2; exit 2; }
+for major in "${majors[@]}"; do
+  if (( producer > major )); then
+    echo "LLVM $producer bitcode cannot target LLVM $major; use an older clang or select one overlay" >&2
+    exit 2
+  fi
+done
 
 case "$ABI" in
   aarch64) TRIPLE=aarch64-linux-android21 ;;
@@ -27,8 +35,7 @@ case "$ABI" in
 esac
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-# 解释器自身实现 Itanium 异常模型（含 try/catch），必须用 -fexceptions 编译；
-# -fno-exceptions 只针对被虚拟化的用户代码，不适用于解释器本体。
+# 解释器包含 try/catch，需要保留异常支持。
 "$CLANG" --target="$TRIPLE" -frtti -fexceptions -O2 -fno-inline \
   -emit-llvm -c "$SRC" -o "$tmp/vm.bc"
 
@@ -48,7 +55,7 @@ out="$tmp/vm.h"
   echo '}'
 } > "$out"
 
-for major in 20 21; do
+for major in "${majors[@]}"; do
   cp -f "$out" "$here/obfuscation/llvm-$major/include/aVMP/vm.h"
 done
-echo "wrote vm.h ($len bytes bitcode, $ABI / $TRIPLE) into both overlays"
+echo "wrote vm.h ($len bytes bitcode, $ABI / $TRIPLE) into overlays: ${majors[*]}"

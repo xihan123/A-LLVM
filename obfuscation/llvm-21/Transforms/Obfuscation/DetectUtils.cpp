@@ -78,10 +78,8 @@ Function* DetectUtils::createReportAndKillFunc(Module &M, const std::string &det
     BasicBlock *BB = BasicBlock::Create(Ctx, "entry", Func);
     IRBuilder<> Builder(BB);
 
-    createAProtectBannerWrite(M, Builder);
-
-    // 详细检测原因仅在 debug 模式下输出。
     if (isIRObfuscationDebugEnabled()) {
+        createAProtectBannerWrite(M, Builder);
         createStderrWrite(
             M,
             Builder,

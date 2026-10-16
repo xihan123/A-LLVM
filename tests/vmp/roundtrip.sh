@@ -40,3 +40,29 @@ for mode in plain vmp selfcheck; do
     echo "[ok] $mode: arm64 compile/link (device execution requires adb serial)"
   fi
 done
+
+# 全局地址槽：普通全局、窄整数、常量 GEP、多个指针及 TLS 的独立语义对照。
+for opt in O0 O2; do
+  "$CLANG" "${COMMON[@]}" -"$opt" -DREFERENCE -c "$DIR/global_slots.c" -o "$OUT/global-reference.o"
+  "$CLANG" "${COMMON[@]}" -"$opt" -c "$DIR/global_slots_driver.c" -o "$OUT/global-driver.o"
+  for mode in plain vmp selfcheck; do
+    FLAGS=()
+    if [[ "$mode" != plain ]]; then
+      FLAGS=(-mllvm -irobf-vmp -mllvm '-irobf-vm_functions=global_roundtrip;global_tls;indexed_records')
+    fi
+    if [[ "$mode" == selfcheck ]]; then FLAGS+=(-mllvm -irobf-selfcheck); fi
+    "$CLANG" "${COMMON[@]}" -"$opt" "${FLAGS[@]}" -c "$DIR/global_slots.c" -o "$OUT/global.o"
+    "$CLANG" --driver-mode=g++ -static-libstdc++ "${COMMON[@]}" \
+      "$OUT/global-driver.o" "$OUT/global-reference.o" "$OUT/global.o" -o "$OUT/global-test"
+    if [[ -n "$SERIAL" ]]; then
+      LOCAL_EXE="$OUT/global-test"
+      if command -v cygpath >/dev/null 2>&1; then LOCAL_EXE="$(cygpath -m "$LOCAL_EXE")"; fi
+      MSYS_NO_PATHCONV=1 adb -s "$SERIAL" push "$LOCAL_EXE" "$REMOTE" >/dev/null
+      MSYS_NO_PATHCONV=1 adb -s "$SERIAL" shell chmod 700 "$REMOTE"
+      MSYS_NO_PATHCONV=1 adb -s "$SERIAL" shell timeout 30 "$REMOTE"
+      echo "[ok] global slots $opt/$mode: globals, two pointers, GEP, eight TLS threads"
+    else
+      echo "[ok] global slots $opt/$mode: arm64 compile/link only"
+    fi
+  done
+done
