@@ -9,17 +9,17 @@
  * cancel when the running APK is signed by that certificate — otherwise the keystream is wrong
  * and both strings and virtualized functions decode to garbage (non-branching, fail-closed).
  *
- * The certificate is read straight from the on-disk APK's v2/v3 signing block over two
- * independent, cross-checked native paths (apkcert.h) — never PackageManager.getPackageInfo,
- * the API every signature-bypass tool (CorePatch / LSPatch / fake-signature Xposed) hooks. A
- * wrong/absent/redirected cert yields (0,0): fail-closed.
+ * The certificate comes from this library's own APK, located by its mapped address and
+ * checked against device/inode identities (apkcert.h), without framework APIs or ART fds.
+ * An unknown/ambiguous origin or read failure yields (0,0); a different certificate yields
+ * a different mix. Both prevent the build-time key from being restored.
  *
  * Pure C++/POSIX, no JNI, no root, no third-party deps. See runtime/README.md for how to build
  * and how to produce the matching -irobf-cert-file=<cert.der> input.
  */
 #include <cstdint>
 
-#include "apkcert.h"  // stringarmor::apkcert::certSha256Consensus (pulls in sha256.h)
+#include "apkcert.h"  // stringarmor::apkcert::certSha256ForLibrary (pulls in sha256.h)
 
 namespace {
 // Little-endian u64 from 8 bytes — byte-identical to apkcert.h/jni.cpp so the runtime mix
@@ -38,8 +38,9 @@ inline uint64_t le64(const uint8_t* b) {
 extern "C" __attribute__((visibility("hidden"))) void ndkp_certbind_mix(uint64_t* out_lo,
                                                                         uint64_t* out_hi) {
     uint8_t sha[32];
-    uint64_t lo = 0, hi = 0;  // fail-closed default: (0,0) unless the two sources reach consensus.
-    if (stringarmor::apkcert::certSha256Consensus(sha)) {
+    uint64_t lo = 0, hi = 0;  // fail-closed default if this library's certificate cannot be read.
+    if (stringarmor::apkcert::certSha256ForLibrary(
+            reinterpret_cast<const void*>(&ndkp_certbind_mix), sha)) {
         lo = le64(sha) ^ le64(sha + 16);
         hi = le64(sha + 8) ^ le64(sha + 24);
     }

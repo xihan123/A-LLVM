@@ -2,7 +2,7 @@
 # roundtrip.sh — 证书绑定 fold 语义往返：验证 pass 构建期折入的证书混合值与运行期折入的
 # 逐字节一致（两侧都用 le64(sha) 派生），且 XOR 抵消正确 —— 即「正确证书 → 正确解密」。
 #
-# 真实运行期读证书（apkcert.h 双源共识）需 Android APK 环境，无法在 CI host 上跑；故这里
+# 真实运行期读证书（apkcert.h 按本库定位 APK）需 Android APK 环境，无法在 CI host 上跑；故这里
 # 用一个 stub 替换 ndkp_certbind_mix：stub 只读指定 DER 文件、按与 pass/runtime 相同的公式
 # 算混合值。mix(stub)==mix(build) ⇒ 两侧折入抵消 ⇒ 输出应 == 明文（正例）。把 stub 换成
 # 返回 (0,0)（模拟换签名/缺证书）⇒ 不抵消 ⇒ 输出乱码（负例，fail-closed）。
