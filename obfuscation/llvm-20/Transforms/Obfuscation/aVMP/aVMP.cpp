@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AssumptionCache.h"
@@ -844,7 +845,8 @@ class GOVMTranslator {
                         if (gv_value_map.find(GV) == gv_value_map.end()) {
                             gv_value_map.insert({GV, curr_data_offset});
                             insert_to_value_map(value_map, GV, curr_data_offset);
-                            int res_size = modDataLayout->getTypeAllocSize(GV->getValueType());
+                            // 地址槽大小与全局变量的值类型无关。
+                            int res_size = pointer_size;
                             curr_data_offset += res_size;
                         }
 
@@ -908,7 +910,7 @@ class GOVMTranslator {
                         // also put it into gv_value_map
                         gv_value_map.insert(pair<GlobalVariable *, int>(gv, curr_data_offset));
 
-                        int res_size = modDataLayout->getTypeAllocSize(gv->getValueType());
+                        int res_size = pointer_size;
                         curr_data_offset += res_size;
                     }
                     // Handle Function* (like std::endl) - function pointer constants
@@ -1463,7 +1465,7 @@ void GOVMTranslator::handle_callinst(CallBase *inst, long long curr_func_id) {
         }
     }
 
-    Function *memcpy_func = Intrinsic::getOrInsertDeclaration(Mod, Intrinsic::memcpy, {PointerType::get(Mod->getContext(), 0), PointerType::get(Mod->getContext(), 0), Type::getInt64Ty(Mod->getContext())});
+    Function *memcpy_func = Intrinsic::getDeclaration(Mod, Intrinsic::memcpy, {PointerType::get(Mod->getContext(), 0), PointerType::get(Mod->getContext(), 0), Type::getInt64Ty(Mod->getContext())});
     Function *malloc_func = Mod->getFunction("malloc");
     if (!malloc_func) {
         FunctionType *malloc_type = FunctionType::get(PointerType::get(Mod->getContext(), 0), {Type::getInt64Ty(Mod->getContext())}, false);
@@ -2405,7 +2407,7 @@ void GOVMTranslator::handle_inst(Instruction *ins) {
                     if (gv_value_map.find(GV) == gv_value_map.end()) {
                         gv_value_map.insert({GV, curr_data_offset});
                         insert_to_value_map(&value_map, GV, curr_data_offset);
-                        int res_size = modDataLayout->getTypeAllocSize(GV->getValueType());
+                        int res_size = pointer_size;
                         curr_data_offset += res_size;
                         if (isIRObfuscationDebugEnabled()) {
                             errs() << "[Translator]       Added GV to gv_value_map: offset=" << curr_data_offset - res_size << "\n";
@@ -3325,8 +3327,7 @@ void GOVMTranslator::handle_inst(Instruction *ins) {
             // 移除以适配基线；atomicrmw fmaximum/fminimum 将走 default（不支持则跳过虚拟化）。
             case AtomicRMWInst::UIncWrap: op_val = 17; break;
             case AtomicRMWInst::UDecWrap: op_val = 18; break;
-            case AtomicRMWInst::USubCond: op_val = 19; break;
-            case AtomicRMWInst::USubSat: op_val = 20; break;
+            // r29-beta1 的 LLVM 20 尚无 USubCond / USubSat 枚举。
             default:
                 // Handle any future operations
                 op_val = 0; break;
@@ -3417,6 +3418,34 @@ void GOVMTranslator::handle_inst(Instruction *ins) {
 }
 
 
+// 将全部 GEP 索引折算为字节偏移，供 VM 的单偏移指令使用。
+static void lowerVMGEPOffsets(Function &F, const DataLayout &DL) {
+    SmallVector<GetElementPtrInst *, 16> GEPs;
+    for (Instruction &I : instructions(F))
+        if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) GEPs.push_back(GEP);
+    for (GetElementPtrInst *GEP : GEPs) {
+        unsigned Width = DL.getIndexSizeInBits(GEP->getPointerAddressSpace());
+        MapVector<Value *, APInt> Variables;
+        APInt Constant(Width, 0);
+        if (!GEP->collectOffset(DL, Width, Variables, Constant))
+            report_fatal_error("VMP: unsupported scalable GEP offset");
+        IRBuilder<> Builder(GEP);
+        Type *IndexTy = IntegerType::get(F.getContext(), Width);
+        Value *Offset = ConstantInt::get(F.getContext(), Constant);
+        for (auto &Term : Variables) {
+            Value *Index = Builder.CreateSExtOrTrunc(Term.first, IndexTy);
+            Value *Scaled = Builder.CreateMul(Index, ConstantInt::get(F.getContext(), Term.second));
+            Offset = Builder.CreateAdd(Offset, Scaled);
+        }
+        auto *Bytes = GetElementPtrInst::Create(Type::getInt8Ty(F.getContext()),
+                                                GEP->getPointerOperand(), {Offset});
+        Builder.Insert(Bytes);
+        Bytes->takeName(GEP);
+        GEP->replaceAllUsesWith(Bytes);
+        GEP->eraseFromParent();
+    }
+}
+
 // Translator
 bool GOVMTranslator::run(){
     if (isIRObfuscationDebugEnabled()) {
@@ -3426,6 +3455,7 @@ bool GOVMTranslator::run(){
     if (!prescan_supported_ir()) {
         return false;
     }
+    lowerVMGEPOffsets(*F, *modDataLayout);
     init();
     
     bool has_exception_handling = false;
@@ -4101,7 +4131,8 @@ class GOVMInterpreter {
             // Try parseBitcodeFile first (more reliable for embedded bitcode)
             Expected<std::unique_ptr<Module>> ModuleOrErr = parseBitcodeFile(buf_ref, Mod->getContext());
             if (!ModuleOrErr) {
-                return nullptr;
+                report_fatal_error(Twine("VMP: cannot read interpreter bitcode: ") +
+                                   toString(ModuleOrErr.takeError()));
             }
             
             return ModuleOrErr.get().release();

@@ -391,12 +391,12 @@ Value * buildPageTableDecryptIR(const BuildDecryptArgs &args) {
       break;
     case 2:
       NextIndex = IRB.CreateCall(
-        Intrinsic::getOrInsertDeclaration(M, Intrinsic::fshr, {NextIndex->getType()}),
+        Intrinsic::getDeclaration(M, Intrinsic::fshr, {NextIndex->getType()}),
         {NextIndex, NextIndex, IRB.CreateAdd(ObjKey, PrevIndex)});
       break;
     case 3:
       NextIndex = IRB.CreateCall(
-        Intrinsic::getOrInsertDeclaration(M, Intrinsic::bswap, {NextIndex->getType()}),
+        Intrinsic::getDeclaration(M, Intrinsic::bswap, {NextIndex->getType()}),
         {NextIndex});
       break;
     case 4:
@@ -404,7 +404,7 @@ Value * buildPageTableDecryptIR(const BuildDecryptArgs &args) {
       break;
     case 5:
       NextIndex = IRB.CreateCall(
-        Intrinsic::getOrInsertDeclaration(M, Intrinsic::fshl, {NextIndex->getType()}),
+        Intrinsic::getDeclaration(M, Intrinsic::fshl, {NextIndex->getType()}),
         {NextIndex, NextIndex, IRB.CreateSub(ObjKey, PrevIndex)});
       break;
     default:

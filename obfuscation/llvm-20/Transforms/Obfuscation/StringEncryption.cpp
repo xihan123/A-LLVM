@@ -819,7 +819,7 @@ Function *StringEncryption::buildDecryptFunction(Module *M, const StringEncrypti
 	Argument *Data = ArgIt;
 
 	AttrBuilder NoCaptureAttrBuilder{Ctx};
-	NoCaptureAttrBuilder.addCapturesAttr(llvm::CaptureInfo(llvm::CaptureComponents::None));
+	NoCaptureAttrBuilder.addAttribute(Attribute::NoCapture);
 
 	PlainString->setName("plain_string");
 	PlainString->addAttrs(NoCaptureAttrBuilder);
@@ -1282,7 +1282,7 @@ Function *StringEncryption::buildInitFunction(Module *M, const StringEncryption:
 
 
 	AttrBuilder NoCaptureAttrBuilder{Ctx};
-	NoCaptureAttrBuilder.addCapturesAttr(llvm::CaptureInfo(llvm::CaptureComponents::None));
+	NoCaptureAttrBuilder.addAttribute(Attribute::NoCapture);
 	thiz->setName("this");
 	thiz->addAttrs(NoCaptureAttrBuilder);
 
