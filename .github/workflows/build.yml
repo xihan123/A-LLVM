@@ -12,7 +12,8 @@ on:
       patchset: { type: string, default: "" }
       mode: { type: string, default: "build" } # build=自建clang并混淆; repack=原样重打包
       targets: { type: string, default: "AArch64;ARM;X86" } # 四个主流 Android ABI 所需后端
-      use_snapshot: { type: boolean, default: false } # Linux 试点，默认冷构建
+      use_snapshot: { type: boolean, default: false } # 四组热构建验收前保持关闭
+      snapshot_probe: { type: string, default: "none" } # 非发布性能验证：none / strings / vmp / multi
   workflow_dispatch:
     inputs:
       ndk_tag: { description: "上游 tag；与 internal 同时留空则自动取所选通道最新版", required: false, default: "" }
@@ -29,7 +30,12 @@ on:
       patchset: { description: "patchset（留空则 tag 不含后缀）", required: false, default: "" }
       mode: { description: "build / repack", required: false, default: "build" }
       targets: { description: "LLVM_TARGETS_TO_BUILD（默认覆盖四个主流 Android ABI）", required: false, default: "AArch64;ARM;X86" }
-      use_snapshot: { description: "复用 LLVM 构建快照（仅 Linux build 试点）", type: boolean, default: false }
+      use_snapshot: { description: "复用 LLVM 构建快照（双 Host，验收前默认关闭）", type: boolean, default: false }
+      snapshot_probe:
+        description: "非发布热构建样本（仅追加注释，强制真实 Pass 重编）"
+        type: choice
+        options: ["none", "strings", "vmp", "multi"]
+        default: "none"
 
 permissions:
   contents: read
@@ -55,6 +61,7 @@ jobs:
       DOWNLOAD_URL: ${{ inputs.download_url }}
       LLVM_TARGETS: ${{ inputs.targets }}
       USE_SNAPSHOT: ${{ inputs.use_snapshot && 'true' || 'false' }}
+      SNAPSHOT_PROBE: ${{ inputs.snapshot_probe || 'none' }}
     steps:
     - uses: actions/checkout@v7
 
@@ -96,9 +103,14 @@ jobs:
           build|repack) ;;
           *) echo "::error::不支持的 mode=$MODE（仅 build / repack）"; exit 1 ;;
         esac
-        if [ "$USE_SNAPSHOT" = true ] && { [ "$MODE" != build ] || [ "$HOST" != linux-x86_64 ]; }; then
-          echo "::error::快照试点仅支持 Linux build 模式"; exit 1
-        fi
+        case "$SNAPSHOT_PROBE" in
+          none) ;;
+          strings|vmp|multi)
+            [ "$MODE" = build ] && [ "$USE_SNAPSHOT" = true ] || {
+              echo "::error::性能样本需要 build 模式和 use_snapshot=true"; exit 1;
+            } ;;
+          *) echo "::error::未知性能样本"; exit 1 ;;
+        esac
         if [ "$MODE" = build ]; then
           for target in AArch64 ARM X86; do
             case ";$LLVM_TARGETS;" in
@@ -112,8 +124,20 @@ jobs:
           *) echo "::error::不支持的 host=$HOST（仅 linux-x86_64 / windows-x86_64；macOS 属后续阶段）"; exit 1 ;;
         esac
 
-    - name: 清理磁盘空间
+    - name: 检查构建盘容量
       if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
+      id: disk
+      run: |
+        python - <<'PY'
+        import os, shutil
+        free = shutil.disk_usage('.').free
+        print(f'Available: {free / 2**30:.1f} GiB')
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write(f'cleanup={str(free < 20 * 2**30).lower()}\n')
+        PY
+
+    - name: 清理磁盘空间
+      if: ${{ steps.disk.outputs.cleanup == 'true' }}
       uses: jlumbroso/free-disk-space@v1.3.1
       with:
         tool-cache: true
@@ -158,24 +182,47 @@ jobs:
       if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
       uses: seanmiddleditch/gha-setup-ninja@v6
 
+    - name: 使用 GNU tar 保留快照时间戳（Windows）
+      if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
+      run: |
+        # actions/cache 优先使用 Git 自带 GNU tar；不要把 usr/bin 放在 MSVC link.exe 前面。
+        echo "SNAPSHOT_TAR=$(cygpath -w /usr/bin/tar.exe)" >> "$GITHUB_ENV"
+        /usr/bin/tar --version
+
     - name: 解析官方编译器的上游 LLVM 基线
       if: ${{ inputs.mode == 'build' }}
       id: loc
       run: |
         python scripts/locate_llvm.py --ndk-dir "$NDK_DIR" --host "$HOST"
 
-    - name: 计算 Linux 构建配置与快照精确键
-      if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
+    - name: 准备热构建性能样本
+      if: ${{ inputs.mode == 'build' && inputs.snapshot_probe != '' && inputs.snapshot_probe != 'none' }}
+      env:
+        LLVM_MAJOR: ${{ steps.loc.outputs.llvm_major }}
+      run: |
+        python - <<'PY'
+        import os
+        from pathlib import Path
+        files = {'strings': ['StringEncryption.cpp'], 'vmp': ['aVMP/aVMP.cpp'],
+                 'multi': ['StringEncryption.cpp', 'aVMP/aVMP.cpp', 'SelfCheck.cpp', 'Utils.cpp']}
+        root = Path('obfuscation') / ('llvm-' + os.environ['LLVM_MAJOR']) / 'Transforms/Obfuscation'
+        for name in files[os.environ['SNAPSHOT_PROBE']]:
+            with (root / name).open('a', encoding='utf-8', newline='\n') as stream:
+                stream.write('\n// Snapshot performance probe: ' + os.environ['GITHUB_RUN_ID'] + '\n')
+        PY
+
+    - name: 计算构建配置与快照精确键
+      if: ${{ inputs.mode == 'build' }}
       id: snapshot_key
       run: |
         SNAPSHOT_ARGS=()
         if [ "$USE_SNAPSHOT" = true ]; then SNAPSHOT_ARGS+=(--enabled); fi
         python scripts/build_snapshot.py prepare \
           --base "${{ steps.loc.outputs.base_commit }}" \
-          --major "${{ steps.loc.outputs.llvm_major }}" --targets "$LLVM_TARGETS" "${SNAPSHOT_ARGS[@]}"
+          --major "${{ steps.loc.outputs.llvm_major }}" --host "$HOST" --targets "$LLVM_TARGETS" "${SNAPSHOT_ARGS[@]}"
 
     - name: 恢复 LLVM 构建快照
-      if: ${{ inputs.mode == 'build' && inputs.use_snapshot && runner.os == 'Linux' }}
+      if: ${{ inputs.mode == 'build' && inputs.use_snapshot }}
       id: restore_snapshot
       continue-on-error: true
       uses: actions/cache/restore@v5
@@ -187,7 +234,7 @@ jobs:
           .llvm-build-snapshot.json
 
     - name: 校验快照，不兼容或不完整时清理并冷构建
-      if: ${{ inputs.mode == 'build' && inputs.use_snapshot && runner.os == 'Linux' }}
+      if: ${{ inputs.mode == 'build' && inputs.use_snapshot }}
       id: snapshot
       run: python scripts/build_snapshot.py validate --cache-hit "${{ steps.restore_snapshot.outputs.cache-hit }}"
 
@@ -223,29 +270,14 @@ jobs:
         echo "overlay_applied=true" >> "$GITHUB_OUTPUT"
         BUILD_STEP
 
-    - name: 配置并编译 clang（Linux）
-      if: ${{ inputs.mode == 'build' && runner.os == 'Linux' }}
+    - name: 配置并编译 clang
+      if: ${{ inputs.mode == 'build' }}
       run: |
         set -euo pipefail
         if [ "${{ steps.snapshot.outputs.hit }}" != true ]; then
           python scripts/build_snapshot.py configure
         fi
         python scripts/build_snapshot.py run --phase compile -- ninja -C build clang clang-resource-headers
-
-    - name: 配置并编译 clang（Windows / MSVC）
-      if: ${{ inputs.mode == 'build' && runner.os == 'Windows' }}
-      run: |
-        set -euo pipefail
-        # 用 MSVC cl 原生编 Windows clang.exe；不启用 lld 链接器与 sccache
-        # （cl + sccache 在 PDB 分离下不稳，Release 无调试信息，暂以稳定性优先）。
-        cmake -S llvm-project/llvm -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DLLVM_ENABLE_ASSERTIONS=OFF \
-          -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl \
-          -DLLVM_OBFUSCATION_LINK_INTO_TOOLS=ON \
-          -DLLVM_ENABLE_PROJECTS="clang" \
-          -DLLVM_TARGETS_TO_BUILD="$LLVM_TARGETS"
-        ninja -C build clang clang-resource-headers
 
     - name: 用自建二进制覆盖 NDK
       if: ${{ inputs.mode == 'build' }}
@@ -322,12 +354,30 @@ jobs:
         mkdir -p dist
         ZIP="android-ndk-${OUR_TAG}-${HOST}.zip"
         if [ "$RUNNER_OS" = "Windows" ]; then
-          7z a -tzip "dist/$ZIP" "$(basename "$NDK_DIR")" >/dev/null
+          7z a -tzip -mx=1 "dist/$ZIP" "$(basename "$NDK_DIR")" >/dev/null
         else
-          zip -r -q "dist/$ZIP" "$(basename "$NDK_DIR")"
+          zip -1 -r -q "dist/$ZIP" "$(basename "$NDK_DIR")"
         fi
         ( cd dist && sha256sum *.zip > SHA256SUMS )
         ls -lh dist/
+        BUILD_STEP
+
+    - name: 验证打包后 NDK
+      if: ${{ inputs.mode == 'build' }}
+      run: |
+        python scripts/build_snapshot.py run --phase package-verify -- "$BASH" -euo pipefail <<'BUILD_STEP'
+        CHECK_DIR="$(mktemp -d)"
+        trap 'rm -rf "$CHECK_DIR"' EXIT
+        ZIP="dist/android-ndk-${OUR_TAG}-${HOST}.zip"
+        if [ "$RUNNER_OS" = Windows ]; then
+          7z x -y "$ZIP" "-o$CHECK_DIR" >/dev/null
+        else
+          unzip -q "$ZIP" -d "$CHECK_DIR"
+        fi
+        PACKED_NDK="$CHECK_DIR/$(basename "$NDK_DIR")"
+        bash tests/package-layout/check_layout.sh "$PACKED_NDK" "$HOST"
+        bash tests/abi-smoke/run.sh "$PACKED_NDK" "$HOST"
+        bash tests/build-system-smoke/run.sh "$PACKED_NDK" "$HOST"
         BUILD_STEP
 
     - uses: actions/upload-artifact@v7
@@ -335,11 +385,12 @@ jobs:
         name: ndk-${{ steps.vars.outputs.our_tag }}-${{ inputs.host }}
         path: dist/*.zip
         retention-days: 7
+        compression-level: 0
 
     # Immutable snapshots are written only after all existing tests and artifact upload succeed.
     - name: 生成完整快照清单
       if: >-
-        ${{ inputs.mode == 'build' && inputs.use_snapshot && runner.os == 'Linux' &&
+        ${{ inputs.mode == 'build' && inputs.use_snapshot && env.SNAPSHOT_PROBE == 'none' &&
             steps.restore_snapshot.outputs.cache-hit != 'true' &&
             github.event_name != 'pull_request' && github.event_name != 'pull_request_target' &&
             (github.ref == 'refs/heads/dev' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}

@@ -59,7 +59,7 @@ def main():
     )
     ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     ap.add_argument("--run-url", default=os.environ.get("RUN_URL", ""))
-    ap.add_argument("--snapshot-state", help="Optional state from the Linux snapshot pilot")
+    ap.add_argument("--snapshot-state", help="Optional state from the LLVM build snapshot")
     args = ap.parse_args()
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
