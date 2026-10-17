@@ -73,6 +73,7 @@ Transforms/Obfuscation/
 | `-irobf` | 总开关 |
 | `-irobf-cse` | 字符串加密 |
 | `-irobf-cse-perkey` | 字符串加密强化：per-string 密钥由隐藏 pepper（分片存储）+ 串 id 经 ChaCha8 派生，密文表不再内联密钥 |
+| `-irobf-cse-hardened` | Android arm64 专用的 CSE v1：ChaCha20-Poly1305、代码哈希及 build_nonce 绑定、加密元数据和诱饵；要求 `-irobf-cse`，必须链接独立运行时并在链接后封装，见 [接入说明](../runtime/CSE_HARDENED.md) |
 | `-irobf-cse-bind` | 字符串加密强化：把运行期包名（`/proc/self/cmdline`，截到首个 `:` 前）哈希折进 pepper，`.so` 仅在目标 App 内解出正确明文（错包名→乱码，非分支）。蕴含 `-irobf-cse-perkey`；也可用 `NDKP_STR_BIND` 注解，标签 `ndkp.str_bind` |
 | `-irobf-cse-bind-package=` | `-irobf-cse-bind` 的期望包名（如 `com.example.app`；若误带 `:proc` 后缀会被自动截断）；bind 开启但缺此项则构建失败（fail-closed） |
 

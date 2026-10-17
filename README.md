@@ -56,6 +56,8 @@ NDKP_STR_ENCRYPT void secret() { const char* k = "token"; /* ... */ }
 
 一期开关：`-irobf-cse`（字符串）、`-irobf-cie`/`-irobf-cfe`（整/浮点常量）、`-irobf-fla`、`-irobf-indbr`/`-icall`/`-indgv`。字符串加密可叠加强化开关 `-irobf-cse-perkey`（隐藏 pepper 派生 per-string ChaCha8 密钥，密文不再内联密钥）与 `-irobf-cse-bind`（包名绑定，`.so` 仅在目标 App 内解出明文，配合 `-irobf-cse-bind-package=<包名>`，或 `NDKP_STR_BIND` 注解）。函数级虚拟化 `-irobf-vmp` 与反分析检测 `-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}` 已实现（详见 [obfuscation/README.md](./obfuscation/README.md)）。APK 签名证书绑定 `-irobf-cert-bind`（配合 `-irobf-cert-file=<cert.der>`）把签名证书 SHA-256 折进字符串与 VMP 密钥，换签名/重打包即 fail-closed；运行期读证书需 app 侧链接 `runtime/ndkp_apkcert.cpp`（见 [runtime/README.md](./runtime/README.md)）。不加任何开关时 overlay 不主动变换 IR；这不代表自建 clang 与官方 Android Clang 完全一致。字符串包名绑定与 VMP 有历史 arm64 设备验证，运行语义变更仍需重新验证；AArch64 后端机器码混淆（`-aarch64-obfuscate-*`）属后续阶段。
 
+Android arm64 可显式增加 `-irobf-cse-hardened`，使用 ChaCha20-Poly1305、加密元数据/诱饵、代码哈希与 build_nonce 绑定及双路径输入验证。此模式需独立运行时和链接后封装；接入步骤见 [CSE v1 文档](./runtime/CSE_HARDENED.md)，两 major 的 Windows 构建及 arm64 真机结果见 [验证记录](./tests/cse-hardened/VALIDATION.md)。
+
 ## 构建流程
 
 - 自动：`discover.yml` 每日 03:17 UTC 检查，发现新版本后并行构建各 Host；全部通过后聚合为一次不可变 Release。
