@@ -81,7 +81,7 @@ jobs:
       channel: stable
       host: ${{ matrix.host }}
       mode: build
-      patchset: p4
+      patchset: p5
       use_snapshot: ${{ inputs.use_snapshot == true }}
       snapshot_probe: ${{ inputs.snapshot_probe || 'none' }}
       targets: ${{ github.event.inputs.targets || 'AArch64;ARM;X86' }}

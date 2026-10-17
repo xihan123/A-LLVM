@@ -15,6 +15,7 @@
 #include "llvm/Transforms/Obfuscation/aVMP/aVMP.h"
 #include "llvm/Transforms/Obfuscation/CryptoUtils.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/TargetParser/Triple.h"
 #include "llvm/Support/Base64.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -83,6 +84,9 @@ EnableStrPerKey("irobf-cse-perkey", cl::init(false), cl::NotHidden,
                 cl::desc("Harden -irobf-cse: derive per-string keys from a hidden "
                          "split pepper via ChaCha8 (no key stored inline)."),
                 cl::ZeroOrMore);
+static cl::opt<bool> EnableStrHardened(
+    "irobf-cse-hardened", cl::init(false), cl::NotHidden,
+    cl::desc("Opt-in arm64 Android CSE AEAD and post-link code binding."));
 // bind：把运行期包名（/proc/self/cmdline）哈希折进 pepper；错包名 → 解出乱码
 //       （非分支、无可 patch 的 if）。bind 蕴含 perkey。
 static cl::opt<bool>
@@ -201,7 +205,8 @@ bool llvm::isForceNoInlineEnabled() { return ForceNoInline; }
 bool llvm::isVMProtectEnabled() { return EnableVMProtect; }
 
 // bind 蕴含 perkey：开启包名绑定即启用 ChaCha8 派生密钥路径。
-bool llvm::isCsePerKeyEnabled() { return EnableStrPerKey || EnableStrBind; }
+bool llvm::isCsePerKeyEnabled() { return EnableStrPerKey || EnableStrBind || EnableStrHardened; }
+bool llvm::isCseHardenedEnabled() { return EnableStrHardened; }
 bool llvm::isCseBindEnabled() { return EnableStrBind; }
 std::string llvm::getCseBindPackage() { return StrBindPackage; }
 
@@ -280,7 +285,7 @@ uint64_t llvm::getCertBindHi() {
 bool llvm::isIRObfuscationEnabled() {
   return EnableIRObfuscation || EnableIndirectBr || EnableIndirectCall ||
          EnableIndirectGV || EnableIRFlattening || EnableIRStringEncryption ||
-         EnableStrPerKey || EnableStrBind ||
+         EnableStrPerKey || EnableStrBind || EnableStrHardened ||
          EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
          EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
          EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
@@ -389,7 +394,7 @@ struct ObfuscationPassManager : public ModulePass {
   bool runOnModule(Module &M) override {
     bool hasObf = EnableIndirectBr || EnableIndirectCall || EnableIndirectGV ||
                   EnableIRFlattening || EnableIRStringEncryption ||
-                  EnableStrPerKey || EnableStrBind ||
+                  EnableStrPerKey || EnableStrBind || EnableStrHardened || EnableStrHardened ||
                   EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
                   EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
                   EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
@@ -400,6 +405,18 @@ struct ObfuscationPassManager : public ModulePass {
 
     if (!EnableIRObfuscation)
       return run(M);
+
+    if (EnableStrHardened) {
+      const Triple T(M.getTargetTriple());
+      if (!EnableIRStringEncryption)
+        report_fatal_error("-irobf-cse-hardened requires -irobf-cse");
+      if (!T.isAndroid() || T.getArch() != Triple::aarch64)
+        report_fatal_error("-irobf-cse-hardened requires Android arm64");
+    }
+    if (Function *Helper = M.getFunction("ndkp_cse_decode_v1"))
+      if (!Helper->isDeclaration())
+        report_fatal_error("compile ndkp_cse_runtime.cpp separately without "
+                           "obfuscation flags and with -fno-lto");
 
     if (EnableCertBind) {
       if (Function *Helper = M.getFunction("ndkp_certbind_mix"))

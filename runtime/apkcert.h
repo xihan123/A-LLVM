@@ -42,17 +42,19 @@
 #include <cstring>
 
 #include "sha256.h"
+#include "apkcert_io.h"
 
 namespace stringarmor {
 namespace apkcert {
 
 // Read exactly n bytes without changing the fd's file offset.
+template <class IO = apkio::Posix>
 inline bool readAt(int fd, uint64_t off, void* buf, size_t n) {
     if (off > INT64_MAX || n > static_cast<uint64_t>(INT64_MAX) - off) return false;
     uint8_t* p = static_cast<uint8_t*>(buf);
     size_t got = 0;
     while (got < n) {
-        const ssize_t r = pread64(fd, p + got, n - got, static_cast<off64_t>(off + got));
+        const ssize_t r = IO::pread(fd, p + got, n - got, static_cast<off64_t>(off + got));
         if (r < 0 && errno == EINTR) continue;
         if (r <= 0) {
             return false;
@@ -84,13 +86,14 @@ struct Cursor {
     bool ok;
 };
 
+template <class IO = apkio::Posix>
 inline uint32_t nextU32(Cursor& c) {
     if (!c.ok || c.pos + 4 > c.end) {
         c.ok = false;
         return 0;
     }
     uint8_t b[4];
-    if (!readAt(c.fd, c.pos, b, 4)) {
+    if (!readAt<IO>(c.fd, c.pos, b, 4)) {
         c.ok = false;
         return 0;
     }
@@ -126,24 +129,25 @@ constexpr uint32_t kMaxCertDer = 1u << 20;  // 1 MiB: generous ceiling for one X
 // Layout (all inner length prefixes u32 LE): signers -> signer[0] -> signed-data ->
 // digests(skip) -> certificates -> cert[0] DER. v2 and v3 share this prefix, so one parser
 // covers both (we stop after the first cert). Returns false on any bounds violation.
+template <class IO = apkio::Posix>
 inline bool hashFirstSignerCert(int fd, uint64_t valStart, uint64_t valEnd, uint8_t out[32]) {
     Cursor val{fd, valStart, valEnd, true};
-    const uint32_t signersLen = nextU32(val);
+    const uint32_t signersLen = nextU32<IO>(val);
     Cursor signers = subCursor(val, signersLen);
 
-    const uint32_t signerLen = nextU32(signers);
+    const uint32_t signerLen = nextU32<IO>(signers);
     Cursor signer = subCursor(signers, signerLen);
 
-    const uint32_t signedDataLen = nextU32(signer);
+    const uint32_t signedDataLen = nextU32<IO>(signer);
     Cursor sd = subCursor(signer, signedDataLen);
 
-    const uint32_t digestsLen = nextU32(sd);
+    const uint32_t digestsLen = nextU32<IO>(sd);
     (void)subCursor(sd, digestsLen);  // skip digests sequence
 
-    const uint32_t certsLen = nextU32(sd);
+    const uint32_t certsLen = nextU32<IO>(sd);
     Cursor certs = subCursor(sd, certsLen);
 
-    const uint32_t certLen = nextU32(certs);
+    const uint32_t certLen = nextU32<IO>(certs);
     if (!certs.ok || certLen == 0 || certLen > kMaxCertDer || certs.pos + certLen > certs.end) {
         return false;
     }
@@ -151,7 +155,7 @@ inline bool hashFirstSignerCert(int fd, uint64_t valStart, uint64_t valEnd, uint
     if (der == nullptr) {
         return false;
     }
-    const bool read = readAt(fd, certs.pos, der, certLen);
+    const bool read = readAt<IO>(fd, certs.pos, der, certLen);
     if (read) {
         stringarmor::sha2::sha256(der, certLen, out);
     }
@@ -166,6 +170,7 @@ struct ZipDirectory {
 };
 
 // Classic single-disk ZIP only. The comment must end at EOF; reject ZIP64 sentinels.
+template <class IO = apkio::Posix>
 inline bool zipDirectory(int fd, uint64_t fileSize, ZipDirectory& cd) {
     if (fileSize < 22) {
         return false;
@@ -178,7 +183,7 @@ inline bool zipDirectory(int fd, uint64_t fileSize, ZipDirectory& cd) {
     }
     const uint64_t tailStart = fileSize - tailLen;
     bool haveEocd = false;
-    if (readAt(fd, tailStart, tail, static_cast<size_t>(tailLen))) {
+    if (readAt<IO>(fd, tailStart, tail, static_cast<size_t>(tailLen))) {
         for (uint64_t i = tailLen - 22 + 1; i-- > 0;) {
             const uint8_t* e = tail + i;
             if (le32(e) != 0x06054b50 || i + 22 + le16(e + 20) != tailLen) continue;
@@ -195,9 +200,10 @@ inline bool zipDirectory(int fd, uint64_t fileSize, ZipDirectory& cd) {
 }
 
 // Locate the APK Signing Block, preferring v2 to v3, and hash the first signer cert.
+template <class IO = apkio::Posix>
 inline bool parseSignerCertSha256Fd(int fd, uint64_t fileSize, uint8_t out[32]) {
     ZipDirectory cd{};
-    if (!zipDirectory(fd, fileSize, cd) || cd.offset < 24) {
+    if (!zipDirectory<IO>(fd, fileSize, cd) || cd.offset < 24) {
         return false;
     }
     const uint64_t cdOffset = cd.offset;
@@ -205,7 +211,7 @@ inline bool parseSignerCertSha256Fd(int fd, uint64_t fileSize, uint8_t out[32]) 
     // --- Signing Block footer sits in the 24 bytes just before the central directory:
     //     u64 sizeOfBlock | "APK Sig Block 42" (16 bytes). The same u64 size leads the block.
     uint8_t footer[24];
-    if (!readAt(fd, cdOffset - 24, footer, 24)) {
+    if (!readAt<IO>(fd, cdOffset - 24, footer, 24)) {
         return false;
     }
     if (le64(footer + 8) != kMagicLo || le64(footer + 16) != kMagicHi) {
@@ -217,7 +223,7 @@ inline bool parseSignerCertSha256Fd(int fd, uint64_t fileSize, uint8_t out[32]) 
     }
     const uint64_t blockStart = cdOffset - blockSize - 8;
     uint8_t hdr[8];
-    if (!readAt(fd, blockStart, hdr, 8) || le64(hdr) != blockSize) {
+    if (!readAt<IO>(fd, blockStart, hdr, 8) || le64(hdr) != blockSize) {
         return false;
     }
 
@@ -229,7 +235,7 @@ inline bool parseSignerCertSha256Fd(int fd, uint64_t fileSize, uint8_t out[32]) 
     uint64_t pos = pairsStart;
     for (int guard = 0; guard < 4096 && pos + 12 <= pairsEnd; ++guard) {
         uint8_t hp[12];
-        if (!readAt(fd, pos, hp, 12)) {
+        if (!readAt<IO>(fd, pos, hp, 12)) {
             return false;
         }
         const uint64_t pairLen = le64(hp);
@@ -241,7 +247,7 @@ inline bool parseSignerCertSha256Fd(int fd, uint64_t fileSize, uint8_t out[32]) 
         const uint64_t valStart = pos + 12;              // after u64 len + u32 id
         const uint64_t valEnd = pos + 8 + pairLen;
         if (id == kV2BlockId) {
-            return hashFirstSignerCert(fd, valStart, valEnd, out);  // v2 preferred
+            return hashFirstSignerCert<IO>(fd, valStart, valEnd, out);  // v2 preferred
         }
         if (id == kV3BlockId && !haveV3) {
             v3Start = valStart;
@@ -251,22 +257,23 @@ inline bool parseSignerCertSha256Fd(int fd, uint64_t fileSize, uint8_t out[32]) 
         pos += 8 + pairLen;
     }
     if (haveV3) {
-        return hashFirstSignerCert(fd, v3Start, v3End, out);
+        return hashFirstSignerCert<IO>(fd, v3Start, v3End, out);
     }
     return false;
 }
 
 // Check central and local record boundaries without inflating file contents.
+template <class IO = apkio::Posix>
 inline bool zipHasLibrary(int fd, uint64_t size, const char* entry, bool& found) {
     ZipDirectory cd{};
-    if (!zipDirectory(fd, size, cd)) return false;
+    if (!zipDirectory<IO>(fd, size, cd)) return false;
     uint64_t pos = cd.offset;
     const uint64_t end = pos + cd.size;
     const size_t wanted = std::strlen(entry);
     found = false;
     for (unsigned i = 0; i < cd.entries; ++i) {
         uint8_t h[46], local[30];
-        if (end - pos < sizeof h || !readAt(fd, pos, h, sizeof h) ||
+        if (end - pos < sizeof h || !readAt<IO>(fd, pos, h, sizeof h) ||
             le32(h) != 0x02014b50) return false;
         const uint16_t nameLen = le16(h + 28), extraLen = le16(h + 30);
         const uint64_t recordSize = sizeof h + nameLen + extraLen + le16(h + 32);
@@ -277,7 +284,7 @@ inline bool zipHasLibrary(int fd, uint64_t size, const char* entry, bool& found)
             localPos == 0xffffffffu || (le16(h + 8) & 0x41) ||
             (method != 0 && method != 8) || localPos > cd.offset ||
             cd.offset - localPos < sizeof local ||
-            !readAt(fd, localPos, local, sizeof local) || le32(local) != 0x04034b50 ||
+            !readAt<IO>(fd, localPos, local, sizeof local) || le32(local) != 0x04034b50 ||
             le16(local + 26) != nameLen || le16(local + 8) != method ||
             le16(local + 6) != le16(h + 8) ||
             (!(le16(h + 8) & 8) && std::memcmp(local + 14, h + 16, 12) != 0) ||
@@ -294,12 +301,12 @@ inline bool zipHasLibrary(int fd, uint64_t size, const char* entry, bool& found)
                 if (extraEnd - extra < 4) {
                     // zipalign pads local extra fields with raw zeros, not another TLV.
                     uint8_t padding[3]{};
-                    if (j != 1 || !readAt(fd, extra, padding, static_cast<size_t>(extraEnd - extra)) ||
+                    if (j != 1 || !readAt<IO>(fd, extra, padding, static_cast<size_t>(extraEnd - extra)) ||
                         padding[0] != 0 || padding[1] != 0 || padding[2] != 0) return false;
                     break;
                 }
                 uint8_t tag[4];
-                if (!readAt(fd, extra, tag, 4) ||
+                if (!readAt<IO>(fd, extra, tag, 4) ||
                     le16(tag) == 1 || le16(tag + 2) > extraEnd - extra - 4) return false;
                 extra += 4 + le16(tag + 2);
             }
@@ -308,8 +315,8 @@ inline bool zipHasLibrary(int fd, uint64_t size, const char* entry, bool& found)
         for (size_t n = 0; n < nameLen;) {
             uint8_t a[256], b[256];
             const size_t count = nameLen - n < sizeof a ? nameLen - n : sizeof a;
-            if (!readAt(fd, pos + sizeof h + n, a, count) ||
-                !readAt(fd, localPos + sizeof local + n, b, count) ||
+            if (!readAt<IO>(fd, pos + sizeof h + n, a, count) ||
+                !readAt<IO>(fd, localPos + sizeof local + n, b, count) ||
                 std::memcmp(a, b, count) != 0) return false;
             if (match && std::memcmp(a, entry + n, count) != 0) match = false;
             n += count;
@@ -335,13 +342,14 @@ inline bool mappedIdentity(const Mapping& m, const struct stat& st) {
 }
 
 // Either locate the anchor, or check all existing mappings of one APK (absence is allowed).
+template <class IO = apkio::Posix>
 inline bool inspectMaps(uintptr_t anchor, Mapping* owner,
                         const char* apk = nullptr, const struct stat* expected = nullptr) {
-    FILE* maps = std::fopen("/proc/self/maps", "re");
+    auto* maps = IO::stream("/proc/self/maps");
     if (!maps) return false;
     char line[PATH_MAX + 256];
     bool ok = true, found = false;
-    while (std::fgets(line, sizeof line, maps)) {
+    while (IO::gets(line, sizeof line, maps)) {
         const size_t len = std::strlen(line);
         if (len == 0 || line[len - 1] != '\n') { ok = false; break; }
         line[len - 1] = '\0';
@@ -364,8 +372,8 @@ inline bool inspectMaps(uintptr_t anchor, Mapping* owner,
             break;
         }
     }
-    ok = ok && !std::ferror(maps) && (!owner || found);
-    std::fclose(maps);
+    ok = ok && !IO::error(maps) && (!owner || found);
+    IO::finish(maps);
     return ok;
 }
 
@@ -423,71 +431,74 @@ inline bool extractedLibraryPaths(const char* path, char root[PATH_MAX],
 
 // Retain the sole matching APK fd so discovery and certificate parsing use the same file.
 // Explicit POSIX cleanup avoids introducing C++ exception-unwinding helpers into this runtime.
+template <class IO = apkio::Posix>
 inline int openExtractedLibraryApk(const Mapping& owner) {
     char root[PATH_MAX], entry[PATH_MAX];
     const char* relative = nullptr;
     if (!extractedLibraryPaths(owner.path, root, entry, relative)) return -1;
-    const int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    const int directory = IO::open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (directory < 0) return -1;
-    const int library = openat(directory, relative, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    const int library = IO::openat(directory, relative, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat libStat{};
-    const bool validLibrary = library >= 0 && fstat(library, &libStat) == 0 &&
+    const bool validLibrary = library >= 0 && IO::stat(library, &libStat) == 0 &&
         S_ISREG(libStat.st_mode) && libStat.st_size > 0 && mappedIdentity(owner, libStat);
-    if (library >= 0) close(library);
-    if (!validLibrary) { close(directory); return -1; }
-    DIR* dir = fdopendir(directory);
-    if (!dir) { close(directory); return -1; }
+    if (library >= 0) IO::close(library);
+    if (!validLibrary) { IO::close(directory); return -1; }
+    auto* dir = IO::directory(directory);
+    if (!dir) { IO::close(directory); return -1; }
     int selected = -1;
     char selectedPath[PATH_MAX]{};
     struct stat selectedStat{};
     bool ok = true;
     for (;;) {
         errno = 0;
-        const dirent* e = readdir(dir);
+        const dirent* e = IO::next(dir);
         if (!e) { ok = errno == 0; break; }
         if (!endsWith(e->d_name, ".apk")) continue;
-        const int candidate = openat(directory, e->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        const int candidate = IO::openat(directory, e->d_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         struct stat st{};
         bool match = false;
-        if (candidate < 0 || fstat(candidate, &st) != 0 ||
+        if (candidate < 0 || IO::stat(candidate, &st) != 0 ||
             !S_ISREG(st.st_mode) || st.st_size <= 0 ||
-            !zipHasLibrary(candidate, static_cast<uint64_t>(st.st_size), entry, match)) {
-            if (candidate >= 0) close(candidate);
+            !zipHasLibrary<IO>(candidate, static_cast<uint64_t>(st.st_size), entry, match)) {
+            if (candidate >= 0) IO::close(candidate);
             ok = false; break;
         }
-        if (!match) { close(candidate); continue; }
+        if (!match) { IO::close(candidate); continue; }
         const int n = std::snprintf(selectedPath, sizeof selectedPath, "%s/%s", root, e->d_name);
         if (selected >= 0 || n < 0 || static_cast<size_t>(n) >= sizeof selectedPath) {
-            close(candidate);
+            IO::close(candidate);
             ok = false; break;
         }
         selected = candidate;
         selectedStat = st;
     }
-    closedir(dir); // Also closes the installation directory fd.
-    if (!ok || selected < 0 || !inspectMaps(0, nullptr, selectedPath, &selectedStat)) {
-        if (selected >= 0) close(selected);
+    IO::finish(dir); // Also closes the installation directory fd.
+    if (!ok || selected < 0 || !inspectMaps<IO>(0, nullptr, selectedPath, &selectedStat)) {
+        if (selected >= 0) IO::close(selected);
         return -1;
     }
     return selected;
 }
 
 // The anchor must be local/hidden in the protected DSO. Never infer its owner from maps order.
-inline bool certSha256ForLibrary(const void* anchor, uint8_t out[32]) {
+template <class IO = apkio::Posix>
+inline bool certSha256ForLibrary(const void* anchor, uint8_t out[32], struct stat* identity = nullptr) {
     Mapping owner{};
-    if (!anchor || !inspectMaps(reinterpret_cast<uintptr_t>(anchor), &owner) ||
+    if (!anchor || !inspectMaps<IO>(reinterpret_cast<uintptr_t>(anchor), &owner) ||
         owner.inode == 0 || !cleanAbsolutePath(owner.path)) return false;
     const bool direct = endsWith(owner.path, ".apk");
-    const int apk = direct ? open(owner.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-                           : openExtractedLibraryApk(owner);
+    const int apk = direct ? IO::open(owner.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+                           : openExtractedLibraryApk<IO>(owner);
     if (apk < 0) return false;
     struct stat st{};
     uint8_t hash[32];
-    const bool ok = fstat(apk, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 &&
+    const bool ok = IO::stat(apk, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 &&
         (!direct || mappedIdentity(owner, st)) &&
-        parseSignerCertSha256Fd(apk, static_cast<uint64_t>(st.st_size), hash);
-    close(apk);
+        parseSignerCertSha256Fd<IO>(apk, static_cast<uint64_t>(st.st_size), hash);
+    IO::close(apk);
     if (!ok) return false;
+    if (identity) *identity = st;
     std::memcpy(out, hash, sizeof hash);
     return true;
 }

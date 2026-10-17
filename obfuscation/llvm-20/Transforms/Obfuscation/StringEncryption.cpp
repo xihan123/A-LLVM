@@ -15,6 +15,8 @@
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
 #include "llvm/Transforms/Obfuscation/StringEncryption.h"
 #include "llvm/Transforms/Obfuscation/CertBind.h"
+#include "llvm/Transforms/Obfuscation/cse_crypto.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "llvm/Transforms/Obfuscation/Utils.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
 #include "llvm/Transforms/IPO/Attributor.h"
@@ -140,6 +142,14 @@ static uint64_t ndkpFnv1a64(const char *p, size_t n) {
 	return h;
 }
 
+static uint32_t hardenedCapacity(size_t Bytes) {
+  if (Bytes > ndkp_cse::MaxCapacity - 16)
+    report_fatal_error("hardened CSE constant exceeds 16 MiB capacity");
+  uint32_t Capacity = 32;
+  while (Capacity < Bytes + 16) Capacity *= 2;
+  return Capacity;
+}
+
 // 0 = uninitialized, 1 = initializing, 2 = published. Only the winning
 // thread writes the buffer; acquire/release also publishes non-atomic bytes.
 static BasicBlock *emitOnceGuard(IRBuilder<> &B, GlobalVariable *State,
@@ -215,6 +225,12 @@ namespace {
 		std::set<GlobalVariable *> MaybeDeadGlobalVars;
 
 		// ---- 字符串加密强化（-irobf-cse-perkey / -irobf-cse-bind）----
+		bool UseHardened = false;
+		GlobalVariable *HardenedBlob = nullptr;
+		GlobalVariable *HardenedCache = nullptr;
+		uint32_t HardenedSize = 0;
+		void buildHardenedTable(Module &M);
+		Function *buildHardenedDecrypt(Module &M, const CSPEntry *Entry);
 		bool UsePerKey = false;   ///< ChaCha8 派生密钥（不内联存储密钥）
 		bool UseBind = false;     ///< 把运行期包名哈希折进 pepper（蕴含 UsePerKey）
 		std::string BindPackage;  ///< 期望包名（构建期，-irobf-cse-bind-package）
@@ -317,6 +333,7 @@ bool StringEncryption::runOnModule(Module &M) {
 
 	// 字符串加密强化模式判定（默认全关 ⇒ 与基线逐字节一致的旧路径）。
 	// bind 蕴含 perkey；bind 亦可由模块级 NDKP_STR_BIND 注解开启。
+	UseHardened = isCseHardenedEnabled();
 	UseBind = isCseBindEnabled() || moduleHasStrBindAnnotation(M);
 	UsePerKey = isCsePerKeyEnabled() || UseBind;
 	if (UseBind) {
@@ -404,8 +421,12 @@ bool StringEncryption::runOnModule(Module &M) {
 					Entry->Data.push_back(static_cast<uint8_t>(Data[i]));
 				}
 				Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
-				Constant *ZeroInit = Constant::getNullValue(CDS->getType());
-				GlobalVariable *DecGV = new GlobalVariable(M, CDS->getType(), false, GlobalValue::PrivateLinkage,
+				Type *BufferTy = CDS->getType();
+				if (UseHardened)
+					BufferTy = ArrayType::get(CDS->getElementType(),
+					    hardenedCapacity(Entry->Data.size()) - 16);
+				Constant *ZeroInit = Constant::getNullValue(BufferTy);
+				GlobalVariable *DecGV = new GlobalVariable(M, BufferTy, false, GlobalValue::PrivateLinkage,
 				    ZeroInit, "dec" + Twine::utohexstr(Entry->ID) + GV.getName());
 				GlobalVariable *DecStatus = new GlobalVariable(M, Type::getInt32Ty(Ctx), false, GlobalValue::PrivateLinkage,
 				    Zero, "dec_status_" + Twine::utohexstr(Entry->ID) + GV.getName());
@@ -432,8 +453,12 @@ bool StringEncryption::runOnModule(Module &M) {
 						Entry->Data16.push_back(static_cast<uint16_t>(v));
 					}
 					Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
-					Constant *ZeroInit = Constant::getNullValue(CDS->getType());
-					GlobalVariable *DecGV = new GlobalVariable(M, CDS->getType(), false, GlobalValue::PrivateLinkage,
+					Type *BufferTy = CDS->getType();
+					if (UseHardened)
+						BufferTy = ArrayType::get(EltTy,
+						    (hardenedCapacity(Entry->Data16.size() * 2) - 16) / 2);
+					Constant *ZeroInit = Constant::getNullValue(BufferTy);
+					GlobalVariable *DecGV = new GlobalVariable(M, BufferTy, false, GlobalValue::PrivateLinkage,
 					    ZeroInit, "dec" + Twine::utohexstr(Entry->ID) + GV.getName());
 					GlobalVariable *DecStatus = new GlobalVariable(M, Type::getInt32Ty(Ctx), false, GlobalValue::PrivateLinkage,
 					    Zero, "dec_status_" + Twine::utohexstr(Entry->ID) + GV.getName());
@@ -453,8 +478,13 @@ bool StringEncryption::runOnModule(Module &M) {
 		}
 	}
 
+	if (UseHardened && ConstantStringPool.empty())
+		return false;
+
 	// 强化模式下：先建 pepper 分片 + 一次性共享解码核心（bind 时含包名 key）。
-	if (UsePerKey) {
+	if (UseHardened && !ConstantStringPool.empty())
+		buildHardenedTable(M);
+	if (UsePerKey && !UseHardened) {
 		PepperLo = RandomEngine.get_uint64_t();
 		PepperHi = RandomEngine.get_uint64_t();
 		createPepperGlobals(M);
@@ -487,6 +517,10 @@ bool StringEncryption::runOnModule(Module &M) {
 	}
 
 	for (CSPEntry *Entry : ConstantStringPool) {
+		if (UseHardened) {
+			Entry->DecFunc = buildHardenedDecrypt(M, Entry);
+			continue;
+		}
 		if (!UsePerKey) {
 			// 基线：位置相关字节链式密码 + 内联密钥（不改动已验证路径）。
 			if (!Entry->IsUTF16) {
@@ -606,6 +640,9 @@ bool StringEncryption::runOnModule(Module &M) {
 		}
 	}
 
+	if (UseHardened) {
+		EncryptedStringTable = HardenedBlob;
+	} else {
 	std::vector<uint8_t> Data;
 	std::vector<uint8_t> JunkBytes;
 
@@ -645,6 +682,8 @@ bool StringEncryption::runOnModule(Module &M) {
 	    CDA, "EncryptedStringTable");
 	EncryptedStringTable->setSection(".AProtect.rodata");
 	EncryptedStringTable->setMetadata("noobf", MDNode::get(Ctx, {}));
+
+	}
 
 	auto remapConstantRef = [&](auto &&Self, Constant *C) -> Constant * {
 		if (!C) {
@@ -765,6 +804,21 @@ bool StringEncryption::runOnModule(Module &M) {
 		PkgKeyFunc->eraseFromParent();
 		PkgKeyFunc = nullptr;
 	}
+  if (UseHardened) {
+    // Decoding adds writes, synchronization and allocation. Pre-pass inferred
+    // effects on callers/calls are stale and would miscompile subsequent LTO.
+    const Attribute::AttrKind Effects[] = {Attribute::Memory, Attribute::NoSync,
+        Attribute::NoFree, Attribute::WillReturn, Attribute::MustProgress,
+        Attribute::Speculatable, Attribute::NoRecurse, Attribute::NoUnwind};
+    for (Function &F : M) {
+      if (F.isDeclaration()) continue;
+      for (auto Kind : Effects) F.removeFnAttr(Kind);
+      for (Instruction &I : instructions(F))
+        if (auto *Call = dyn_cast<CallBase>(&I))
+          for (auto Kind : Effects) Call->removeFnAttr(Kind);
+    }
+    Changed = true;
+  }
 	return Changed;
 }
 
@@ -1234,6 +1288,97 @@ Function *StringEncryption::buildChaChaDecodeFunc(Module &M) {
 
 // PerKey/Bind 模式下每串的薄封装：幂等守卫 + 调用共享 ndkp_cse_decode。
 // 签名与基线一致 (plain, data)，data 直接指向密文（表里已无内联密钥）。
+// The sealer rewrites only this retained data blob, never code or relocations.
+void StringEncryption::buildHardenedTable(Module &M) {
+  using namespace ndkp_cse;
+  std::vector<uint8_t> Blob(HeaderSize, 0);
+  std::copy(Magic, Magic + 8, Blob.begin());
+  store32(Blob.data() + 16, (UseBind ? 1 : 0) | (UseCertBind ? 2 : 0));
+  store32(Blob.data() + 20, uint32_t(ConstantStringPool.size() + 1));
+  for (unsigned i = 24; i < 72; ++i) Blob[i] = RandomEngine.get_uint8_t();
+  for (unsigned i = 184; i < 216; ++i) Blob[i] = RandomEngine.get_uint8_t();
+  if (UseBind)
+    stringarmor::sha2::sha256(reinterpret_cast<const uint8_t*>(BindPackage.data()),
+                            BindPackage.size(), Blob.data() + 104);
+  if (UseCertBind) {
+    store64(Blob.data() + 136, CertLo); store64(Blob.data() + 144, CertHi);
+  }
+  uint8_t Key[32], Zero[32] = {};
+  derive(Blob.data(), Zero, Blob.data() + 104, Key);
+  auto Add = [&](uint32_t Id, uint32_t Encoding, const std::vector<uint8_t> &Bytes) {
+    const uint32_t Capacity = hardenedCapacity(Bytes.size());
+    if (Blob.size() + 32 + Capacity > (1u << 28))
+      report_fatal_error("hardened CSE module exceeds 256 MiB");
+    const uint32_t Offset = uint32_t(Blob.size());
+    Blob.resize(Blob.size() + 32 + Capacity, 0);
+    uint8_t *Record = Blob.data() + Offset;
+    store32(Record, Capacity); store32(Record + 12, Id);
+    uint8_t *Plain = Record + 32;
+    store32(Plain, uint32_t(Bytes.size())); store32(Plain + 4, Encoding);
+    store32(Plain + 8, Id);
+    std::copy(Bytes.begin(), Bytes.end(), Plain + 16);
+    for (size_t i = 16 + Bytes.size(); i < Capacity; ++i) Plain[i] = RandomEngine.get_uint8_t();
+    return Offset;
+  };
+  for (CSPEntry *Entry : ConstantStringPool) {
+    std::vector<uint8_t> Bytes = Entry->Data;
+    if (Entry->IsUTF16) {
+      Bytes.clear();
+      for (uint16_t Word : Entry->Data16) {
+        Bytes.push_back(uint8_t(Word)); Bytes.push_back(uint8_t(Word >> 8));
+      }
+    }
+    Entry->Offset = Add(Entry->ID, Entry->IsUTF16 ? 2 : 1, Bytes);
+    wipe(Bytes.data(), Bytes.size());
+  }
+  const char Decoy[] = "configuration loaded successfully";
+  Add(uint32_t(ConstantStringPool.size()), 1,
+      std::vector<uint8_t>(Decoy, Decoy + sizeof Decoy));
+  HardenedSize = uint32_t(Blob.size()); store32(Blob.data() + 8, HardenedSize);
+  size_t Offset = HeaderSize;
+  for (uint32_t Id = 0; Id < load32(Blob.data() + 20); ++Id) {
+    uint8_t *Record = Blob.data() + Offset;
+    const uint32_t Capacity = load32(Record);
+    uint8_t AAD[40]; aad(Blob.data(), Id, Capacity, AAD);
+    seal(Key, Record + 4, AAD, sizeof AAD, Record + 32, Capacity, Record + 16);
+    Offset += 32 + Capacity;
+  }
+  wipe(Key, sizeof Key);
+  Constant *Init = ConstantDataArray::get(M.getContext(), ArrayRef<uint8_t>(Blob));
+  HardenedBlob = new GlobalVariable(M, Init->getType(), false,
+      GlobalValue::PrivateLinkage, Init, "ndkp_cse_v1_payload");
+  HardenedBlob->setSection(".ndkp.cse"); HardenedBlob->setAlignment(Align(8));
+  HardenedBlob->setMetadata("noobf", MDNode::get(M.getContext(), {}));
+  appendToUsed(M, {HardenedBlob});
+  Type *CacheTy = ArrayType::get(Type::getInt8Ty(M.getContext()), 84);
+  HardenedCache = new GlobalVariable(M, CacheTy, false, GlobalValue::PrivateLinkage,
+      Constant::getNullValue(CacheTy), "ndkp_cse_v1_cache");
+  HardenedCache->setAlignment(Align(4));
+  HardenedCache->setMetadata("noobf", MDNode::get(M.getContext(), {}));
+}
+
+Function *StringEncryption::buildHardenedDecrypt(Module &M, const CSPEntry *Entry) {
+  LLVMContext &Ctx = M.getContext();
+  Type *Ptr = PointerType::get(Ctx, 0), *I32 = Type::getInt32Ty(Ctx);
+  Function *F = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), {Ptr, Ptr}, false),
+      GlobalValue::PrivateLinkage, "ndkp_decrypt_string_" + Twine::utohexstr(Entry->ID), &M);
+  FunctionCallee Decode = M.getOrInsertFunction("ndkp_cse_decode_v1",
+      FunctionType::get(Type::getVoidTy(Ctx), {Ptr, I32, I32, Ptr, I32, I32, I32, Ptr}, false));
+  if (auto *Helper = dyn_cast<Function>(Decode.getCallee()))
+    Helper->setVisibility(GlobalValue::HiddenVisibility);
+  BasicBlock *Enter = BasicBlock::Create(Ctx, "Enter", F);
+  BasicBlock *Body = BasicBlock::Create(Ctx, "Body", F);
+  BasicBlock *Exit = BasicBlock::Create(Ctx, "Exit", F);
+  IRBuilder<> B(Enter); emitOnceGuard(B, Entry->DecStatus, Body, Exit);
+  B.SetInsertPoint(Body);
+  uint32_t Capacity = hardenedCapacity(Entry->IsUTF16 ? Entry->Data16.size() * 2 : Entry->Data.size()) - 16;
+  B.CreateCall(Decode, {F->getArg(0), B.getInt32(Capacity), B.getInt32(Entry->IsUTF16 ? 2 : 1),
+      HardenedBlob, B.getInt32(HardenedSize), B.getInt32(Entry->Offset), B.getInt32(Entry->ID), HardenedCache});
+  emitOncePublish(B, Entry->DecStatus); B.CreateBr(Exit);
+  B.SetInsertPoint(Exit); B.CreateRetVoid();
+  return F;
+}
+
 Function *StringEncryption::buildDecryptFunctionChaCha(Module *M, const StringEncryption::CSPEntry *Entry) {
 	LLVMContext &Ctx = M->getContext();
 	PointerType *Ptr = PointerType::get(Ctx, 0);
