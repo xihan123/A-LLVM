@@ -36,6 +36,13 @@ jobs:
         run: python tests/locate-llvm/test_locate_llvm.py
       - name: Native APK certificate ownership tests
         run: python tests/cert-bind/test_apkcert.py
+      - name: Hardened CSE crypto and sealer tests
+        run: |
+          python tests/cse-hardened/test_seal_cse.py
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror -Iruntime tests/cse-hardened/crypto_test.cpp -o /tmp/ndkp-cse-crypto
+          /tmp/ndkp-cse-crypto
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror -Iruntime tests/cse-hardened/io_test.cpp -o /tmp/ndkp-cse-io
+          /tmp/ndkp-cse-io
       - name: Overlay sync and patch tests
         run: python -m unittest discover -s tests/overlay -p 'test_*.py' -v
       - name: VMP bitcode generator tests

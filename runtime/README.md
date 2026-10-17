@@ -1,5 +1,7 @@
 # runtime/ — APK 签名证书绑定运行期 helper（`-irobf-cert-bind`）
 
+新增的 arm64 字符串强化模式 `-irobf-cse-hardened` 使用独立运行时和链接后封装流程，见 [CSE v1 接入说明](CSE_HARDENED.md)。旧模式继续使用下述接口。
+
 `-irobf-cert-bind` 把"运行期 APK 签名证书的 SHA-256 派生混合值"折进解密密钥（`-irobf-cse`
 字符串 pepper 与 VMP 函数密钥），使产物**仅在被构建期指定证书签名时才正确运行**：错签名 /
 重打包 / 缺证书 ⇒ 密钥不抵消 ⇒ 字符串与被虚拟化函数解出乱码（非分支、fail-closed，无可
@@ -16,6 +18,7 @@ patch 的 `if`）。
 | `ndkp_apkcert.cpp` | **要编进你的 `.so` 的唯一文件**：定义 `extern "C" void ndkp_certbind_mix(uint64_t* lo, uint64_t* hi)`，pass 注入的加载期构造器会调它。 |
 | `apkcert.h` | 定位**本库所属 APK**，从其 v2/v3 签名块读取证书 DER 并 SHA-256（自 stringarmor2 移植）。刻意不走 `PackageManager.getPackageInfo`——那是 CorePatch/LSPatch/伪造签名 Xposed 模块 hook 的 API。 |
 | `sha256.h` | 头文件版 FIPS 180-4 SHA-256（`apkcert.h` 依赖）。 |
+| `apkcert_io.h` | 证书解析共享的 I/O 后端；旧接口默认使用 POSIX，新 CSE 模式使用 POSIX/raw syscall 双路径。 |
 | `jni.cpp.reference` | stringarmor2 里"在 `JNI_OnLoad` 折证书混合值进 pepper"的**上游参考**（含 `blob.h` 等本仓库没有的依赖，**不编译**），仅示意折入设计。 |
 
 ## 集成（三步）
