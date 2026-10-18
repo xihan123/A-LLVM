@@ -47,6 +47,7 @@ bool isVMProtectEnabled();
 // bind：把运行期包名（/proc/self/cmdline）哈希折进 pepper（非分支、fail-closed）；
 //       bind 蕴含 perkey，期望包名由 -irobf-cse-bind-package 提供。
 bool isCsePerKeyEnabled();
+bool isCseHardenedEnabled();
 bool isCseBindEnabled();
 std::string getCseBindPackage();
 
