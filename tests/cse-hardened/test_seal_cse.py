@@ -69,7 +69,7 @@ class CryptoTests(unittest.TestCase):
 
     def test_overlay_crypto_copies(self):
         for major in (20, 21):
-            for name in ("cse_crypto.h", "sha256.h"):
+            for name in ("cse_crypto.h", "sha256.h", "cse_region.h"):
                 self.assertEqual((ROOT / "runtime" / name).read_text(encoding="utf-8"),
                                  (ROOT / f"obfuscation/llvm-{major}/include" / name).read_text(encoding="utf-8"))
 

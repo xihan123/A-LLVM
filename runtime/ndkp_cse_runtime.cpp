@@ -4,6 +4,7 @@
 #error "hardened CSE requires Android arm64"
 #endif
 #include "cse_crypto.h"
+#include "cse_region.h"
 #include "apkcert.h"
 #include <elf.h>
 #include <link.h>
@@ -14,13 +15,16 @@ using Raw = stringarmor::apkio::Raw;
 using Posix = stringarmor::apkio::Posix;
 
 [[noreturn]] void fail() {
-  static const char message[] = "CSE validation failed\n";
-  Raw::call(__NR_write, 2, reinterpret_cast<long>(message), sizeof message - 1);
-  Raw::call(__NR_exit_group, 127);
-  __builtin_trap();
+  for (;;) Raw::call(__NR_exit_group, 127);
 }
 
-struct Image { uintptr_t anchor; uint8_t digest[32]; unsigned matches = 0; bool valid = false; };
+struct Image {
+  uintptr_t anchor, regions;
+  size_t regionsSize;
+  uint8_t digest[32];
+  unsigned matches = 0;
+  bool valid = false;
+};
 int hashImage(dl_phdr_info* image, size_t, void* opaque) {
   auto& result = *static_cast<Image*>(opaque);
   bool owner = false;
@@ -36,6 +40,7 @@ int hashImage(dl_phdr_info* image, size_t, void* opaque) {
   const char domain[] = "NDKP-CODE-v1";
   material.insert(material.end(), domain, domain + sizeof domain - 1);
   unsigned executable = 0;
+  bool regionsCovered = false;
   for (unsigned i = 0; i < image->dlpi_phnum; ++i) {
     const auto& p = image->dlpi_phdr[i];
     if (p.p_type == PT_DYNAMIC) {
@@ -49,6 +54,9 @@ int hashImage(dl_phdr_info* image, size_t, void* opaque) {
     }
     if (p.p_type != PT_LOAD || !(p.p_flags & PF_X)) continue;
     if (p.p_flags != (PF_R | PF_X) || p.p_filesz != p.p_memsz || p.p_filesz > (1u << 28)) return 0;
+    const uintptr_t start = image->dlpi_addr + p.p_vaddr;
+    if (result.regions >= start && result.regions - start <= p.p_filesz &&
+        result.regionsSize <= p.p_filesz - (result.regions - start)) regionsCovered = true;
     // Validate live page permissions before dereferencing, including execute-only remaps.
     auto* maps = Raw::stream("/proc/self/maps");
     if (!maps) return 0;
@@ -79,7 +87,7 @@ int hashImage(dl_phdr_info* image, size_t, void* opaque) {
     material.insert(material.end(), entry, entry + sizeof entry);
     ++executable;
   }
-  if (executable) {
+  if (executable && regionsCovered) {
     stringarmor::sha2::sha256(material.data(), material.size(), result.digest);
     result.valid = true;
   }
@@ -130,13 +138,23 @@ void inputs(const uint8_t* blob, uint8_t out[48]) {
 
 // cache points to aligned {u32 state; u8 actual_code_hash[32]; u8 inputs[48]}.
 // Only public input digests persist; never retain a derived key in this cache.
-extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_decode_v1(
-    uint8_t* out, uint32_t outCapacity, uint32_t encoding, const uint8_t* blob,
-    uint32_t total, uint32_t offset, uint32_t ordinal, uint8_t* cache) {
+extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_decode_region_v1(
+    uint8_t* out, const ndkp_cse::ModuleV1* module, const ndkp_cse::RegionV1* region) {
   using namespace ndkp_cse;
+  if (!out || !module || !region || !module->blob || !module->cache || !module->regions) fail();
+  const uint8_t* blob = module->blob;
+  uint8_t* cache = module->cache;
+  const uint32_t total = module->total;
+  const uintptr_t base = reinterpret_cast<uintptr_t>(module->regions);
+  const uintptr_t address = reinterpret_cast<uintptr_t>(region);
+  if (module->count < 2 || module->count > (1u << 28) / 64 || address < base ||
+      address - base >= uint64_t(module->count) * sizeof(RegionV1) ||
+      (address - base) % sizeof(RegionV1)) fail();
+  const uint32_t ordinal = uint32_t((address - base) / sizeof(RegionV1));
+  const uint32_t offset = region->offset, outCapacity = region->out_capacity, encoding = region->encoding;
   if (total < HeaderSize || total > (1u << 28) || !equal(blob, Magic, 8) ||
       load32(blob + 8) != total || load32(blob + 12) != 1 || (load32(blob + 16) & ~3u) ||
-      load32(blob + 20) < 2 || load32(blob + 20) > (total - HeaderSize) / 64 ||
+      load32(blob + 20) != module->count || load32(blob + 20) > (total - HeaderSize) / 64 ||
       ordinal >= load32(blob + 20) || offset < HeaderSize || offset > total - 32) fail();
   for (size_t i = 104; i < 152; ++i) if (blob[i]) fail();
   for (size_t i = 216; i < HeaderSize; ++i) if (blob[i]) fail();
@@ -145,6 +163,7 @@ extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_decode_v1(
     uint32_t expected = 0;
     if (__atomic_compare_exchange_n(state, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
       Image image{}; image.anchor = reinterpret_cast<uintptr_t>(blob);
+      image.regions = base; image.regionsSize = size_t(module->count) * sizeof(RegionV1);
       if (dl_iterate_phdr(hashImage, &image) != 0 || image.matches != 1 || !image.valid) fail();
       std::memcpy(cache + 4, image.digest, 32);
       inputs(blob, cache + 36);

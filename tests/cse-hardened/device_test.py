@@ -58,6 +58,17 @@ def main():
             device("shell", "chmod", "700", remote + "/loader")
             run(clang, *common, "-O2", "-fno-lto", "-fno-exceptions", "-Wall", "-Wextra", "-Werror",
                 "-c", ROOT / "runtime/ndkp_cse_runtime.cpp", "-o", out / "runtime.o")
+            for test, file, extra in (
+                ("regions", source / "region_test.cpp", [out / "runtime.o", "-ldl"]),
+                ("raw-exit", ROOT / "tests/anti-tamper/raw_exit.c",
+                 ["-Wl,--wrap=getpid,--wrap=kill,--wrap=tgkill,--wrap=raise,--wrap=syscall"]),
+            ):
+                profile = common if test == "regions" else [flag for flag in common if flag != "-std=c++17"]
+                cxx = ["--driver-mode=g++", "-static-libstdc++"] if test == "regions" else []
+                run(clang, *profile, *cxx, "-O2", "-I", ROOT / "runtime", file, *extra, "-o", out / test)
+                device("push", out / test, remote + "/" + test)
+                device("shell", "chmod", "700", remote + "/" + test)
+                print(device("shell", remote + "/" + test).stdout.strip(), flush=True)
             run(clang, *common, "--driver-mode=g++", "-O2", "-static-libstdc++", "-I", ROOT / "runtime",
                 source / "crypto_test.cpp", "-o", out / "crypto")
             device("push", out / "crypto", remote + "/crypto")
@@ -68,12 +79,20 @@ def main():
             device("push", out / "io-test", remote + "/io-test")
             device("shell", "chmod", "700", remote + "/io-test")
             print(device("shell", remote + "/io-test").stdout.strip(), flush=True)
-            run(clang, *common, "-O2", "-mllvm", "-irobf-cse", "-mllvm", "-irobf-cse-hardened",
-                "-S", "-emit-llvm", source / "fixture.cpp", "-o", out / "fixture.ll")
-            ir = (out / "fixture.ll").read_text(encoding="utf-8")
-            capacities = re.findall(r"call void @ndkp_cse_decode_v1\(ptr [^,]+, i32 (\d+),", ir)
-            if not capacities or any(int(n) + 16 < 32 or (int(n) + 16) & (int(n) + 15) for n in capacities):
-                raise RuntimeError("decoder exposes actual length instead of bucket capacity")
+            def inspect_ir(optimization, flags, label):
+                path = out / ("decoder-" + label + ".ll")
+                run(clang, *common, "-" + optimization, *flags,
+                    "-S", "-emit-llvm", source / "fixture.cpp", "-o", path)
+                ir = path.read_text(encoding="utf-8")
+                declaration = re.search(r"declare hidden void @ndkp_cse_decode_region_v1\(([^)]*)\)", ir)
+                args = declaration[1].split(",") if declaration else []
+                if len(args) != 3 or any(not arg.strip().startswith("ptr") for arg in args):
+                    raise RuntimeError("decoder must receive only out/module/region pointers")
+                if "ndkp_cse_decode_v1" in ir or "ndkp_cse_v1_regions" not in ir:
+                    raise RuntimeError("missing CSE region ABI")
+                guard = re.search(r"define private void @ndkp_cse_module_decode.*?^}", ir, re.M | re.S)
+                if not guard or guard[0].count("load volatile") != 5 or 'section ".text.ndkp.cse.regions"' not in ir:
+                    raise RuntimeError("missing module guard or authenticated region table")
 
             def execute(path, success, name=None):
                 if args.compile_only:
@@ -85,7 +104,7 @@ def main():
                 result = device("shell", *command, check=False)
                 if success and (result.returncode or "result=0" not in result.stdout):
                     raise RuntimeError(f"expected success: {result.stdout} {result.stderr}")
-                if not success and (result.returncode != 127 or "CSE validation failed" not in result.stderr + result.stdout):
+                if not success and (result.returncode != 127 or "CSE validation failed" in result.stderr + result.stdout):
                     raise RuntimeError(f"expected controlled rejection: {result.returncode}: {result.stdout} {result.stderr}")
                 return result.stdout.strip()
 
@@ -99,6 +118,7 @@ def main():
                 flags = ["-mllvm", "-irobf-cse", "-mllvm", "-irobf-cse-hardened"]
                 if lto:
                     flags += [f"-flto={lto}"]
+                inspect_ir(optimization, flags, optimization + "-" + (lto or "no-lto"))
                 for name in ("fixture", "other"):
                     run(clang, *common, f"-{optimization}", *flags, "-c", source / f"{name}.cpp", "-o", out / f"{name}.o")
                 link = [clang, *common, "--driver-mode=g++", "-static-libstdc++", "-shared", "-Wl,--gc-sections,--no-undefined",
@@ -114,6 +134,7 @@ def main():
                 cse.process((out / "sealed.so").read_bytes(), True)
                 execute(out / "sealed.so", True)
                 assert b"NDKP_HARDENED_secret_19a7" not in sealed
+                assert b"CSE validation failed" not in sealed
                 image = cse.Elf(sealed)
                 for va, size, offset in image.executable:
                     modified = bytearray(sealed)

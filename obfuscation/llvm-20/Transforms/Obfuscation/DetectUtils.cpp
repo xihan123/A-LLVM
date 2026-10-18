@@ -29,6 +29,56 @@ Constant* DetectUtils::createGlobalString(Module &M, const std::string &str, con
     return ConstantExpr::getBitCast(StrGV, PointerType::get(Ctx, 0));
 }
 
+// Linux syscall numbers belong to the target ABI, never the compiler host.
+struct RawCalls { unsigned write, getpid, kill, exitGroup; };
+static bool rawCalls(const Module &M, RawCalls &Calls) {
+  Triple T(M.getTargetTriple());
+  if (!T.isOSLinux()) return false;
+  switch (T.getArch()) {
+  case Triple::aarch64: Calls = {64, 172, 129, 94}; return true;
+  case Triple::arm:
+  case Triple::thumb: Calls = {4, 20, 37, 248}; return true;
+  case Triple::x86: Calls = {4, 20, 37, 252}; return true;
+  case Triple::x86_64: Calls = {1, 39, 62, 231}; return true;
+  default: return false;
+  }
+}
+
+static Value *emitRawCall(Module &M, IRBuilder<> &B, unsigned Number,
+                          Value *A = nullptr, Value *C = nullptr, Value *D = nullptr) {
+  Type *Word = M.getDataLayout().getIntPtrType(M.getContext());
+  Value *Zero = ConstantInt::get(Word, 0);
+  A = A ? A : Zero; C = C ? C : Zero; D = D ? D : Zero;
+  Value *N = ConstantInt::get(Word, Number);
+  std::string Asm, Constraints;
+  SmallVector<Value *, 4> Args;
+  switch (Triple(M.getTargetTriple()).getArch()) {
+  case Triple::aarch64:
+    Asm = "svc #0";
+    Constraints = "={x0},0,{x1},{x2},{x8},~{memory},~{cc}";
+    Args = {A, C, D, N}; break;
+  case Triple::arm:
+  case Triple::thumb:
+    // Preserve the Thumb frame pointer without requiring an allocatable r7.
+    Asm = "mov r12, r7\n\tmov r7, #" + std::to_string(Number) +
+          "\n\tsvc #0\n\tmov r7, r12";
+    Constraints = "={r0},0,{r1},{r2},~{r12},~{memory},~{cc}";
+    Args = {A, C, D}; break;
+  case Triple::x86:
+    Asm = "int $$0x80";
+    Constraints = "={eax},0,{ebx},{ecx},{edx},~{memory},~{cc}";
+    Args = {N, A, C, D}; break;
+  case Triple::x86_64:
+    Asm = "syscall";
+    Constraints = "={rax},0,{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory},~{cc}";
+    Args = {N, A, C, D}; break;
+  default: llvm_unreachable("unsupported raw syscall target");
+  }
+  SmallVector<Type *, 4> Types(Args.size(), Word);
+  auto *Ty = FunctionType::get(Word, Types, false);
+  return B.CreateCall(InlineAsm::get(Ty, Asm, Constraints, true), Args);
+}
+
 static void createStderrWrite(Module &M, IRBuilder<> &Builder,
                               const std::string &message,
                               const std::string &globalName) {
@@ -36,6 +86,15 @@ static void createStderrWrite(Module &M, IRBuilder<> &Builder,
     Type *Int32Ty = Type::getInt32Ty(Ctx);
     Type *Int64Ty = Type::getInt64Ty(Ctx);
     PointerType *CharPtrTy = PointerType::get(Ctx, 0);
+
+    RawCalls Calls;
+    if (rawCalls(M, Calls)) {
+        Type *Word = M.getDataLayout().getIntPtrType(Ctx);
+        Constant *Message = DetectUtils::createGlobalString(M, message, globalName);
+        emitRawCall(M, Builder, Calls.write, ConstantInt::get(Word, 2),
+                    Builder.CreatePtrToInt(Message, Word), ConstantInt::get(Word, message.size()));
+        return;
+    }
 
     FunctionCallee WriteFunc = M.getOrInsertFunction(
         "write",
@@ -86,6 +145,22 @@ Function* DetectUtils::createReportAndKillFunc(Module &M, const std::string &det
             "[AProtect] " + detectName + " detected, exiting.\n",
             ".detect.report.debug"
         );
+    }
+
+    RawCalls Calls;
+    if (rawCalls(M, Calls)) {
+        Type *Word = M.getDataLayout().getIntPtrType(Ctx);
+        BasicBlock *KillBB = BasicBlock::Create(Ctx, "signal", Func);
+        BasicBlock *ExitBB = BasicBlock::Create(Ctx, "exit", Func);
+        Value *Pid = emitRawCall(M, Builder, Calls.getpid);
+        Builder.CreateCondBr(Builder.CreateICmpSGT(Pid, ConstantInt::get(Word, 0)), KillBB, ExitBB);
+        Builder.SetInsertPoint(KillBB);
+        emitRawCall(M, Builder, Calls.kill, Pid, ConstantInt::get(Word, 9));
+        Builder.CreateBr(ExitBB);
+        Builder.SetInsertPoint(ExitBB);
+        emitRawCall(M, Builder, Calls.exitGroup, ConstantInt::get(Word, 127));
+        Builder.CreateBr(ExitBB);
+        return Func;
     }
 
     // 获取进程ID并终止
