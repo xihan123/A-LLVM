@@ -163,6 +163,14 @@ EnableSelfCheck("irobf-selfcheck", cl::init(false), cl::NotHidden,
                          "(verifies VMP bytecode blobs; requires -irobf-vmp)."),
                 cl::ZeroOrMore);
 
+static cl::opt<bool>
+EnableSelfCheckEntry("irobf-selfcheck-entry", cl::init(false), cl::NotHidden,
+                     cl::desc("Recheck the current VMP bytecode at each entry "
+                              "(requires -irobf-selfcheck and -irobf-vmp)."),
+                     cl::ZeroOrMore);
+
+bool llvm::isSelfCheckEntryEnabled() { return EnableSelfCheckEntry; }
+
 // 阶段 2 VMP（函数级虚拟化）。被虚拟化的函数通过注解（ndkp.vmp / "vmp"）或
 // -irobf-vm_functions= 指定；VMP 要求 -frtti -fno-exceptions（见 include/ndkp.h）。
 static cl::opt<std::string>
@@ -289,7 +297,8 @@ bool llvm::isIRObfuscationEnabled() {
          EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
          EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
          EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
-         EnableHideMaps || EnableFakeMaps || EnableSelfCheck || EnableCertBind;
+         EnableHideMaps || EnableFakeMaps || EnableSelfCheck ||
+         EnableSelfCheckEntry || EnableCertBind;
 }
 
 // 在所有 pass 之后改名；FLA、间接调用和 VMP 在执行期间依赖 .AProtect 段前缀。
@@ -398,13 +407,16 @@ struct ObfuscationPassManager : public ModulePass {
                   EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
                   EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
                   EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
-                  EnableHideMaps || EnableFakeMaps || EnableSelfCheck ||
+                  EnableHideMaps || EnableFakeMaps || EnableSelfCheck || EnableSelfCheckEntry ||
                   EnableCertBind;
     if (hasObf)
       EnableIRObfuscation = true;
 
     if (!EnableIRObfuscation)
       return run(M);
+
+    if (EnableSelfCheckEntry && (!EnableSelfCheck || !EnableVMProtect))
+      report_fatal_error("-irobf-selfcheck-entry requires -irobf-selfcheck and -irobf-vmp");
 
     if (EnableStrHardened) {
       const Triple T(M.getTargetTriple());
@@ -441,6 +453,11 @@ struct ObfuscationPassManager : public ModulePass {
       if (EnableIRFlattening)            errs() << "  + Flattening\n";
       if (EnableIndirectBr)              errs() << "  + IndirectBranch\n";
     }
+
+    // The early side-effect markers have preserved calls through optimization.
+    // Remove them before VMP translates the body; CSE installs the real guards.
+    if (EnableStrHardened)
+      removeCseRecheckMarkers(M);
 
     // VMP 最先：在常量/字符串/CFG pass 改写 IR 之前，对干净 IR 做虚拟化；其产物
     // （vm_interpreter / *_original / vm_*_seg）被后续 pass 按名跳过。
@@ -483,9 +500,8 @@ struct ObfuscationPassManager : public ModulePass {
     if (EnableSelfCheck)
       add(llvm::createSelfCheckPass());
 
-    // 证书绑定的 VMP 密钥折入必须排在 SelfCheck 之后：SelfCheck 用 isa<ConstantInt>
-    // 命中入口桩密钥常量存，若 CertBind 先跑把值改成非常量会令 SelfCheck 静默漏掉。
-    // CertBind 按 !ndkp.vmpkey.entry 标记命中、包裹当前值，故与 SelfCheck 顺序无关地叠加。
+    // 两种密钥折入都按 !ndkp.vmpkey.entry 标记命中；整数混淆后仍能包裹当前值。
+    // 保留 SelfCheck → CertBind 的既有顺序。
     if (EnableCertBind)
       add(llvm::createCertBindPass());
 

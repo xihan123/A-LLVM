@@ -78,7 +78,8 @@ struct IndirectCall : public FunctionPass {
                 continue;
               }
             }
-            if (Callee->isIntrinsic()) {
+            // Keep generated integrity/decoder guards out of writable callee tables.
+            if (Callee->isIntrinsic() || Callee->getMetadata("noobf")) {
               continue;
             }
 

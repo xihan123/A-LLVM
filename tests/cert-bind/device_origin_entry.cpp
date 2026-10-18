@@ -39,7 +39,9 @@ extern "C" JNIEXPORT void JNICALL Java_com_ndkp_stability_CheckActivity_check(
     if (!f) return;
     fputs("START", f); fclose(f);
     volatile int input = 7;
-    bool ok = std::strcmp(protected_secret(), "certificate roundtrip") == 0;
+    const char* saved = protected_secret();
+    bool ok = std::strcmp(saved, "certificate roundtrip") == 0;
+    ok &= protected_secret() == saved;
     ok &= protected_compute(input) == 54;
     f = fopen(result, "w");
     if (f) { fputs(ok ? "OK" : "BAD", f); fclose(f); }

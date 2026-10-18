@@ -34,6 +34,8 @@ llvm::PassPluginLibraryInfo getObfuscationPluginInfo() {
             // 在两者之前运行；属性持久，LTO 合并后仍生效。
             PB.registerPipelineStartEPCallback(
                 [](ModulePassManager &MPM, OptimizationLevel) {
+                  if (isCseHardenedEnabled())
+                    MPM.addPass(CseRecheckPreparePass());
                   if (isVMProtectEnabled())
                     MPM.addPass(VMProtectPreparePass());
                 });

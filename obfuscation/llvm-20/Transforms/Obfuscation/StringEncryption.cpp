@@ -25,6 +25,7 @@
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/Obfuscation/CryptoUtils.h"
@@ -37,6 +38,41 @@
 #define DEBUG_TYPE "string-encryption"
 
 using namespace llvm;
+
+static constexpr const char *RecheckMarker = "ndkp.cse.recheck.prepare";
+
+PreservedAnalyses llvm::CseRecheckPreparePass::run(Module &M,
+                                                  ModuleAnalysisManager &) {
+  SmallVector<GlobalValue *, 8> Marked;
+  for (Function &F : M) {
+    if (F.isDeclaration()) continue;
+    for (const std::string &A : readAnnotate(&F)) {
+      if (StringRef(A).rtrim('\0') != "ndkp.cse_recheck") continue;
+      F.removeFnAttr(Attribute::AlwaysInline);
+      F.addFnAttr(Attribute::NoInline);
+      // noinline alone still permits DCE/CSE of calls with unused results.
+      IRBuilder<> B(&*F.getEntryBlock().getFirstInsertionPt());
+      B.CreateCall(Intrinsic::getDeclaration(&M, Intrinsic::sideeffect))
+          ->setMetadata(RecheckMarker, MDNode::get(M.getContext(), {}));
+      Marked.push_back(&F);
+      break;
+    }
+  }
+  if (Marked.empty()) return PreservedAnalyses::all();
+  // Prevent IPSCCP from cloning a specialized, unannotated checkpoint body.
+  appendToCompilerUsed(M, Marked);
+  return PreservedAnalyses::none();
+}
+
+void llvm::removeCseRecheckMarkers(Module &M) {
+  SmallVector<Instruction *, 8> Markers;
+  for (Function &F : M)
+    for (Instruction &I : instructions(F))
+      if (auto *Call = dyn_cast<IntrinsicInst>(&I))
+        if (Call->getIntrinsicID() == Intrinsic::sideeffect && I.getMetadata(RecheckMarker))
+          Markers.push_back(&I);
+  for (Instruction *I : Markers) I->eraseFromParent();
+}
 
 //===----------------------------------------------------------------------===//
 // 字符串加密强化（-irobf-cse-perkey / -irobf-cse-bind）编译期原语。
@@ -233,7 +269,7 @@ namespace {
 		Function *HardenedDecode = nullptr;
 		uint32_t HardenedSize = 0;
 		void buildHardenedTable(Module &M);
-		Function *buildHardenedModuleDecode(Module &M);
+		Function *buildHardenedModuleDecode(Module &M, bool Recheck = false);
 		Function *buildHardenedDecrypt(Module &M, const CSPEntry *Entry);
 		bool UsePerKey = false;   ///< ChaCha8 派生密钥（不内联存储密钥）
 		bool UseBind = false;     ///< 把运行期包名哈希折进 pepper（蕴含 UsePerKey）
@@ -338,6 +374,17 @@ bool StringEncryption::runOnModule(Module &M) {
 	// 字符串加密强化模式判定（默认全关 ⇒ 与基线逐字节一致的旧路径）。
 	// bind 蕴含 perkey；bind 亦可由模块级 NDKP_STR_BIND 注解开启。
 	UseHardened = isCseHardenedEnabled();
+  // Capture annotations before CSE rewrites their backing string globals.
+  SmallVector<Function *, 8> Checkpoints;
+  if (UseHardened)
+    for (Function &F : M) {
+      if (F.isDeclaration()) continue;
+      for (const std::string &A : readAnnotate(&F))
+        if (StringRef(A).rtrim('\0') == "ndkp.cse_recheck") {
+          Checkpoints.push_back(&F);
+          break;
+        }
+    }
 	UseBind = isCseBindEnabled() || moduleHasStrBindAnnotation(M);
 	UsePerKey = isCsePerKeyEnabled() || UseBind;
 	if (UseBind) {
@@ -482,8 +529,11 @@ bool StringEncryption::runOnModule(Module &M) {
 		}
 	}
 
-	if (UseHardened && ConstantStringPool.empty())
+	if (UseHardened && ConstantStringPool.empty()) {
+		if (!Checkpoints.empty())
+			report_fatal_error("NDKP_CSE_RECHECK requires protected constants in the same module");
 		return false;
+	}
 
 	// 强化模式下：先建 pepper 分片 + 一次性共享解码核心（bind 时含包名 key）。
 	if (UseHardened && !ConstantStringPool.empty())
@@ -809,6 +859,13 @@ bool StringEncryption::runOnModule(Module &M) {
 		PkgKeyFunc = nullptr;
 	}
   if (UseHardened) {
+    if (!Checkpoints.empty()) {
+      Function *Recheck = buildHardenedModuleDecode(M, true);
+      for (Function *F : Checkpoints) {
+        IRBuilder<> B(&*F->getEntryBlock().getFirstInsertionPt());
+        B.CreateCall(Recheck);
+      }
+    }
     // Decoding adds writes, synchronization and allocation. Pre-pass inferred
     // effects on callers/calls are stale and would miscompile subsequent LTO.
     const Attribute::AttrKind Effects[] = {Attribute::Memory, Attribute::NoSync,
@@ -1385,17 +1442,22 @@ void StringEncryption::buildHardenedTable(Module &M) {
   HardenedDecode = buildHardenedModuleDecode(M);
 }
 
-Function *StringEncryption::buildHardenedModuleDecode(Module &M) {
+Function *StringEncryption::buildHardenedModuleDecode(Module &M, bool Recheck) {
   LLVMContext &Ctx = M.getContext();
   Type *Ptr = PointerType::get(Ctx, 0);
   auto *ModuleTy = cast<StructType>(HardenedModule->getValueType());
   auto *Expected = cast<ConstantStruct>(HardenedModule->getInitializer());
-  Function *F = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), {Ptr, Ptr}, false),
-      GlobalValue::PrivateLinkage, "ndkp_cse_module_decode", &M);
+  SmallVector<Type *, 3> Args;
+  if (!Recheck) Args = {Ptr, Ptr};
+  Function *F = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), Args, false),
+      GlobalValue::PrivateLinkage,
+      Recheck ? "ndkp_cse_module_recheck" : "ndkp_cse_module_decode", &M);
   F->addFnAttr(Attribute::NoInline);
   F->setMetadata("noobf", MDNode::get(Ctx, {}));
-  FunctionCallee Decode = M.getOrInsertFunction("ndkp_cse_decode_region_v1",
-      FunctionType::get(Type::getVoidTy(Ctx), {Ptr, Ptr, Ptr}, false));
+  Args = Recheck ? SmallVector<Type *, 3>{Ptr} : SmallVector<Type *, 3>{Ptr, Ptr, Ptr};
+  FunctionCallee Decode = M.getOrInsertFunction(
+      Recheck ? "ndkp_cse_recheck_module_v1" : "ndkp_cse_decode_region_v1",
+      FunctionType::get(Type::getVoidTy(Ctx), Args, false));
   if (auto *Helper = dyn_cast<Function>(Decode.getCallee()))
     Helper->setVisibility(GlobalValue::HiddenVisibility);
   BasicBlock *Enter = BasicBlock::Create(Ctx, "entry", F);
@@ -1418,11 +1480,17 @@ Function *StringEncryption::buildHardenedModuleDecode(Module &M) {
   // Use precisely the checked values; do not reread a mutable descriptor in the runtime.
   Value *LocalModule = B.CreateAlloca(ModuleTy);
   B.CreateStore(Snapshot, LocalModule);
-  B.CreateCall(Decode, {F->getArg(0), LocalModule, F->getArg(1)});
+  if (Recheck)
+    B.CreateCall(Decode, {LocalModule});
+  else
+    B.CreateCall(Decode, {F->getArg(0), LocalModule, F->getArg(1)});
   B.CreateRetVoid();
   B.SetInsertPoint(Fail);
   Value *Null = ConstantPointerNull::get(cast<PointerType>(Ptr));
-  B.CreateCall(Decode, {F->getArg(0), Null, Null});
+  if (Recheck)
+    B.CreateCall(Decode, {Null});
+  else
+    B.CreateCall(Decode, {F->getArg(0), Null, Null});
   B.CreateUnreachable();
   return F;
 }

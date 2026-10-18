@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Obfuscation/SelfCheck.h"
+#include "llvm/Transforms/Obfuscation/CertBind.h"
 #include "llvm/Transforms/Obfuscation/DetectUtils.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
 #include "llvm/IR/Constants.h"
@@ -23,6 +24,7 @@
 #include "llvm/IR/Type.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include <cstdint>
 #include <vector>
@@ -196,7 +198,7 @@ bool SelfCheck::runOnModule(Module &M) {
   // 加载期即校验；101 避开 0..100 的系统/ABI 保留区。
   appendToGlobalCtors(M, CtorFn, /*Priority=*/101);
 
-  // 只修改入口桩的常量密钥存储，排除 vm_restore_call_frame 恢复的动态值。
+  // 入口标记在整数混淆后仍保留；排除 vm_restore_call_frame 的无标记动态存储。
   // 未篡改时 expected_acc 与 runtime_acc 抵消。
   if (GlobalVariable *KeyGV =
           M.getGlobalVariable("vmp_shared_vm_function_key", /*AllowInternal=*/true)) {
@@ -205,13 +207,28 @@ bool SelfCheck::runOnModule(Module &M) {
     for (User *U : KeyGV->users())
       if (auto *SI = dyn_cast<StoreInst>(U))
         if (SI->getPointerOperand() == KeyGV &&
-            isa<ConstantInt>(SI->getValueOperand()))
+            (SI->getMetadata(NdkpVmpKeyEntryMD) ||
+             isa<ConstantInt>(SI->getValueOperand())))
           Stores.push_back(SI);
     for (StoreInst *SI : Stores) {
       IRBuilder<> IB(SI);
       LoadInst *Ld = IB.CreateLoad(Int64Ty, RuntimeAccGV);
       Ld->setVolatile(true);
       Value *Biased = IB.CreateXor(SI->getValueOperand(), ExpAccC);
+      if (isSelfCheckEntryEnabled()) {
+        // Recheck only this entry's blob; no shared accumulator writes on hot paths.
+        const Blob *Current = nullptr;
+        for (const Blob &Bl : Blobs)
+          if (Bl.GV->getName() == ("gv_code_seg_" + SI->getFunction()->getName()).str())
+            Current = &Bl;
+        if (!Current)
+          report_fatal_error("selfcheck-entry cannot identify VMP entry bytecode");
+        Value *Hash = IB.CreateCall(CheckOne, {
+            Current->GV, ConstantInt::get(Int64Ty, Current->Len),
+            ConstantInt::get(Int64Ty, Current->Expected)});
+        Biased = IB.CreateXor(Biased, IB.CreateXor(
+            Hash, ConstantInt::get(Int64Ty, Current->Expected)));
+      }
       SI->setOperand(0, IB.CreateXor(Biased, Ld));
     }
     if (isIRObfuscationDebugEnabled())

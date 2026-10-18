@@ -1,5 +1,7 @@
 # CSE v1 验证记录 — 2026-10-18
 
+p7 的按需代码复验、VMP 入口复验及最新验证结果见 [增量验证记录](../anti-tamper/RECHECK_VALIDATION.md)。下文保留 p6 的原始结果。
+
 宿主为 Windows，设备为 GM1901 / Android API 37 / arm64-v8a。Python 为本机 3.14；CI 配置使用 3.11。本记录不代表 Linux 构建或其他 Android 版本已通过。
 
 ## 编译器与基线

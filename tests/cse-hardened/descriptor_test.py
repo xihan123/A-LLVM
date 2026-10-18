@@ -77,7 +77,8 @@ def main():
     clang = args.clang.resolve() if args.clang else base / f"bin/clang{ext}"
     resource = max((base / "lib/clang").iterdir(), key=lambda p: int(p.name))
     common = ["--target=aarch64-linux-android29", f"--sysroot={base / 'sysroot'}",
-              "-resource-dir", resource, f"-B{base / 'bin'}", "-std=c++17", "-fPIC"]
+              "-resource-dir", resource, f"-B{base / 'bin'}", "-std=c++17", "-fPIC",
+              "-I", ROOT / "include", "-DNDKP_TEST_NO_RECHECK"]
     source = ROOT / "tests/cse-hardened"
     remote = "/data/local/tmp/ndkp-descriptors-" + uuid.uuid4().hex
     adb = ["adb", "-s", args.serial]

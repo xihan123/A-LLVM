@@ -97,6 +97,7 @@ Transforms/Obfuscation/
 | `-irobf-hidemaps` | `/proc/self/maps` 隐藏注入 |
 | `-irobf-fakemaps` | 伪造 `/proc` maps 注入 |
 | `-irobf-selfcheck` | 代码完整性自校验：校验 VMP 字节码 blob，篡改即加载期终止(SIGKILL)（需 `-irobf-vmp`） |
+| `-irobf-selfcheck-entry` | 每次 VM 入口复验当前字节码，并将实测哈希折入密钥（需 `-irobf-selfcheck` 和 `-irobf-vmp`） |
 | `-irobf-cert-bind` | APK 签名证书绑定：把运行期 APK 签名证书 SHA-256 派生的 128-bit 混合值折进 CSE 字符串 pepper 与 VMP 函数密钥；产物仅在被 `-irobf-cert-file` 指定证书签名时才正确运行（错签名/重打包→乱码，非分支、fail-closed）。字符串绑定需配合 `-irobf-cse`、VMP 密钥绑定需配合 `-irobf-vmp`；运行期读证书需 app 侧链接 `runtime/ndkp_apkcert.cpp`（见该目录 README） |
 | `-irobf-cert-file=` | `-irobf-cert-bind` 的期望签名者证书（DER，也接受 PEM）；其 SHA-256 在构建期折入。bind 开启但缺此项/不可读则构建失败（fail-closed） |
 | `-level-*` | 强度，范围 1 到 3 |
@@ -123,10 +124,11 @@ AArch64 后端混淆和对应的 Driver 参数尚未实现。
 只校验 VMP（`-irobf-vmp`）产出的每函数字节码 blob（`gv_code_seg_<fn>`）。该 blob 是编译期已知的常量字节（ChaCha 加密、无指针/无重定位、段 `.AProtect.data`），运行期解释器只读不写，故其内存字节恒等于编译期密文。
 
 - Pass 在**编译期**直接算出各 blob 的 FNV-1a64 并内嵌，注入一个 ELF 构造器（`ndkp_selfcheck_verify`，`llvm.global_ctors` 优先级 101）加载期用 **volatile 读**重算比对（volatile 防止优化器对已知常量把校验折成恒真、删掉），不符即调用与检测类 pass 相同的 report/kill（裸 syscall `getpid`+`kill(SIGKILL)`，返回时循环调用 `exit_group(127)`）终止（**主响应**）。
-- **纵深防御层（附，已真机验证生效）**：把各 blob 运行期哈希 XOR 累加进 `ndkp_selfcheck_runtime_acc`，并把 VMP 入口桩的密钥存改写为 `store (realkey ^ expected_acc) ^ load(runtime_acc)`（未篡改 `runtime_acc==expected_acc` 抵消回 `realkey`）。篡改任一 blob 字节 → `runtime_acc≠expected_acc` → key 错 → VMP 解释器 ChaCha 解出乱码 opcode → 崩溃。**这是真正的密码学绑定、非分支门禁**：即便 ① 的 kill 被 patch，篡改仍经此层破坏执行（真机：中和 kill 后未篡改正确、篡改即崩溃）。前提是 VMP 目标真正经解释器执行，由 `VMProtectPreparePass` 保证（见下）。
+- 哈希 XOR 累积值折入 VMP 入口密钥：`(realkey ^ expected_acc) ^ runtime_acc`，完整时抵消。FNV-1a64 不是密码学认证；修改检查器或同时修补期望值仍可能绕过。此机制不覆盖解释器机器码。
+- p7 可加 `-irobf-selfcheck-entry`，每次 VM 入口只复验当前函数 blob，将实测哈希再折入入口密钥；默认仍只在加载期校验。入口按 `ndkp.vmpkey.entry` 元数据定位，整数混淆后也能生效。需要同时开启 `-irobf-selfcheck` 和 `-irobf-vmp`。
 - 因此**无需链接后回填工具，也无需重定位归一化** —— 这是选「VMP 字节码」为校验对象（而非整个 `.text`）的原因。构造器注入使其在 `.so`（无 `main`）上也生效。
 - **依赖 `-irobf-vmp`**：无被虚拟化函数即无 blob，本开关 no-op。`NDKP_SELFCHECK` 注解为 opt-in 标记，实际由开关控制。
-- **范围**：只覆盖 VMP 字节码数据。VMP 自带的每 BB 加密无 blob 级 MAC（operand-level 字节翻转可被静默放过），本校验对整个 blob 做全量认证、篡改即加载期终止；但不覆盖解释器 `.text` 或非 VMP 代码。
+- **范围**：只覆盖 VMP 字节码数据。VMP 自带的每 BB 加密无 blob 级 MAC（operand-level 字节翻转可被静默放过），本校验对整个 blob 做哈希比对、失配即加载期终止；但不覆盖解释器 `.text` 或非 VMP 代码。
 
 ## 适配新版本
 

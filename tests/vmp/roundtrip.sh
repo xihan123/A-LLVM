@@ -19,12 +19,13 @@ trap cleanup EXIT
 COMMON=(--target=aarch64-linux-android21 -O2 -fno-vectorize -fno-slp-vectorize)
 "$CLANG" "${COMMON[@]}" -DREFERENCE -c "$DIR/concurrent.c" -o "$OUT/reference.o"
 "$CLANG" "${COMMON[@]}" -c "$DIR/concurrent_driver.c" -o "$OUT/driver.o"
-for mode in plain vmp selfcheck; do
+for mode in plain vmp selfcheck selfcheck-entry; do
   FLAGS=()
   if [[ "$mode" != plain ]]; then
     FLAGS=(-mllvm -irobf-vmp -mllvm '-irobf-vm_functions=compute;recurse;callback_roundtrip')
   fi
-  if [[ "$mode" == selfcheck ]]; then FLAGS+=(-mllvm -irobf-selfcheck); fi
+  if [[ "$mode" == selfcheck* ]]; then FLAGS+=(-mllvm -irobf-selfcheck); fi
+  if [[ "$mode" == selfcheck-entry ]]; then FLAGS+=(-mllvm -irobf-selfcheck-entry); fi
   "$CLANG" "${COMMON[@]}" "${FLAGS[@]}" -c "$DIR/concurrent.c" -o "$OUT/vmp.o"
   # The interpreter calls libc++ exception helpers even when the input is C.
   "$CLANG" --driver-mode=g++ -static-libstdc++ "${COMMON[@]}" \
@@ -45,12 +46,13 @@ done
 for opt in O0 O2; do
   "$CLANG" "${COMMON[@]}" -"$opt" -DREFERENCE -c "$DIR/global_slots.c" -o "$OUT/global-reference.o"
   "$CLANG" "${COMMON[@]}" -"$opt" -c "$DIR/global_slots_driver.c" -o "$OUT/global-driver.o"
-  for mode in plain vmp selfcheck; do
+  for mode in plain vmp selfcheck selfcheck-entry; do
     FLAGS=()
     if [[ "$mode" != plain ]]; then
       FLAGS=(-mllvm -irobf-vmp -mllvm '-irobf-vm_functions=global_roundtrip;global_tls;indexed_records')
     fi
-    if [[ "$mode" == selfcheck ]]; then FLAGS+=(-mllvm -irobf-selfcheck); fi
+    if [[ "$mode" == selfcheck* ]]; then FLAGS+=(-mllvm -irobf-selfcheck); fi
+    if [[ "$mode" == selfcheck-entry ]]; then FLAGS+=(-mllvm -irobf-selfcheck-entry); fi
     "$CLANG" "${COMMON[@]}" -"$opt" "${FLAGS[@]}" -c "$DIR/global_slots.c" -o "$OUT/global.o"
     "$CLANG" --driver-mode=g++ -static-libstdc++ "${COMMON[@]}" \
       "$OUT/global-driver.o" "$OUT/global-reference.o" "$OUT/global.o" -o "$OUT/global-test"

@@ -85,11 +85,15 @@ public class CheckActivity extends android.app.Activity {
                 run(args.openssl, "pkcs8", "-topk8", "-nocrypt", "-outform", "DER",
                     "-in", out / f"{signer}.pem", "-out", out / f"{signer}.pk8")
             protected = out / "protected.c"
-            protected.write_text('''const char *protected_secret(void) { return "certificate roundtrip"; }
+            protected.write_text('''#include "ndkp.h"
+#ifdef TEST_CSE_RECHECK
+NDKP_CSE_RECHECK
+#endif
+const char *protected_secret(void) { return "certificate roundtrip"; }
 int protected_compute(int x) { return x * 7 + 5; }
 ''', encoding="utf-8")
             entry = root / "tests/cert-bind/device_origin_entry.cpp"
-            common = ["--target=aarch64-linux-android21", "-O2", "-fPIC"]
+            common = ["--target=aarch64-linux-android21", "-O2", "-fPIC", "-I", root / "include"]
             if args.clang:
                 resource = max((prebuilt / "lib/clang").iterdir(), key=lambda p: int(p.name))
                 common += [f"--sysroot={prebuilt / 'sysroot'}", "-resource-dir", resource, f"-B{prebuilt / 'bin'}"]
@@ -143,7 +147,7 @@ int protected_compute(int x) { return x * 7 + 5; }
                     flags += ["-mllvm", "-irobf-vmp", "-mllvm",
                               "-irobf-vm_functions=protected_compute"]
                 if args.hardened:
-                    flags += ["-mllvm", "-irobf-cse-hardened", "-mllvm", "-irobf-cse-bind",
+                    flags += ["-DTEST_CSE_RECHECK", "-mllvm", "-irobf-cse-hardened", "-mllvm", "-irobf-cse-bind",
                               "-mllvm", f"-irobf-cse-bind-package={package}"]
                 if mode == "combined":
                     flags += ["-mllvm", "-irobf-selfcheck"]

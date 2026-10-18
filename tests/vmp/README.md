@@ -6,7 +6,16 @@
 - 结构体数组、多维数组、负下标及大于 255 字节的元素。
 - 八线程并发、递归和 VM → native → VM 回调。
 
-`roundtrip.sh` 测试 plain、VMP 和 VMP + SelfCheck；全局变量与索引用例分别使用 O0、O2。
+`roundtrip.sh` 测试 plain、VMP、VMP + SelfCheck 和 VMP + SelfCheck + entry；全局变量与索引用例分别使用 O0、O2。
+
+p7 新增 `-mllvm -irobf-selfcheck-entry`，必须同时开启 `-irobf-vmp` 和
+`-irobf-selfcheck`。它在每次 VM 入口只重算当前函数的字节码哈希，将实测值折入入口密钥；
+不重写共享累积值，保留递归和多线程语义。原加载期校验继续存在，不启用新开关时行为不变。
+FNV-1a64 不是密码学认证，且不覆盖解释器机器码；需要覆盖本 SO 代码时在低频操作入口结合
+`NDKP_CSE_RECHECK`，见 [CSE 文档](../../runtime/CSE_HARDENED.md)。
+
+入口成本与当前函数字节码长度成正比；热路径先做性能验证。构造器之前、首次 VM 调用前及
+首次调用之后的篡改回归位于 `tests/cse-hardened/recheck_test.py`，可用 `--clang` 指定本地编译器。
 
 ```bash
 bash tests/vmp/roundtrip.sh "$NDK" "$HOST" "$SERIAL"

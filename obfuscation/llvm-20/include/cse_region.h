@@ -23,4 +23,6 @@ static_assert(sizeof(ModuleV1) == 32 && offsetof(ModuleV1, total) == 24, "CSE mo
 // guard; regions must reside in the owning image's authenticated executable bytes.
 extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_decode_region_v1(
     uint8_t*, const ndkp_cse::ModuleV1*, const ndkp_cse::RegionV1*);
+extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_recheck_module_v1(
+    const ndkp_cse::ModuleV1*);
 #endif

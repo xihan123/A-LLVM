@@ -36,6 +36,7 @@ class PassRegistry;
 
 bool isIRObfuscationEnabled();
 bool isIRObfuscationDebugEnabled();
+bool isSelfCheckEntryEnabled();
 
 // VMP（-irobf-vmp）辅助开关读取，供 aVMP pass 使用。
 std::string getVMFunctionsList();

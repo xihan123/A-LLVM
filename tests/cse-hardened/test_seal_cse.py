@@ -75,6 +75,22 @@ class CryptoTests(unittest.TestCase):
 
 
 class SealTests(unittest.TestCase):
+    def test_public_certificate_offline_recovery_baseline(self):
+        # The certificate is public input, never an encryption secret.
+        cert = b"public signing certificate fixture"
+        sealed = cse.process(elf(payload(2, certificate=cert)))
+        image = cse.Elf(sealed)
+        start, size = image.payloads()[0]
+        blob = sealed[start:start + size]
+        key = cse.derive(blob, image.code_hash(), cse.expected_inputs(2, None, cert))
+        recovered = []
+        for ordinal, offset, capacity in cse.records(blob):
+            plain = cse.decrypt(key, blob[offset + 4:offset + 16],
+                                cse.record_aad(blob, ordinal, capacity),
+                                blob[offset + 32:offset + 32 + capacity], blob[offset + 16:offset + 32])
+            recovered.append(plain[16:16 + struct.unpack_from("<I", plain)[0]])
+        self.assertEqual(recovered, [b"secret\0", b"a\0b\0\0\0"])
+
     def test_roundtrip_and_only_data_changes(self):
         original = elf()
         sealed = cse.process(original)

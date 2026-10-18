@@ -134,6 +134,34 @@ void inputs(const uint8_t* blob, uint8_t out[48]) {
     wipe(a, sizeof a); wipe(b, sizeof b);
   }
 }
+
+Image measure(const ModuleV1* module) {
+  Image image{};
+  image.anchor = reinterpret_cast<uintptr_t>(module->blob);
+  image.regions = reinterpret_cast<uintptr_t>(module->regions);
+  image.regionsSize = size_t(module->count) * sizeof(RegionV1);
+  if (dl_iterate_phdr(hashImage, &image) != 0 || image.matches != 1 || !image.valid) fail();
+  return image;
+}
+
+void initialize(const ModuleV1* module) {
+  auto* state = reinterpret_cast<uint32_t*>(module->cache);
+  uint32_t value = __atomic_load_n(state, __ATOMIC_ACQUIRE);
+  if (value == 2) return;
+  if (value > 2) fail();
+  uint32_t expected = 0;
+  if (__atomic_compare_exchange_n(state, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    Image image = measure(module);
+    std::memcpy(module->cache + 4, image.digest, 32);
+    inputs(module->blob, module->cache + 36);
+    __atomic_store_n(state, 2, __ATOMIC_RELEASE);
+  } else {
+    while ((value = __atomic_load_n(state, __ATOMIC_ACQUIRE)) != 2) {
+      if (value != 1) fail();
+      Raw::call(__NR_sched_yield);
+    }
+  }
+}
 } // namespace
 
 // cache points to aligned {u32 state; u8 actual_code_hash[32]; u8 inputs[48]}.
@@ -158,20 +186,7 @@ extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_decode_region_v1(
       ordinal >= load32(blob + 20) || offset < HeaderSize || offset > total - 32) fail();
   for (size_t i = 104; i < 152; ++i) if (blob[i]) fail();
   for (size_t i = 216; i < HeaderSize; ++i) if (blob[i]) fail();
-  auto* state = reinterpret_cast<uint32_t*>(cache);
-  if (__atomic_load_n(state, __ATOMIC_ACQUIRE) != 2) {
-    uint32_t expected = 0;
-    if (__atomic_compare_exchange_n(state, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-      Image image{}; image.anchor = reinterpret_cast<uintptr_t>(blob);
-      image.regions = base; image.regionsSize = size_t(module->count) * sizeof(RegionV1);
-      if (dl_iterate_phdr(hashImage, &image) != 0 || image.matches != 1 || !image.valid) fail();
-      std::memcpy(cache + 4, image.digest, 32);
-      inputs(blob, cache + 36);
-      __atomic_store_n(state, 2, __ATOMIC_RELEASE);
-    } else {
-      while (__atomic_load_n(state, __ATOMIC_ACQUIRE) != 2) Raw::call(__NR_sched_yield);
-    }
-  }
+  initialize(module);
   const uint8_t* record = blob + offset;
   const uint32_t capacity = load32(record);
   if (capacity < 32 || capacity > MaxCapacity || (capacity & (capacity - 1)) ||
@@ -190,4 +205,22 @@ extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_decode_region_v1(
   if (!metadata) { wipe(plain.data(), plain.size()); fail(); }
   std::memcpy(out, plain.data() + 16, length);
   wipe(plain.data(), plain.size());
+}
+
+extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_recheck_module_v1(
+    const ndkp_cse::ModuleV1* module) {
+  if (!module || !module->blob || !module->cache || !module->regions ||
+      module->total < HeaderSize || module->total > (1u << 28) ||
+      module->count < 2 || module->count > (module->total - HeaderSize) / 64) fail();
+  initialize(module);
+  const Image image = measure(module);
+  if (!equal(image.digest, module->blob + 152, 32) ||
+      !equal(image.digest, module->cache + 4, 32)) fail();
+  // Authenticate cached inputs against the final (unused decoy) record. The
+  // generated guard checked pointers; measure authenticated the entire region table.
+  const RegionV1* sentinel = module->regions + module->count - 1;
+  if (sentinel->out_capacity > MaxCapacity - 16) fail();
+  std::vector<uint8_t> scratch(sentinel->out_capacity);
+  ndkp_cse_decode_region_v1(scratch.data(), module, sentinel);
+  wipe(scratch.data(), scratch.size());
 }

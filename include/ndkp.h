@@ -22,6 +22,15 @@
 /* 字符串常量加密。标签 ndkp.string_encrypt 折叠为 +cse，需配合 -mllvm -irobf-cse。 */
 #define NDKP_STR_ENCRYPT NDKP_ANNOTATE("ndkp.string_encrypt")
 
+/* Hardened CSE 低频完整性检查点。需 -irobf-cse -irobf-cse-hardened，且当前
+ * 翻译单元有受保护常量。入口重算本 SO 的 RX 摘要并认证缓存输入；不清除业务
+ * 明文，不重读 APK，不检查其他 SO。禁止内联以保留检查边界；不用于信号处理器。 */
+#if defined(__clang__)
+#  define NDKP_CSE_RECHECK NDKP_ANNOTATE("ndkp.cse_recheck") __attribute__((noinline))
+#else
+#  define NDKP_CSE_RECHECK
+#endif
+
 /* 字符串加密的包名绑定（强化）。标签 ndkp.str_bind：模块内任一函数带此注解即
  * 等效开启 bind 模式——把运行期 /proc/self/cmdline 的哈希折进 pepper，使 .so 仅在
  * 目标 App 内解出正确明文（错包名 → 乱码，非分支、无可 patch 的检查）。bind 蕴含
@@ -41,7 +50,8 @@
 /* 代码完整性自校验（VMP 字节码）。标签 ndkp.selfcheck 为 opt-in 标记，实际由开关
  * -mllvm -irobf-selfcheck 控制（与其它注解一样，注解不替代开关）。自校验只对 VMP
  * 产出的每函数字节码 blob 生效，故须同时开启 -mllvm -irobf-vmp（无被虚拟化函数则
- * 自校验自动 no-op）。加载期比对字节码哈希，检测到篡改即终止进程。 */
+ * 自校验自动 no-op）。加载期比对字节码哈希，检测到篡改即终止进程。
+ * 可再加 -mllvm -irobf-selfcheck-entry，在每次 VM 入口复验当前函数的字节码。 */
 #define NDKP_SELFCHECK NDKP_ANNOTATE("ndkp.selfcheck")
 
 #endif /* NDKP_H */

@@ -58,6 +58,10 @@ NDKP_STR_ENCRYPT void secret() { const char* k = "token"; /* ... */ }
 
 Android arm64 可显式增加 `-irobf-cse-hardened`，使用 ChaCha20-Poly1305、加密元数据/诱饵、代码哈希与 build_nonce 绑定及双路径输入验证。此模式需独立运行时和链接后封装；接入步骤见 [CSE v1 文档](./runtime/CSE_HARDENED.md)，两 major 的 Windows 构建及 arm64 真机结果见 [验证记录](./tests/cse-hardened/VALIDATION.md)。
 
+p7 可进一步在低频敏感入口使用 `NDKP_CSE_RECHECK` 复验本 SO 代码、模块描述表及缓存，
+并用 `-irobf-selfcheck-entry` 在每次 VM 入口复验当前字节码。两项均需显式启用，
+不改变默认字符串生命周期；适用边界和回归命令见上述 CSE 文档与 [VMP 测试说明](./tests/vmp/README.md)。
+
 ## 构建流程
 
 - 自动：`discover.yml` 每日 03:17 UTC 检查，发现新版本后并行构建各 Host；全部通过后聚合为一次不可变 Release。
