@@ -4,7 +4,7 @@
 
 ## 接入
 
-将 `runtime/ndkp_cse_runtime.cpp` 作为 C++17 object 单独编译，关闭混淆、LTO 和异常；与业务 `.so` 链接。保留同目录的 `cse_crypto.h`、`sha256.h`、`apkcert.h`、`apkcert_io.h`。使用 C++ 链接器并链接 libc++ 和 libdl；运行时只提供 hidden helper，不增加公开导出。
+将 `runtime/ndkp_cse_runtime.cpp` 作为 C++17 object 单独编译，关闭混淆、LTO 和异常；与业务 `.so` 链接。保留同目录的 `cse_crypto.h`、`cse_region.h`、`sha256.h`、`apkcert.h`、`apkcert_io.h`。使用 C++ 链接器并链接 libc++ 和 libdl；运行时只提供 hidden helper，不增加公开导出。
 
 ```cmake
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -49,7 +49,7 @@ python scripts/seal_cse.py --input sealed.so --verify \
 
 ## 数据与运行时行为
 
-每个有字符串的 LLVM 模块保留一个版本化数据块。256 字节头存模块标识、seed 分片、构建 nonce、状态、记录总数及封装校验所需摘要；其后是 `[capacity:u32, nonce:12, tag:16, ciphertext:capacity]`。全部整数为小端。每条记录的真实字节长度、UTF-8/UTF-16 标记、序号和字符串内容均在密文内，容量按至少 32 字节的二次幂桶填充，最大 16 MiB。业务缓冲区同样按桶分配，解密入口仅传容量，认证后从密文元数据读取真实长度。字符标记 1 表示 8-bit 字节串（不验证其为 UTF-8），2 表示 UTF-16LE/16-bit 元素；沿用旧 CSE 对无 NUL 字节及 16-bit 常量数组的支持，不强制字符串终止符。
+每个有字符串的 LLVM 模块保留一个版本化数据块。256 字节头存模块标识、seed 分片、构建 nonce、状态、记录总数及封装校验所需摘要；其后是 `[capacity:u32, nonce:12, tag:16, ciphertext:capacity]`。全部整数为小端。每条记录的真实字节长度、UTF-8/UTF-16 标记、序号和字符串内容均在密文内，容量按至少 32 字节的二次幂桶填充，最大 16 MiB。业务缓冲区同样按桶分配，解密入口只传输出、模块描述和 region 三个指针；模块描述保存 blob/cache/region 表及总长和记录数，region 保存偏移、独立输出容量和编码。记录序号由 region 在表中的位置校验，不再作为包装函数参数传递。认证后从密文元数据读取真实长度。字符标记 1 表示 8-bit 字节串（不验证其为 UTF-8），2 表示 UTF-16LE/16-bit 元素；沿用旧 CSE 对无 NUL 字节及 16-bit 常量数组的支持，不强制字符串终止符。
 
 AAD 绑定模块标识、格式版本、绑定开关、记录序号、容量、数据块总长和记录数。96-bit nonce 为零高部与模块内唯一的 32-bit 序号。每个模块使用独立随机 seed，封装时为同一 ELF 的所有模块生成一个 256-bit build_nonce。每模块增加一条认证有效、无业务引用的假字符串记录，连同整个数据块保留到最终链接。
 
@@ -59,13 +59,16 @@ AAD 绑定模块标识、格式版本、绑定开关、记录序号、容量、�
 
 运行时通过 `dl_iterate_phdr` 定位数据块所属 ELF，并以 volatile 读取实际映射代码计算摘要；不使用头内的期望摘要来派生密钥。每模块以原子 once 缓存实际摘要，每条字符串沿用原子 once 发布。包名及证书输入在首次解密该模块时读取并交叉验证；与实际代码摘要一起缓存这些公开输入摘要，派生密钥不缓存。验证成功后才复制到静态存储期业务缓冲区；临时明文和派生密钥清零。
 
-Android arm64 raw I/O 使用内联 `svc` 的 openat/read/pread64/fstat/getdents64/close。包名对比 libc 与 raw 独立读取；证书解析共享边界检查，分别通过两种后端定位所属 APK，比较库映射、APK 文件身份和证书摘要，保留 base/split 及两类库加载方式。读取错误、来源歧义、不一致、未封装或认证失败均输出通用错误并以 raw `exit_group(127)` 终止进程。
+region 表不含重定位，放入 `.text.ndkp.cse.regions`，由上述代码摘要认证；运行时拒绝表未完整落入本库可执行文件字节的布局。含绝对指针的模块表保留在数据段，每模块生成一个共享入口，用 volatile 读取并与代码中的 blob/cache/regions 引用、总长和记录数核对，再传递已核对字段的局部快照。这样既防止模块基址重定向，也避免核对后再次读取被改写的描述表。每串包装函数仍只传指针，不传容量或序号整数。
+
+Android arm64 raw I/O 使用内联 `svc` 的 openat/read/pread64/fstat/getdents64/close。包名对比 libc 与 raw 独立读取；证书解析共享边界检查，分别通过两种后端定位所属 APK，比较库映射、APK 文件身份和证书摘要，保留 base/split 及两类库加载方式。读取错误、来源歧义、不一致、未封装或认证失败均静默以 raw `exit_group(127)` 终止进程，不生成固定诊断字符串。
 
 ## 验证与边界
 
 ```bash
 python tests/cse-hardened/test_seal_cse.py
 python tests/cse-hardened/device_test.py --ndk "$NDK" --serial "$SERIAL"
+python tests/cse-hardened/descriptor_test.py --ndk "$NDK" --serial "$SERIAL"
 python tests/cert-bind/device_roundtrip.py --hardened \
   --ndk "$NDK" --build-tools "$BUILD_TOOLS" --android-jar "$ANDROID_JAR" \
   --java-home "$JAVA_HOME" --serial "$SERIAL"
@@ -76,3 +79,7 @@ python tests/cert-bind/device_roundtrip.py --hardened \
 本模式增加篡改、跨构建密文替换和单路径 libc 输入伪造的成本。build_nonce 公开，两种本地读取路径不是独立可信根；任意同进程修改仍可攻击解析、派生、检查或结果。代码摘要只在模块首次解密时计算，之后的修改不由该缓存检测。未访问记录的 tag 在访问时才校验；封装工具的 `--verify` 会认证全部记录。
 
 认证有效的诱饵不能保证抵抗可读性判据，业务缓冲区和引用关系仍可能透露长度范围。明文保留静态存储期，AEAD 不阻止解密后的内存读取。设备与性能结果见 [验证记录](../tests/cse-hardened/VALIDATION.md)。
+
+## 内部 ABI 更新
+
+`ndkp_cse_decode_region_v1` 替代旧八参数 `ndkp_cse_decode_v1`。更新编译器时必须同步运行时，并重新编译业务对象；新旧对象错误混用会在链接阶段失败。CSE v1 文件格式和封装算法保持不变。此入口只供编译器生成的模块检查入口调用；手写调用者不能把未经核对的模块表作为可信输入。模块字段检查、region 表的代码摘要绑定和认证后元数据检查共同约束输出容量与记录身份。代码摘要仍只在首次解密模块时计算，后续任意内存改写不在该缓存的检测范围内。

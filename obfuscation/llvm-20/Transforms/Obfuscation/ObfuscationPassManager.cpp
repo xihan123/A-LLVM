@@ -413,7 +413,7 @@ struct ObfuscationPassManager : public ModulePass {
       if (!T.isAndroid() || T.getArch() != Triple::aarch64)
         report_fatal_error("-irobf-cse-hardened requires Android arm64");
     }
-    if (Function *Helper = M.getFunction("ndkp_cse_decode_v1"))
+    if (Function *Helper = M.getFunction("ndkp_cse_decode_region_v1"))
       if (!Helper->isDeclaration())
         report_fatal_error("compile ndkp_cse_runtime.cpp separately without "
                            "obfuscation flags and with -fno-lto");

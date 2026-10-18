@@ -33,7 +33,7 @@ struct Posix {
 
 #if defined(__aarch64__) && defined(__ANDROID__)
 struct Raw {
-  static long call(long number, long a = 0, long b = 0, long c = 0,
+  static inline __attribute__((always_inline)) long call(long number, long a = 0, long b = 0, long c = 0,
                    long d = 0, long e = 0, long f = 0) {
     register long x0 asm("x0") = a;
     register long x1 asm("x1") = b;

@@ -228,8 +228,12 @@ namespace {
 		bool UseHardened = false;
 		GlobalVariable *HardenedBlob = nullptr;
 		GlobalVariable *HardenedCache = nullptr;
+		GlobalVariable *HardenedRegions = nullptr;
+		GlobalVariable *HardenedModule = nullptr;
+		Function *HardenedDecode = nullptr;
 		uint32_t HardenedSize = 0;
 		void buildHardenedTable(Module &M);
+		Function *buildHardenedModuleDecode(Module &M);
 		Function *buildHardenedDecrypt(Module &M, const CSPEntry *Entry);
 		bool UsePerKey = false;   ///< ChaCha8 派生密钥（不内联存储密钥）
 		bool UseBind = false;     ///< 把运行期包名哈希折进 pepper（蕴含 UsePerKey）
@@ -1291,6 +1295,11 @@ Function *StringEncryption::buildChaChaDecodeFunc(Module &M) {
 // The sealer rewrites only this retained data blob, never code or relocations.
 void StringEncryption::buildHardenedTable(Module &M) {
   using namespace ndkp_cse;
+  LLVMContext &Ctx = M.getContext();
+  Type *I32 = Type::getInt32Ty(Ctx), *Ptr = PointerType::get(Ctx, 0);
+  // Layout is shared with runtime/cse_region.h; ordinal is the array position.
+  StructType *RegionTy = StructType::get(Ctx, {I32, I32, I32});
+  std::vector<Constant *> Regions;
   std::vector<uint8_t> Blob(HeaderSize, 0);
   std::copy(Magic, Magic + 8, Blob.begin());
   store32(Blob.data() + 16, (UseBind ? 1 : 0) | (UseCertBind ? 2 : 0));
@@ -1310,6 +1319,10 @@ void StringEncryption::buildHardenedTable(Module &M) {
     if (Blob.size() + 32 + Capacity > (1u << 28))
       report_fatal_error("hardened CSE module exceeds 256 MiB");
     const uint32_t Offset = uint32_t(Blob.size());
+    assert(Id == Regions.size() && "CSE region order");
+    Regions.push_back(ConstantStruct::get(RegionTy, {
+        ConstantInt::get(I32, Offset), ConstantInt::get(I32, Capacity - 16),
+        ConstantInt::get(I32, Encoding)}));
     Blob.resize(Blob.size() + 32 + Capacity, 0);
     uint8_t *Record = Blob.data() + Offset;
     store32(Record, Capacity); store32(Record + 12, Id);
@@ -1355,25 +1368,79 @@ void StringEncryption::buildHardenedTable(Module &M) {
       Constant::getNullValue(CacheTy), "ndkp_cse_v1_cache");
   HardenedCache->setAlignment(Align(4));
   HardenedCache->setMetadata("noobf", MDNode::get(M.getContext(), {}));
+  ArrayType *RegionsTy = ArrayType::get(RegionTy, Regions.size());
+  HardenedRegions = new GlobalVariable(M, RegionsTy, true, GlobalValue::PrivateLinkage,
+      ConstantArray::get(RegionsTy, Regions), "ndkp_cse_v1_regions");
+  HardenedRegions->setAlignment(Align(4));
+  // No relocations: the existing executable-segment digest authenticates this table.
+  HardenedRegions->setSection(".text.ndkp.cse.regions");
+  HardenedRegions->setMetadata("noobf", MDNode::get(Ctx, {}));
+  StructType *ModuleTy = StructType::get(Ctx, {Ptr, Ptr, Ptr, I32, I32});
+  HardenedModule = new GlobalVariable(M, ModuleTy, true, GlobalValue::PrivateLinkage,
+      ConstantStruct::get(ModuleTy, {HardenedBlob, HardenedCache, HardenedRegions,
+          ConstantInt::get(I32, HardenedSize), ConstantInt::get(I32, Regions.size())}),
+      "ndkp_cse_v1_module");
+  HardenedModule->setAlignment(Align(8));
+  HardenedModule->setMetadata("noobf", MDNode::get(Ctx, {}));
+  HardenedDecode = buildHardenedModuleDecode(M);
+}
+
+Function *StringEncryption::buildHardenedModuleDecode(Module &M) {
+  LLVMContext &Ctx = M.getContext();
+  Type *Ptr = PointerType::get(Ctx, 0);
+  auto *ModuleTy = cast<StructType>(HardenedModule->getValueType());
+  auto *Expected = cast<ConstantStruct>(HardenedModule->getInitializer());
+  Function *F = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), {Ptr, Ptr}, false),
+      GlobalValue::PrivateLinkage, "ndkp_cse_module_decode", &M);
+  F->addFnAttr(Attribute::NoInline);
+  F->setMetadata("noobf", MDNode::get(Ctx, {}));
+  FunctionCallee Decode = M.getOrInsertFunction("ndkp_cse_decode_region_v1",
+      FunctionType::get(Type::getVoidTy(Ctx), {Ptr, Ptr, Ptr}, false));
+  if (auto *Helper = dyn_cast<Function>(Decode.getCallee()))
+    Helper->setVisibility(GlobalValue::HiddenVisibility);
+  BasicBlock *Enter = BasicBlock::Create(Ctx, "entry", F);
+  BasicBlock *Body = BasicBlock::Create(Ctx, "decode", F);
+  BasicBlock *Fail = BasicBlock::Create(Ctx, "reject", F);
+  IRBuilder<> B(Enter);
+  Value *Valid = B.getTrue();
+  Value *Snapshot = PoisonValue::get(ModuleTy);
+  // Absolute pointers need relocations, so check the module against code references.
+  // Volatile loads keep these checks intact even under full/thin LTO.
+  for (unsigned I = 0; I < ModuleTy->getNumElements(); ++I) {
+    auto *Field = B.CreateLoad(ModuleTy->getElementType(I),
+        B.CreateStructGEP(ModuleTy, HardenedModule, I));
+    Field->setVolatile(true);
+    Valid = B.CreateAnd(Valid, B.CreateICmpEQ(Field, Expected->getOperand(I)));
+    Snapshot = B.CreateInsertValue(Snapshot, Field, I);
+  }
+  B.CreateCondBr(Valid, Body, Fail);
+  B.SetInsertPoint(Body);
+  // Use precisely the checked values; do not reread a mutable descriptor in the runtime.
+  Value *LocalModule = B.CreateAlloca(ModuleTy);
+  B.CreateStore(Snapshot, LocalModule);
+  B.CreateCall(Decode, {F->getArg(0), LocalModule, F->getArg(1)});
+  B.CreateRetVoid();
+  B.SetInsertPoint(Fail);
+  Value *Null = ConstantPointerNull::get(cast<PointerType>(Ptr));
+  B.CreateCall(Decode, {F->getArg(0), Null, Null});
+  B.CreateUnreachable();
+  return F;
 }
 
 Function *StringEncryption::buildHardenedDecrypt(Module &M, const CSPEntry *Entry) {
   LLVMContext &Ctx = M.getContext();
-  Type *Ptr = PointerType::get(Ctx, 0), *I32 = Type::getInt32Ty(Ctx);
+  Type *Ptr = PointerType::get(Ctx, 0);
   Function *F = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), {Ptr, Ptr}, false),
       GlobalValue::PrivateLinkage, "ndkp_decrypt_string_" + Twine::utohexstr(Entry->ID), &M);
-  FunctionCallee Decode = M.getOrInsertFunction("ndkp_cse_decode_v1",
-      FunctionType::get(Type::getVoidTy(Ctx), {Ptr, I32, I32, Ptr, I32, I32, I32, Ptr}, false));
-  if (auto *Helper = dyn_cast<Function>(Decode.getCallee()))
-    Helper->setVisibility(GlobalValue::HiddenVisibility);
+  F->setMetadata("noobf", MDNode::get(Ctx, {}));
   BasicBlock *Enter = BasicBlock::Create(Ctx, "Enter", F);
   BasicBlock *Body = BasicBlock::Create(Ctx, "Body", F);
   BasicBlock *Exit = BasicBlock::Create(Ctx, "Exit", F);
   IRBuilder<> B(Enter); emitOnceGuard(B, Entry->DecStatus, Body, Exit);
   B.SetInsertPoint(Body);
-  uint32_t Capacity = hardenedCapacity(Entry->IsUTF16 ? Entry->Data16.size() * 2 : Entry->Data.size()) - 16;
-  B.CreateCall(Decode, {F->getArg(0), B.getInt32(Capacity), B.getInt32(Entry->IsUTF16 ? 2 : 1),
-      HardenedBlob, B.getInt32(HardenedSize), B.getInt32(Entry->Offset), B.getInt32(Entry->ID), HardenedCache});
+  Value *Region = B.CreateInBoundsGEP(HardenedRegions->getValueType(), HardenedRegions,
+      {B.getInt32(0), B.getInt32(Entry->ID)});
+  B.CreateCall(HardenedDecode, {F->getArg(0), Region});
   emitOncePublish(B, Entry->DecStatus); B.CreateBr(Exit);
   B.SetInsertPoint(Exit); B.CreateRetVoid();
   return F;
