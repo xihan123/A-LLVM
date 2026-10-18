@@ -73,6 +73,7 @@ Transforms/Obfuscation/
 | `-irobf` | 总开关 |
 | `-irobf-cse` | 字符串加密 |
 | `-irobf-cse-perkey` | 字符串加密强化：per-string 密钥由隐藏 pepper（分片存储）+ 串 id 经 ChaCha8 派生，密文表不再内联密钥 |
+| `-irobf-cse-hardened` | Android arm64 专用的 CSE v1：ChaCha20-Poly1305、代码哈希及 build_nonce 绑定、加密元数据和诱饵；要求 `-irobf-cse`，必须链接独立运行时并在链接后封装，见 [接入说明](../runtime/CSE_HARDENED.md) |
 | `-irobf-cse-bind` | 字符串加密强化：把运行期包名（`/proc/self/cmdline`，截到首个 `:` 前）哈希折进 pepper，`.so` 仅在目标 App 内解出正确明文（错包名→乱码，非分支）。蕴含 `-irobf-cse-perkey`；也可用 `NDKP_STR_BIND` 注解，标签 `ndkp.str_bind` |
 | `-irobf-cse-bind-package=` | `-irobf-cse-bind` 的期望包名（如 `com.example.app`；若误带 `:proc` 后缀会被自动截断）；bind 开启但缺此项则构建失败（fail-closed） |
 
@@ -121,7 +122,7 @@ AArch64 后端混淆和对应的 Driver 参数尚未实现。
 
 只校验 VMP（`-irobf-vmp`）产出的每函数字节码 blob（`gv_code_seg_<fn>`）。该 blob 是编译期已知的常量字节（ChaCha 加密、无指针/无重定位、段 `.AProtect.data`），运行期解释器只读不写，故其内存字节恒等于编译期密文。
 
-- Pass 在**编译期**直接算出各 blob 的 FNV-1a64 并内嵌，注入一个 ELF 构造器（`ndkp_selfcheck_verify`，`llvm.global_ctors` 优先级 101）加载期用 **volatile 读**重算比对（volatile 防止优化器对已知常量把校验折成恒真、删掉），不符即调用与检测类 pass 相同的 report/kill（`getpid`+`kill(SIGKILL)`+`brk`）终止（**主响应**）。
+- Pass 在**编译期**直接算出各 blob 的 FNV-1a64 并内嵌，注入一个 ELF 构造器（`ndkp_selfcheck_verify`，`llvm.global_ctors` 优先级 101）加载期用 **volatile 读**重算比对（volatile 防止优化器对已知常量把校验折成恒真、删掉），不符即调用与检测类 pass 相同的 report/kill（裸 syscall `getpid`+`kill(SIGKILL)`，返回时循环调用 `exit_group(127)`）终止（**主响应**）。
 - **纵深防御层（附，已真机验证生效）**：把各 blob 运行期哈希 XOR 累加进 `ndkp_selfcheck_runtime_acc`，并把 VMP 入口桩的密钥存改写为 `store (realkey ^ expected_acc) ^ load(runtime_acc)`（未篡改 `runtime_acc==expected_acc` 抵消回 `realkey`）。篡改任一 blob 字节 → `runtime_acc≠expected_acc` → key 错 → VMP 解释器 ChaCha 解出乱码 opcode → 崩溃。**这是真正的密码学绑定、非分支门禁**：即便 ① 的 kill 被 patch，篡改仍经此层破坏执行（真机：中和 kill 后未篡改正确、篡改即崩溃）。前提是 VMP 目标真正经解释器执行，由 `VMProtectPreparePass` 保证（见下）。
 - 因此**无需链接后回填工具，也无需重定位归一化** —— 这是选「VMP 字节码」为校验对象（而非整个 `.text`）的原因。构造器注入使其在 `.so`（无 `main`）上也生效。
 - **依赖 `-irobf-vmp`**：无被虚拟化函数即无 blob，本开关 no-op。`NDKP_SELFCHECK` 注解为 opt-in 标记，实际由开关控制。

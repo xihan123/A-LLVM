@@ -335,6 +335,10 @@ jobs:
       if: ${{ inputs.mode == 'build' }}
       run: python scripts/build_snapshot.py run --phase test-fingerprint -- "$BASH" tests/fingerprint-scrub/run.sh "$NDK_DIR" "$HOST"
 
+    - name: Hardened CSE 编链及封装测试（build 模式）
+      if: ${{ inputs.mode == 'build' }}
+      run: python scripts/build_snapshot.py run --phase test-cse-hardened -- python tests/cse-hardened/device_test.py --ndk "$NDK_DIR" --compile-only
+
     - name: 代码完整性自校验测试（build 模式）
       if: ${{ inputs.mode == 'build' }}
       run: python scripts/build_snapshot.py run --phase test-self-check -- "$BASH" tests/anti-tamper/run.sh "$NDK_DIR" "$HOST"

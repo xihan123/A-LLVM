@@ -177,7 +177,7 @@ ObfOpt ObfuscationOptions::toObfuscate(const std::shared_ptr<ObfOpt> &option,
   const auto attrDisable = "-" + option->attributeName();
   const auto attrLevel = "^" + option->attributeName();
   ObfOpt     result = option->none();
-  if (f->isDeclaration()) {
+  if (f->isDeclaration() || f->getMetadata("noobf")) {
     return result;
   }
 

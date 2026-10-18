@@ -38,7 +38,7 @@ CSE="-mllvm -irobf-cse"
 "$CLANG" $TGT -mllvm -irobf $SELF -o "$OUT/self_novmp.so" "$SRC"
 "$CLANG" $TGT $VMP $SELF $CSE -o "$OUT/vmp_self_cse.so" "$SRC"
 
-has_sym() { "$NM" "$1" 2>/dev/null | grep -q "$2"; }
+has_sym() { "$NM" "$1" 2>/dev/null | grep "$2" >/dev/null; }
 
 # 1) vmp+selfcheck 含自校验符号
 if has_sym "$OUT/vmp_self.so" ndkp_selfcheck_verify && \
@@ -63,7 +63,8 @@ else
 fi
 
 # 4) 构造器已注册：.init_array 存在（.so 无 main 亦生效）
-if "$READELF" -S "$OUT/vmp_self.so" | grep -q '\.init_array'; then
+# Drain the producer: grep -q can cause a Windows broken-pipe exit under pipefail.
+if "$READELF" -S "$OUT/vmp_self.so" | grep '\.init_array' >/dev/null; then
   echo "[ok]   vmp+selfcheck 含 .init_array（构造器已注册，加载期即校验）"
 else
   echo "[FAIL] vmp+selfcheck 缺 .init_array（构造器未注册）"; fail=1
