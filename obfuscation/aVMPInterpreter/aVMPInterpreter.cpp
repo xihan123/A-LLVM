@@ -9,6 +9,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#if defined(__linux__)
+#include "../../runtime/raw_syscall.h"
+#endif
 #include "aVMPInterpreter.h"
 #include "aVMPInterpreterState.h"
 #include "aVMPInterpreterTrace.h"
@@ -26,9 +29,13 @@ extern void _Unwind_Resume(void *exc) __attribute__((noreturn));
 
 static __attribute__((noreturn)) void vmp_report_and_kill(void) {
 	/* 反篡改响应：直接终止进程，不打印任何横幅（去品牌，NDKP）。 */
+#if defined(__linux__)
+	ndkp_raw_terminate();
+#else
 	kill(getpid(), SIGKILL);
 	__builtin_trap();
 	__builtin_unreachable();
+#endif
 }
 
 __attribute__((noreturn)) void vmp_resume_unwind(void *exc) {

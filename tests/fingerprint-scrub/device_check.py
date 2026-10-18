@@ -36,10 +36,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ndk", type=Path, required=True)
     parser.add_argument("--host", required=True)
+    parser.add_argument("--clang", type=Path, help="use a local Clang with the supplied NDK sysroot")
     parser.add_argument("--serial", required=True)
     args = parser.parse_args()
     ext = ".exe" if os.name == "nt" else ""
-    clang = args.ndk / "toolchains/llvm/prebuilt" / args.host / ("bin/clang" + ext)
+    prebuilt = args.ndk.resolve() / "toolchains/llvm/prebuilt" / args.host
+    compiler = args.clang.resolve() if args.clang else prebuilt / ("bin/clang" + ext)
+    resource = next((prebuilt / "lib/clang").iterdir())
+    clang = [compiler, "--sysroot=" + str(prebuilt / "sysroot"),
+             "-resource-dir", resource, "-B" + str(prebuilt / "bin")]
     remote = "/data/local/tmp/ndkp-fingerprint-" + uuid.uuid4().hex
     def checked(*parts):
         result = run(*parts)
@@ -52,28 +57,36 @@ def main():
         source.write_text('#include <stdio.h>\nint guarded(int x) { return x*7+5; }\n'
                           'int main(void) { int ok=guarded(7)==54; puts(ok?"OK":"BAD"); return !ok; }\n')
         try:
+            hostile = Path(__file__).resolve().parents[1] / "anti-tamper/hostile_libc.c"
+            checked(*clang, "--target=aarch64-linux-android26", "-O2", "-c", hostile, "-o", out / "hostile.o")
             for debug in (False, True):
                 flags = ["--target=aarch64-linux-android26", "-O2", "-mllvm", "-irobf-vmp",
                          "-mllvm", "-irobf-vm_functions=guarded", "-mllvm", "-irobf-selfcheck"]
                 if debug:
                     flags += ["-mllvm", "-irobf-debug"]
-                checked(clang, *flags, "-c", source, "-o", out / "check.o")
-                checked(clang, "--target=aarch64-linux-android26", "--driver-mode=g++", "-static-libstdc++",
-                        out / "check.o", "-o", out / "check")
+                checked(*clang, *flags, "-c", source, "-o", out / "check.o")
+                checked(*clang, "--target=aarch64-linux-android26", "--driver-mode=g++", "-static-libstdc++",
+                        out / "check.o", out / "hostile.o", "-Wl,--wrap=getpid,--wrap=kill,--wrap=syscall,--wrap=write",
+                        "-o", out / "check")
                 clean = (out / "check").read_bytes()
                 for modified in (False, True):
                     (out / "test").write_bytes(tamper(clean) if modified else clean)
                     checked("adb", "-s", args.serial, "push", out / "test", remote)
                     checked("adb", "-s", args.serial, "shell", "chmod", "700", remote)
-                    result = run("adb", "-s", args.serial, "shell", "timeout", "10", remote)
-                    output = result.stdout + result.stderr
-                    if modified:
-                        assert result.returncode == 137, (debug, result.returncode, output)
-                        assert (b"A-Protector" in output) == debug, output
-                        assert (b"Protection v1.2.0" in output) == debug, output
-                    else:
-                        assert result.returncode == 0 and b"OK" in output, output
-                    print(f"[ok] debug={debug} tampered={modified} exit={result.returncode}", flush=True)
+                    for deny in (False, True):
+                        command = ["timeout", "10", remote]
+                        if deny:
+                            command = ["env", "NDKP_TEST_DENY_KILL=1", *command]
+                        result = run("adb", "-s", args.serial, "shell", *command)
+                        output = result.stdout + result.stderr
+                        if modified:
+                            assert result.returncode == (127 if deny else 137), (debug, deny, result.returncode, output)
+                            assert (b"A-Protector" in output) == debug, output
+                            assert (b"Protection v1.2.0" in output) == debug, output
+                        else:
+                            assert result.returncode == 0 and b"OK" in output, output
+                        print(f"[ok] debug={debug} tampered={modified} deny_kill={deny} exit={result.returncode}", flush=True)
+
         finally:
             checked("adb", "-s", args.serial, "shell", "rm", "-f", remote)
 
