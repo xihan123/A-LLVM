@@ -17,9 +17,11 @@
 产出并覆盖 `obfuscation/llvm-{20,21}/include/aVMP/vm.h`（垂直切片只需 aarch64）。
 
 ## vm.h 生成状态（已本地重生成，去品牌）
-仓库提交的 `vm.h` 已用本目录**去品牌后的解释器源**、经 NDK r29 的 clang 21
+仓库提交的 `vm.h` 已用本目录解释器源码、经本地 LLVM 20 编译器
 （`--target=aarch64-linux-android21 -frtti -fexceptions -O2 -fno-inline -emit-llvm`）
-本地重新生成（157904 字节 bitcode）。已确认 "A-Protector" 横幅**不在** bitcode 内；
+本地重新生成（p9，158212 字节 bitcode），同时供 LLVM 20/21 使用。
+使用 LLVM 20 保证旧版 bitcode reader 兼容；生成参数和验证见
+[p9 记录](../../docs/vmp-call-frames-p9.md)。"A-Protector" 横幅**不在** bitcode 内；
 入口 `vm_interpreter` / `vmp_resume_unwind` 齐全，VM 状态全局（`vm_block_chain_state`
 等）为 extern、由 pass 创建。仅 aarch64；其余 ABI 待 Slice 3 用 `gen_vm_bitcode.sh` 生成。
 

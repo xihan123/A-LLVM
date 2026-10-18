@@ -42,3 +42,23 @@ __attribute__((noinline)) uint64_t global_tls(uint32_t *a, uint32_t *b, uint32_t
 __attribute__((noinline)) uint64_t indexed_records(const struct Record *records, int64_t i, int j) {
   return ((uint64_t)records[i].value << 32) + records[i].grid[1][j] + *records[i].pointer;
 }
+
+#ifndef REFERENCE
+typedef int (*callback_fn)(int);
+extern int external_callback(int);
+__attribute__((noinline)) int callback_identity(int n) { return n + 17; }
+int callback_alias(int) __attribute__((alias("callback_identity")));
+
+// 函数和别名曾被编码为数据槽 0，返回与保存回调地址会变成空指针。
+__attribute__((noinline)) callback_fn pick_callback(unsigned n, callback_fn *out) {
+  callback_fn selected;
+  switch (n) {
+    case 0: selected = callback_identity; break;
+    case 1: selected = external_callback; break;
+    case 2: selected = callback_alias; break;
+    default: selected = 0; break;
+  }
+  *out = selected;
+  return selected;
+}
+#endif

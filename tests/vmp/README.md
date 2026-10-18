@@ -1,5 +1,57 @@
 # VMP 回归测试
 
+## p9 调用帧与原生异常
+
+VMP 每次调用使用独立的栈上数据帧，TLS 仅保存该函数当前帧指针；退出时恢复上一帧指针。
+原生分发器不再通过整帧快照回滚内存，因此通过指针写入 caller 局部对象、别名和 `sret`
+缓冲区的结果会保留。同函数递归和 VM → native → VM 重入也使用独立对象存储。
+
+同时修复原生 C++ 异常穿过 VM 的路径：保存异常、停止当前 VM 执行、恢复控制帧和数据帧指针，
+再重抛原异常。正常返回和异常返回都释放当前帧。没有增加函数内部 `try/catch` 的虚拟化支持：
+带 personality 的函数仍被 eligibility 检查排除。
+
+```bash
+python tests/vmp/call_frames.py --ndk "$NDK" --serial "$SERIAL"
+```
+
+覆盖 O0/O2 × 普通/VMP/VMP+SelfCheck+Entry：局部 int 和 void**、直接 native/VM 调用、
+外部缓冲区、别名与邻接字段、递归、回调重入、结构体返回、嵌套异常、异常对象释放和八线程并发。
+另在预热 TLS 后注入可执行文件的 malloc 失败，验证 native 错误出参与无堆快照的 VM 递归。
+IR 门禁要求真实字节码、TLS 帧指针、无分发器快照 malloc/free、入口复验，以及未被优化掉的
+VM callee/递归调用。支持 `--clang` 和 `--work-dir`；不传序列号仅编链，CI 不宣称设备通过。
+`--semantic-only` 用于演示旧编译器失败，跳过新帧结构断言。
+
+每次入口增加与 VM 数据帧大小成正比的栈空间和清零成本；大帧及深递归需单独测量。
+不保证跨 VM 的 `longjmp`、线程取消或异步信号重入；原有向量、动态 alloca、过度对齐等
+IR 支持边界未在此扩展。详情见 [p9 验证记录](../../docs/vmp-call-frames-p9.md)。
+
+## p8 定长内存操作
+
+显式启用 `-mllvm -irobf-vmp-memops` 后，已选中的 VMP 函数内、长度不超过 64 字节的
+标准 `memcmp` / `memcpy` 和非 volatile `llvm.memcpy` 在字节码生成前展开为逐字节标量操作。
+比较保留首个不同的无符号字节所决定的返回值符号，复制保留返回指针；长度为零时不访问内存。
+动态长度、超限长度、自定义实现、`nobuiltin`、volatile、特殊地址空间及特殊调用约定边界
+（musttail、operand bundle）不在本轮转换范围。此开关单独使用不选择函数，也不改变无 VMP 构建。
+先执行 VMP eligibility 检查，被拒绝的函数不会被此开关改写。
+实际展开后若无法完成 VMP 翻译（例如超过指令数上限），编译明确失败，禁止输出未保护的展开代码。
+
+对象中的 `ndkp_vmp_memops_<函数>_cmp<N>_copy<N>` 是实际展开操作的构建收据，必须与该函数
+的 `gv_code_seg_*` 同时检查；它不代表整函数无原生调用，也不提供密码学认证。分发函数仍可包含
+VM 帧保存/恢复和真实外部调用。最终 strip 会移除这些本地符号。
+
+```bash
+python tests/vmp/memory_ops.py --ndk "$NDK" --serial "$SERIAL"
+```
+
+支持 `--clang` 核验另一 LLVM major 的本地编译器；不传 `--serial` 仅验证编译和 IR。
+覆盖 O0/O2、无符号比较、首差优先、未对齐指针、保护页边界、零长度、返回指针与未选中路径。
+CI 执行编链验证，设备结果单独记录。
+
+p8 同时修复 VMP 将函数/别名地址错误编码为数据槽零，以及 O0 入口残留 `optnone` 与
+`alwaysinline` 冲突的问题。`roundtrip.sh` 的全局地址测试包含回调地址的返回、保存和调用。
+
+## 既有覆盖
+
 测试将受保护函数与独立编译的原生实现比较，覆盖：
 
 - 全局整数、指针和 TLS 的地址槽。

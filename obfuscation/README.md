@@ -87,6 +87,7 @@ Transforms/Obfuscation/
 | `-irobf-icall` | 间接调用 |
 | `-irobf-indgv` | 间接全局变量访问 |
 | `-irobf-vmp` | 函数级虚拟化（VMP） |
+| `-irobf-vmp-memops` | 将选中 VMP 函数内不超过 64 字节的标准定长比较/复制放入 VM；默认关闭，边界见 [回归说明](../tests/vmp/README.md) |
 | `-irobf-vm_functions=` | 指定 VMP 保护的函数，分号分隔（也可用 `NDKP_VMP` 注解，标签 `ndkp.vmp`） |
 | `-irobf-vmp-noinline` | VMP 下强制禁用内联 |
 | `-irobf-idadetect` | 调试器检测注入 |
@@ -115,7 +116,7 @@ Transforms/Obfuscation/
 
 > **关于 `.comment` 的彻底清零**：编译期只能去掉**本模块**的贡献。最终 `.so` 的 `.comment` 还来自官方 NDK 的 CRT/libc++/compiler-rt 目标与 lld，工具链把链接后的 `.so` 直接交给用户、没有 link 后处理入口，故无法在 clang 内清零。需要时在 link 后自行执行 `llvm-strip -R .comment <输出.so>`（该工具已随 NDK 提供）。注意本项目的 clang 版本串与官方 NDK clang 相同，`.comment` **并非**混淆工具链的唯一指纹，此项为纵深防御。
 
-VMP 执行状态、每函数数据缓冲区及解释器可变缓存按线程隔离；解释器链接后统一设置 TLS，内嵌只读字节码保持共享。2026-10-15 的 Android arm64 并发、按名称选择的递归及 VM→native→VM 回调回归通过。运行语义变更须重新跑 `bash tests/vmp/roundtrip.sh <ndk> <host> <adb-serial>`（见 [验证记录](../tests/VALIDATION.md)）。即使输入为 C，VMP 产物也需用 `clang++` 链接或等效配置 libc++，因为解释器使用 C++ 异常辅助函数。检测类 pass（`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`）注入到 `main`；构建为可执行文件时生效，构建为 `.so`（无 `main`）时自动跳过。
+VMP 执行状态及解释器可变缓存按线程隔离，内嵌只读字节码保持共享。p9 起每次调用使用独立栈上数据帧，TLS 保存当前帧指针，避免嵌套调用恢复旧快照时撤销合法出参写入；原生异常在恢复帧后重抛。运行语义变更须重新跑 `bash tests/vmp/roundtrip.sh <ndk> <host> <adb-serial>` 和 `python tests/vmp/call_frames.py --ndk <ndk> --serial <adb-serial>`（见 [p9 验证与边界](../docs/vmp-call-frames-p9.md)）。即使输入为 C，VMP 产物也需用 `clang++` 链接或等效配置 libc++，因为解释器使用 C++ 异常辅助函数。检测类 pass（`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`）注入到 `main`；构建为可执行文件时生效，构建为 `.so`（无 `main`）时自动跳过。
 
 AArch64 后端混淆和对应的 Driver 参数尚未实现。
 

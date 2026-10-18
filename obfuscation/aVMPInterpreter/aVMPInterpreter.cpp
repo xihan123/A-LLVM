@@ -38,11 +38,6 @@ static __attribute__((noreturn)) void vmp_report_and_kill(void) {
 #endif
 }
 
-__attribute__((noreturn)) void vmp_resume_unwind(void *exc) {
-	_Unwind_Resume(exc);
-	__builtin_unreachable();
-}
-
 // 判断两个 type_info 是否相等
 static bool is_type_info_equal(const void *type1, const void *type2) {
 	if (type1 == type2) return true;
@@ -302,6 +297,25 @@ static int caught_exception_selector = 0;
 #include <exception>
 static std::exception_ptr current_exception_ptr;
 #endif
+
+__attribute__((noreturn)) void vmp_resume_unwind(void *exc) {
+#ifdef __cplusplus
+	// The bridge caught the native exception; it is no longer a suspended
+	// _Unwind_Resume frame. Release TLS ownership before rethrowing to the caller.
+	if (current_exception_ptr) {
+		std::exception_ptr pending = current_exception_ptr;
+		current_exception_ptr = nullptr;
+		exception_thrown = 0;
+		exception_ptr = nullptr;
+		exception_selector = 0;
+		caught_exception_ptr = nullptr;
+		caught_exception_selector = 0;
+		std::rethrow_exception(pending);
+	}
+#endif
+	_Unwind_Resume(exc);
+	__builtin_unreachable();
+}
 
 extern uint8_t vmp_debug_enabled;
 
@@ -3141,6 +3155,9 @@ void vm_interpreter() {
 				if (!vm_restore_call_frame()) {
 					return;
 				}
+				// Personality-bearing functions are excluded by VMP eligibility.
+				// A native exception must leave this VM before further bytecode runs.
+				if (exception_thrown) return;
 				EH_TRACE("[EH_VM_CALL] restored funcid=%llu restore_ip=%u exception_thrown=%u exception_ptr=%p selector=%d caught_ptr=%p caught_selector=%d opcode_state=0x%016llx vm_state=0x%016llx\n",
 				         (unsigned long long)packed_funcid,
 				         (unsigned)ip,
@@ -3181,6 +3198,7 @@ void vm_interpreter() {
 				if (!vm_restore_call_frame()) {
 					return;
 				}
+				if (exception_thrown) return;
 
 				// CallBr 的分支处理在翻译器中已经生成，这里不需要额外处理
 			}

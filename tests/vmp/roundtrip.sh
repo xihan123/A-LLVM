@@ -49,7 +49,7 @@ for opt in O0 O2; do
   for mode in plain vmp selfcheck selfcheck-entry; do
     FLAGS=()
     if [[ "$mode" != plain ]]; then
-      FLAGS=(-mllvm -irobf-vmp -mllvm '-irobf-vm_functions=global_roundtrip;global_tls;indexed_records')
+      FLAGS=(-mllvm -irobf-vmp -mllvm '-irobf-vm_functions=global_roundtrip;global_tls;indexed_records;pick_callback;callback_identity')
     fi
     if [[ "$mode" == selfcheck* ]]; then FLAGS+=(-mllvm -irobf-selfcheck); fi
     if [[ "$mode" == selfcheck-entry ]]; then FLAGS+=(-mllvm -irobf-selfcheck-entry); fi

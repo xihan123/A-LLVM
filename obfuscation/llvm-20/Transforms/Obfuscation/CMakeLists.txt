@@ -35,6 +35,7 @@ add_llvm_pass_plugin(Obfuscation
   aVMP/aVMP.cpp
   aVMP/aVMPCrypto.cpp
   aVMP/aVMPDispatcher.cpp
+  aVMP/aVMPMemoryOps.cpp
 
   DEPENDS
   intrinsics_gen

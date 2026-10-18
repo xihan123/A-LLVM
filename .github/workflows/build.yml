@@ -355,6 +355,14 @@ jobs:
       if: ${{ inputs.mode == 'build' }}
       run: python scripts/build_snapshot.py run --phase test-vmp-compile -- "$BASH" tests/vmp/roundtrip.sh "$NDK_DIR" "$HOST"
 
+    - name: VMP 定长内存操作编链（build 模式）
+      if: ${{ inputs.mode == 'build' }}
+      run: python scripts/build_snapshot.py run --phase test-vmp-memory -- python tests/vmp/memory_ops.py --ndk "$NDK_DIR"
+
+    - name: VMP 调用帧与异常样本编链（build 模式）
+      if: ${{ inputs.mode == 'build' }}
+      run: python scripts/build_snapshot.py run --phase test-vmp-call-frames -- python tests/vmp/call_frames.py --ndk "$NDK_DIR"
+
     - name: 打包
       run: |
         python scripts/build_snapshot.py run --phase package -- "$BASH" -euo pipefail <<'BUILD_STEP'

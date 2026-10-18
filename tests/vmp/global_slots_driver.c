@@ -10,6 +10,11 @@ uint64_t global_tls(uint32_t *, uint32_t *, uint32_t);
 uint64_t reference_global_tls(uint32_t *, uint32_t *, uint32_t);
 static atomic_int start;
 static int failures[8];
+typedef int (*callback_fn)(int);
+callback_fn pick_callback(unsigned, callback_fn *);
+int callback_identity(int);
+int callback_alias(int);
+int external_callback(int n) { return n - 23; }
 
 static void *worker(void *arg) {
   int index = *(int *)arg;
@@ -25,6 +30,13 @@ static void *worker(void *arg) {
 }
 
 int main(void) {
+  callback_fn expected[] = {callback_identity, external_callback, callback_alias, NULL};
+  for (unsigned i = 0; i < 4; ++i) {
+    callback_fn saved = external_callback;
+    callback_fn chosen = pick_callback(i, &saved);
+    if (chosen != expected[i] || saved != expected[i]) return 5;
+    if (chosen && chosen(123) != expected[i](123)) return 6;
+  }
   uint32_t values[3] = {7, 23, 41};
   struct Record records[3] = {0};
   for (int i = 0; i < 3; ++i) {
