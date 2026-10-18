@@ -31,8 +31,10 @@ LLVM-Patch 原工作区的 CSE v2 改动未带入；消费项目 在现有目录
 
 通过临时 Gradle init 使用全新 native 构建目录运行 `:native:updatePrebuilt`，更新预编译 SO、来源记录和绑定证书。随后通过全记录认证、来源一致性检查及 `:app:assembleDebug`；APK 内 SO 与预编译 SO 的 SHA-256 相同。
 
-- 描述表修复后的 SO 大小：971,880 字节。
-- SHA-256：`47365dfaf61d07d96bfb61e05494febef9e7aabb84df86fceb35ff1fef1095b8`。
+- dev 合并后重编的 SO 大小：969,544 字节。
+- SHA-256：`750547e4cb2845057676ae8e243ccc85ecb37a86a4db8afb9c95b8b07348634d`。
 - 导出保持 JNI/NativeGuard/native_init；CSE helper 未公开导出，固定校验失败字符串已移除。
+
+合入 dev 后使用缓存 LLVM 库再次重链接 LLVM 20/21，更新本机 LLVM 21，并在新的 native 构建目录重新编译。新产物通过完整 CSE 记录认证、源码与编译器来源核对、Debug APK 签名证书核对、SO 一致性及 ZIP/ELF 16 KiB 对齐检查。上文设备回归针对相同源码的上一轮构建，本轮随机化产物未重复执行设备回归。
 
 未安装或重启真实宿主应用，未完成 LSPosed 宿主及 16 KiB 页设备验收，未发布 Release。裸 syscall 不抵抗直接修改响应指令或内核层拦截。
