@@ -12,6 +12,31 @@ import zipfile
 from artifacts import verify_wrappers
 
 
+def literal_leaks(data, strings):
+    # Symbol names are ABI metadata, not protected JNI string constants.
+    shoff=struct.unpack_from("<Q",data,40)[0]
+    size,count=struct.unpack_from("<HH",data,58)
+    metadata=[]
+    for index in range(count):
+        header=shoff+index*size
+        if struct.unpack_from("<I",data,header+4)[0]==3:  # SHT_STRTAB
+            offset,length=struct.unpack_from("<QQ",data,header+24)
+            metadata.append((offset,offset+length))
+    leaked=[]; collisions=[]
+    diagnostic=b"DW_OP_deref_size with bad size\0"
+    for value in strings:
+        start=0
+        while (offset:=data.find(value,start))>=0:
+            start=offset+1
+            if any(begin<=offset and offset+len(value)<=end for begin,end in metadata):
+                collisions.append({"literalHex":value.hex(),"offset":offset,"reason":"ELF string table"})
+            elif value==b"size\0" and data[max(0,offset-len(diagnostic)+len(value)):offset+len(value)]==diagnostic:
+                collisions.append({"literalHex":value.hex(),"offset":offset,"reason":"libunwind diagnostic suffix"})
+            else:
+                leaked.append(value)
+    return leaked,collisions
+
+
 def inspect(generated, native, ndk, apk=None, baseline=None):
     protection=json.loads((native / "protection.json").read_text())
     library=next((native / "jniLibs/arm64-v8a").glob("*.so"))
@@ -30,7 +55,7 @@ def inspect(generated, native, ndk, apk=None, baseline=None):
             value=b"".join(struct.pack("<H",int(n)) for n in values.split(","))
             if len(value)>=8:
                 strings.add(value)
-    leaked=[s for s in strings if s in data]
+    leaked,collisions=literal_leaks(data,strings)
     assert not leaked,repr(leaked)
     tools=ndk / "toolchains/llvm/prebuilt/windows-x86_64/bin"
     symbols=subprocess.check_output([tools / "llvm-nm.exe","--dynamic","--defined-only",library],text=True)
@@ -60,7 +85,7 @@ def inspect(generated, native, ndk, apk=None, baseline=None):
         assert len(re.findall(r'^\s*indirectbr ',body,re.M))==count, name
     assert all(e["interpreter"] in protection["nativeIndirectBranches"] for e in entries)
     assert len(set(e["interpreter"] for e in entries))==len(entries)
-    result={"protection":protection,"vmEntries":entries,"checkedStringCount":len(strings),"plaintextLeaks":0,
+    result={"protection":protection,"vmEntries":entries,"checkedStringCount":len(strings),"plaintextLeaks":0,"knownLiteralCollisions":collisions,
             "exports":exports,"elf16kAligned":True,"commentSectionRemoved":True}
     if baseline:
         old=baseline.read_bytes()

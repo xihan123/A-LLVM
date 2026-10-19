@@ -59,6 +59,9 @@ def main():
                                 assert re.search(r"@gv_data_seg_" + name + r" = .*global ptr null", ir), name
                                 handler = function(ir, "vm_interpreter_callinst_dispatch_" + name)
                                 assert "@malloc(" not in handler and "@free(" not in handler, name
+                                if opt == "-O0":
+                                    assert "switch i64" in handler, name
+                                    assert "@gv_data_seg_" not in handler.split("switch i64", 1)[0], name
                         for caller, callee in (("frame_vm", "frame_write"), ("frame_sret", "frame_make"),
                                                ("frame_recursive", "frame_recursive")):
                             handler = function(ir, "vm_interpreter_callinst_dispatch_" + caller)

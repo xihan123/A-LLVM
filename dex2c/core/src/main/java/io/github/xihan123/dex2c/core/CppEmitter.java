@@ -46,13 +46,12 @@ final class CppEmitter {
             if (instruction.getOpcode() < 0 || frames[index] == null) continue;
             try { instruction(instruction, frames[index]); }
             catch (IllegalArgumentException e) { throw Selector.error(key, "instruction " + index + ": " + e.getMessage()); }
-            int op = instruction.getOpcode();
-            if (!(op >= IRETURN && op <= RETURN) && op != GOTO && op != TABLESWITCH && op != LOOKUPSWITCH)
+            if (requiresExceptionCheck(instruction))
                 line("if (env->ExceptionCheck()) goto E" + index + ";");
         }
         line("goto failed;");
         for (index = 0; index < method.instructions.size(); index++) {
-            if (method.instructions.get(index).getOpcode() < 0 || frames[index] == null) continue;
+            if (frames[index] == null || !requiresExceptionCheck(method.instructions.get(index))) continue;
             line("E" + index + ":;");
             for (TryCatchBlockNode handler : method.tryCatchBlocks) {
                 if (index >= at(handler.start) && index < at(handler.end)) {
@@ -73,6 +72,19 @@ final class CppEmitter {
         Type[] args = Type.getArgumentTypes(method.desc);
         for (int i = 0; i < args.length; i++) s.append(", ").append(ctype(args[i])).append(" a").append(i);
         return s.toString();
+    }
+    static boolean requiresExceptionCheck(AbstractInsnNode instruction) {
+        int op = instruction.getOpcode();
+        if (op < 0 || op == NOP || op == POP || op == POP2 || op == ACONST_NULL
+                || (op >= ICONST_M1 && op <= SIPUSH)
+                || (op >= ILOAD && op <= DLOAD) || (op >= ISTORE && op <= DSTORE)
+                || (op >= INEG && op <= DCMPG) || (op >= IRETURN && op <= RETURN)
+                || instruction instanceof JumpInsnNode || instruction instanceof TableSwitchInsnNode
+                || instruction instanceof LookupSwitchInsnNode) return false;
+        if (op >= IADD && op <= DREM) return op == IDIV || op == LDIV || op == IREM || op == LREM;
+        if (instruction instanceof LdcInsnNode ldc && ldc.cst instanceof Number) return false;
+        // Reference copies can allocate JNI local refs and must retain their OOM edge.
+        return true;
     }
     private static String defaultReturn(Type result) { return result.getSort() == Type.VOID ? "return;" : "return 0;"; }
     private String v(int slot, String member) { return "f->slots[" + slot + "].v." + member; }

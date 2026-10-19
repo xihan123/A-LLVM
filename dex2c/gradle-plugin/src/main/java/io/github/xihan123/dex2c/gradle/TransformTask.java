@@ -16,6 +16,7 @@ public abstract class TransformTask extends DefaultTask {
     @Classpath public abstract ListProperty<RegularFile> getInputJars();
     @Classpath public abstract ListProperty<Directory> getInputDirectories();
     @Input public abstract Property<String> getLibraryName();
+    @Input public abstract SetProperty<String> getInheritedMethods();
     @OutputDirectory public abstract DirectoryProperty getGeneratedDirectory();
     @OutputFile public abstract RegularFileProperty getOutputJar();
     @Internal public abstract RegularFileProperty getKeepRules();
@@ -23,7 +24,7 @@ public abstract class TransformTask extends DefaultTask {
         List<Path> inputs=new ArrayList<>();
         for(RegularFile file:getInputJars().get())inputs.add(file.getAsFile().toPath());
         for(Directory directory:getInputDirectories().get())inputs.add(directory.getAsFile().toPath());
-        var result=new Transformer().transform(inputs,getGeneratedDirectory().get().getAsFile().toPath(),getLibraryName().get());
+        var result=new Transformer().transform(inputs,getGeneratedDirectory().get().getAsFile().toPath(),getLibraryName().get(),getInheritedMethods().get());
         // ScopedArtifacts assigns the final output path when wiring the transform.
         Path artifact=getOutputJar().get().getAsFile().toPath();
         if(!result.classes().toAbsolutePath().equals(artifact.toAbsolutePath())) {

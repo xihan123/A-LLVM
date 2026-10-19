@@ -295,7 +295,8 @@ static int caught_exception_selector = 0;
 
 #ifdef __cplusplus
 #include <exception>
-static std::exception_ptr current_exception_ptr;
+// Register destruction with the owning thread before its TLS storage is freed.
+static thread_local std::exception_ptr current_exception_ptr;
 #endif
 
 __attribute__((noreturn)) void vmp_resume_unwind(void *exc) {
@@ -499,6 +500,7 @@ typedef struct {
 	uint64_t chain_seed;
 	uint32_t bb_offset;
 	uint32_t block_index;
+	uint64_t schedule_seed;
 	uint8_t material_valid;
 	uint8_t block_valid;
 	uint32_t key_words[8];
@@ -1095,11 +1097,8 @@ static uint32_t chacha_rotl32(uint32_t value, unsigned shift) {
 	a += b; d ^= a; d = chacha_rotl32(d, 8); \
 	c += d; b ^= c; b = chacha_rotl32(b, 7)
 
-#if defined(__clang__)
-#define VMP_RUNTIME_CRYPTO_ATTR __attribute__((used,noinline,optnone))
-#else
+// Optimize arithmetic before post CFG protection; noinline keeps helper boundaries.
 #define VMP_RUNTIME_CRYPTO_ATTR __attribute__((used,noinline))
-#endif
 
 static VMP_RUNTIME_CRYPTO_ATTR void chacha20_block(const uint32_t key_words[8], uint32_t counter,
 	                      const uint32_t nonce_words[3], uint8_t out[64]) {
@@ -1186,15 +1185,10 @@ static VMP_RUNTIME_CRYPTO_ATTR uint64_t vmp_schedule_seed(uint64_t function_key,
 	return vm_mix64(mixed);
 }
 
-static VMP_RUNTIME_CRYPTO_ATTR uint32_t vmp_schedule_index(uint64_t function_key, uint64_t payload_seed,
-	                               uint64_t chain_seed, uint32_t bb_offset,
+static VMP_RUNTIME_CRYPTO_ATTR uint32_t vmp_schedule_index(uint64_t seed,
 	                               uint32_t payload_index) {
 	uint32_t block_base = payload_index & ~63U;
-	uint32_t block_index = payload_index >> 6;
 	uint32_t lane = payload_index & 63U;
-	uint64_t seed =
-	    vmp_schedule_seed(function_key, payload_seed, chain_seed, bb_offset,
-	                      block_index);
 	uint32_t add_a = (uint32_t)(seed & 63U);
 	uint32_t add_b = (uint32_t)((seed >> 8) & 63U);
 	uint32_t mul = (uint32_t)((((seed >> 16) & 31U) << 1) | 1U);
@@ -1231,14 +1225,9 @@ static VMP_RUNTIME_CRYPTO_ATTR uint32_t vmp_schedule_index(uint64_t function_key
 	return block_base + (scheduled_lane & 63U);
 }
 
-static VMP_RUNTIME_CRYPTO_ATTR uint8_t vmp_schedule_mask(uint64_t function_key, uint64_t payload_seed,
-	                             uint64_t chain_seed, uint32_t bb_offset,
+static VMP_RUNTIME_CRYPTO_ATTR uint8_t vmp_schedule_mask(uint64_t function_key, uint64_t seed,
 	                             uint32_t payload_index) {
-	uint32_t block_index = payload_index >> 6;
 	uint32_t lane = payload_index & 63U;
-	uint64_t seed =
-	    vmp_schedule_seed(function_key, payload_seed, chain_seed, bb_offset,
-	                      block_index);
 	uint64_t mixed = seed ^
 	                 ((uint64_t)payload_index * 0x9e3779b97f4a7c15ULL) ^
 	                 rotl64(seed ^ function_key, (lane & 31U) + 1U) ^
@@ -1249,10 +1238,9 @@ static VMP_RUNTIME_CRYPTO_ATTR uint8_t vmp_schedule_mask(uint64_t function_key, 
 	                 (mixed >> 56));
 }
 
-static VMP_RUNTIME_CRYPTO_ATTR uint8_t chacha20_byte_at(uint64_t function_key, uint64_t payload_seed,
+static VMP_RUNTIME_CRYPTO_ATTR uint8_t chacha20_byte_at(vm_chacha_cache_t *c, uint64_t function_key, uint64_t payload_seed,
 	                           uint64_t chain_seed, uint32_t bb_offset,
 	                           uint32_t payload_index) {
-	vm_chacha_cache_t *c = &vm_chacha_cache;
 	// KDF 输入元组变了（新 BB / 调用返回换 seed）才重算 key/nonce —— 原本每字节都算。
 	if (!c->material_valid || c->fn_key != function_key ||
 	    c->payload_seed != payload_seed || c->chain_seed != chain_seed ||
@@ -1266,19 +1254,18 @@ static VMP_RUNTIME_CRYPTO_ATTR uint8_t chacha20_byte_at(uint64_t function_key, u
 		c->material_valid = 1;
 		c->block_valid = 0; // block 依赖 key/nonce，material 变则必须重算
 	}
-	uint32_t scheduled_index =
-	    vmp_schedule_index(function_key, payload_seed, chain_seed, bb_offset,
-	                       payload_index);
-	uint32_t block_index = scheduled_index >> 6;   // == payload_index >> 6
-	uint32_t block_offset = scheduled_index & 63U;
+	uint32_t block_index = payload_index >> 6;
 	// 同一 64B 块被相邻 64 个位置共享 —— 仅当 block_index 变化才跑整块 ChaCha20。
 	if (!c->block_valid || c->block_index != block_index) {
 		chacha20_block(c->key_words, block_index, c->nonce_words, c->block);
+		// The permutation and mask use the same tuple/block seed for all 64 lanes.
+		c->schedule_seed = vmp_schedule_seed(function_key, payload_seed, chain_seed,
+		                                     bb_offset, block_index);
 		c->block_index = block_index;
 		c->block_valid = 1;
 	}
-	uint8_t mask = vmp_schedule_mask(function_key, payload_seed, chain_seed,
-	                                 bb_offset, payload_index);
+	uint32_t block_offset = vmp_schedule_index(c->schedule_seed, payload_index) & 63U;
+	uint8_t mask = vmp_schedule_mask(function_key, c->schedule_seed, payload_index);
 	uint8_t out = c->block[block_offset] ^ mask;
 	return out;
 }
@@ -1317,7 +1304,7 @@ uint8_t get_byte_code() {
 		vm_debug_log_u32_stage("get-byte-enter", raw_index, payload_index);
 	}
 	uint8_t tmp = ((uint8_t *)code_seg_addr)[ip++];
-	tmp ^= chacha20_byte_at(vm_function_key, vm_code_state,
+	tmp ^= chacha20_byte_at(&vm_chacha_cache, vm_function_key, vm_code_state,
 	                        vm_block_chain_state, (uint32_t)current_bb_id,
 	                        payload_index);
 	if (payload_index == 0) {
@@ -2932,7 +2919,7 @@ uint8_t get_opcode() {
 	}
 	uint8_t raw_byte = ((uint8_t *)code_seg_addr)[ip++];
 	uint8_t curr_byte = raw_byte;
-	curr_byte ^= chacha20_byte_at(vm_function_key, vm_code_state,
+	curr_byte ^= chacha20_byte_at(&vm_chacha_cache, vm_function_key, vm_code_state,
 	                              vm_block_chain_state,
 	                              (uint32_t)current_bb_id, payload_index);
 	if (payload_index == 0) {
@@ -3127,7 +3114,8 @@ void vm_interpreter() {
 				int saved_ip = ip;
 				uint64_t saved_opcode_state = opcode_xorshift32_state;
 				uint64_t saved_vmcode_state = vm_code_state;
-				uintptr_t saved_code_seg_addr = code_seg_addr;
+				// Dispatch identity survives relocation of segmented bytecode.
+				uintptr_t saved_dispatch_identity = dispatch_code_seg_addr;
 				if (!vm_push_call_frame()) {
 					return;
 				}
@@ -3144,7 +3132,7 @@ void vm_interpreter() {
 				         caught_exception_selector,
 				         (unsigned long long)saved_opcode_state,
 				         (unsigned long long)saved_vmcode_state);
-				dispatch_code_seg_addr = saved_code_seg_addr;
+				dispatch_code_seg_addr = saved_dispatch_identity;
 				// 使用异常捕获包装函数
 				call_handler_with_exception_handling(packed_funcid);
 				vm_trace_push(VM_TRACE_KIND_CALL, (uint32_t)saved_ip, 1, (uint8_t)exception_thrown,
@@ -3194,13 +3182,14 @@ void vm_interpreter() {
 				uint8_t type_id = get_byte_code();
 				uint64_t offset = unpack_code(pointer_size);
 
-				uintptr_t saved_code_seg_addr = code_seg_addr;
+				// Dispatch identity survives relocation of segmented bytecode.
+				uintptr_t saved_dispatch_identity = dispatch_code_seg_addr;
 				if (!vm_push_call_frame()) {
 					return;
 				}
 
 				// 调用函数（与 Call_OP 相同）
-				dispatch_code_seg_addr = saved_code_seg_addr;
+				dispatch_code_seg_addr = saved_dispatch_identity;
 				// 使用异常捕获包装函数
 				call_handler_with_exception_handling(packed_funcid);
 

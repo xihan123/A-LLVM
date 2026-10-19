@@ -16,6 +16,7 @@
 #include "llvm/Transforms/Obfuscation/StringEncryption.h"
 #include "llvm/Transforms/Obfuscation/CertBind.h"
 #include "llvm/Transforms/Obfuscation/cse_crypto.h"
+#include "llvm/Transforms/Obfuscation/SegmentedData.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "llvm/Transforms/Obfuscation/Utils.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
@@ -268,6 +269,8 @@ namespace {
 		GlobalVariable *HardenedModule = nullptr;
 		Function *HardenedDecode = nullptr;
 		uint32_t HardenedSize = 0;
+		std::map<unsigned, std::pair<GlobalVariable *, unsigned>> SegmentEntries;
+		void buildSegmentedTable(Module &M);
 		void buildHardenedTable(Module &M);
 		Function *buildHardenedModuleDecode(Module &M, bool Recheck = false);
 		Function *buildHardenedDecrypt(Module &M, const CSPEntry *Entry);
@@ -414,7 +417,7 @@ bool StringEncryption::runOnModule(Module &M) {
 
 	for (GlobalVariable &GV : M.globals()) {
 		// 跳过没有初始化器的全局变量
-		if (!GV.hasInitializer() ||
+		if (!GV.hasInitializer() || GV.getSection() == ".text.ndkp.qseg.refs" ||
 		    GV.hasDLLExportStorageClass() || GV.isDLLImportDependent()) {
 			continue;
 		}
@@ -473,7 +476,7 @@ bool StringEncryption::runOnModule(Module &M) {
 				}
 				Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
 				Type *BufferTy = CDS->getType();
-				if (UseHardened)
+				if (UseHardened && !isSegmentedDataEnabled())
 					BufferTy = ArrayType::get(CDS->getElementType(),
 					    hardenedCapacity(Entry->Data.size()) - 16);
 				Constant *ZeroInit = Constant::getNullValue(BufferTy);
@@ -505,7 +508,7 @@ bool StringEncryption::runOnModule(Module &M) {
 					}
 					Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
 					Type *BufferTy = CDS->getType();
-					if (UseHardened)
+					if (UseHardened && !isSegmentedDataEnabled())
 						BufferTy = ArrayType::get(EltTy,
 						    (hardenedCapacity(Entry->Data16.size() * 2) - 16) / 2);
 					Constant *ZeroInit = Constant::getNullValue(BufferTy);
@@ -1351,6 +1354,7 @@ Function *StringEncryption::buildChaChaDecodeFunc(Module &M) {
 // 签名与基线一致 (plain, data)，data 直接指向密文（表里已无内联密钥）。
 // The sealer rewrites only this retained data blob, never code or relocations.
 void StringEncryption::buildHardenedTable(Module &M) {
+  if (isSegmentedDataEnabled()) { buildSegmentedTable(M); return; }
   using namespace ndkp_cse;
   LLVMContext &Ctx = M.getContext();
   Type *I32 = Type::getInt32Ty(Ctx), *Ptr = PointerType::get(Ctx, 0);
@@ -1443,6 +1447,17 @@ void StringEncryption::buildHardenedTable(Module &M) {
 }
 
 Function *StringEncryption::buildHardenedModuleDecode(Module &M, bool Recheck) {
+  if (isSegmentedDataEnabled()) {
+    if (!Recheck) report_fatal_error("unexpected segmented module decode");
+    auto *F = Function::Create(FunctionType::get(Type::getVoidTy(M.getContext()), false),
+        GlobalValue::PrivateLinkage, "ndkp_cse_module_recheck_v2", M);
+    F->setMetadata("noobf", MDNode::get(M.getContext(), {}));
+    IRBuilder<> B(BasicBlock::Create(M.getContext(), "entry", F));
+    auto Verify = M.getOrInsertFunction("ndkp_qseg_recheck", F->getFunctionType());
+    cast<Function>(Verify.getCallee())->setVisibility(GlobalValue::HiddenVisibility);
+    B.CreateCall(Verify); B.CreateRetVoid();
+    return F;
+  }
   LLVMContext &Ctx = M.getContext();
   Type *Ptr = PointerType::get(Ctx, 0);
   auto *ModuleTy = cast<StructType>(HardenedModule->getValueType());
@@ -1506,12 +1521,49 @@ Function *StringEncryption::buildHardenedDecrypt(Module &M, const CSPEntry *Entr
   BasicBlock *Exit = BasicBlock::Create(Ctx, "Exit", F);
   IRBuilder<> B(Enter); emitOnceGuard(B, Entry->DecStatus, Body, Exit);
   B.SetInsertPoint(Body);
-  Value *Region = B.CreateInBoundsGEP(HardenedRegions->getValueType(), HardenedRegions,
-      {B.getInt32(0), B.getInt32(Entry->ID)});
-  B.CreateCall(HardenedDecode, {F->getArg(0), Region});
+  if (isSegmentedDataEnabled()) {
+    auto [Ref, Offset] = SegmentEntries.at(Entry->ID);
+    auto Copy = M.getOrInsertFunction("ndkp_qseg_copy",
+        FunctionType::get(B.getVoidTy(), {Ptr, Ptr, B.getInt32Ty(), B.getInt32Ty(), B.getInt32Ty()}, false));
+    cast<Function>(Copy.getCallee())->setVisibility(GlobalValue::HiddenVisibility);
+    unsigned Length = Entry->IsUTF16 ? Entry->Data16.size() * 2 : Entry->Data.size();
+    B.CreateCall(Copy, {F->getArg(0), Ref, B.getInt32(Offset), B.getInt32(Length),
+                       B.getInt32(Entry->IsUTF16 ? 2 : 1)});
+  } else {
+    Value *Region = B.CreateInBoundsGEP(HardenedRegions->getValueType(), HardenedRegions,
+        {B.getInt32(0), B.getInt32(Entry->ID)});
+    B.CreateCall(HardenedDecode, {F->getArg(0), Region});
+  }
   emitOncePublish(B, Entry->DecStatus); B.CreateBr(Exit);
   B.SetInsertPoint(Exit); B.CreateRetVoid();
   return F;
+}
+
+void StringEncryption::buildSegmentedTable(Module &M) {
+  if (UseBind) report_fatal_error("segmented-data v1 supports certificate binding, not package binding");
+  std::vector<uint8_t> Block;
+  std::vector<std::pair<unsigned, unsigned>> Pending;
+  auto Flush = [&]() {
+    if (Block.empty()) return;
+    auto *Ref = stageSegment(M, "cse", 2, Block);
+    for (auto [ID, Offset] : Pending) SegmentEntries[ID] = {Ref, Offset};
+    ndkp_cse::wipe(Block.data(), Block.size()); Block.clear(); Pending.clear();
+  };
+  for (CSPEntry *Entry : ConstantStringPool) {
+    std::vector<uint8_t> Bytes = Entry->Data;
+    if (Entry->IsUTF16) {
+      Bytes.clear();
+      for (uint16_t V : Entry->Data16) { Bytes.push_back(uint8_t(V)); Bytes.push_back(uint8_t(V >> 8)); }
+    }
+    if (Block.size() + Bytes.size() > 32768) Flush();
+    Pending.push_back({Entry->ID, unsigned(Block.size())});
+    Block.insert(Block.end(), Bytes.begin(), Bytes.end()); Entry->Offset = 0;
+    ndkp_cse::wipe(Bytes.data(), Bytes.size());
+  }
+  Flush();
+  auto *Init = ConstantDataArray::get(M.getContext(), ArrayRef<uint8_t>({0}));
+  HardenedBlob = new GlobalVariable(M, Init->getType(), true, GlobalValue::PrivateLinkage, Init, "ndkp_cse_v2_unused");
+  HardenedBlob->setMetadata("noobf", MDNode::get(M.getContext(), {}));
 }
 
 Function *StringEncryption::buildDecryptFunctionChaCha(Module *M, const StringEncryption::CSPEntry *Entry) {
@@ -1961,6 +2013,7 @@ StringEncryption::CSUser *StringEncryption::getPointedCSUser(GlobalVariable *GV)
 }
 
 bool StringEncryption::isValidToEncrypt(GlobalVariable *GV) {
+	if (GV->getSection() == ".text.ndkp.qseg.refs") return false;
 	if (GV->isConstant() && GV->hasInitializer()) {
 		StringRef Name = GV->getName();
 		if (Name.contains("gv_code_seg") || Name.contains("gv_data_seg") ||

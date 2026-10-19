@@ -26,7 +26,7 @@ add_custom_command(TARGET your_lib POST_BUILD
   VERBATIM)
 ```
 
-不要把混淆参数配置为整个工程的全局编译参数，否则也会污染运行时 TU。构建期会拒绝在定义 helper 的模块上启用混淆；运行时 object 必须始终 `-fno-lto`。
+不要把混淆参数配置为整个工程的全局编译参数，否则也会污染运行时 TU。构建期会拒绝在定义 helper 的模块上启用 CSE/证书绑定；可选的密码入口 VMP 见下文。运行时 object 必须始终 `-fno-lto`。
 
 固定流程：**链接 → 封装 → strip → APK 打包、对齐、签名**。封装只修改预留的 `.ndkp.cse` 数据，不改变代码、地址、重定位或文件大小。构建中不要在链接阶段使用 `-s`/`--strip-all`；将 strip 放在封装之后。重新构建应从链接产物开始，已封装输入拒绝二次封装。输出写入临时文件并原子替换；认证失败不修改既有输出。
 
@@ -46,6 +46,51 @@ python scripts/seal_cse.py --input sealed.so --verify \
 ```
 
 `--package` 同运行时一样截掉首个 `:` 后缀；支持私有子进程，不支持无前导冒号的任意全局进程名。`--cert-file` 接受 DER 或常规 PEM。
+
+## 解密关键路径 VMP（p13，p15/p16 优化）
+
+LLVM 21 的 dex2c 从 0.1.6 起默认将独立 CSE runtime 的 `derive`（密钥派生）和 `open`
+（认证及解密控制）虚拟化，并检查真实字节码、入口自校验及 post CFG。业务模块的
+CSE、证书绑定、VMP 和校验保持原有配置；运行时密码线格式及封装算法不变。
+
+手动集成时，只在 `ndkp_cse_runtime.cpp` 的独立目标上定义 `NDKP_CSE_VMP`，使用
+`-O1 -frtti -fno-exceptions -fno-lto -fno-vectorize -fno-slp-vectorize -fno-unroll-loops`
+及 `-mllvm -irobf-vmp -mllvm -irobf-vmp-strict -mllvm -irobf-vmp-memops`
+`-mllvm -irobf-selfcheck -mllvm -irobf-selfcheck-entry`。运行时仍禁止 CSE、包名绑定
+和证书绑定混淆参数，以免读取自身字符串或证书时形成初始化循环；业务上的绑定不受影响。
+普通客户端不定义该宏时沿用原生运行时。
+
+需要二次 CFG 保护时，先生成 raw IR，再以 `-Oz -mllvm -irobf-vmp-post -S -emit-llvm`
+输出最终 IR，验证后以 `-Oz -Xclang -disable-llvm-passes -c` 生成对象。
+不要在同一次调用混用 `-irobf-vmp` 和 `-irobf-vmp-post`。
+
+标准 SHA、HMAC、ChaCha20、Poly1305 和清零函数保留原生调用边界，避免批量算术与
+内存循环进入 VM。密码函数放在独立内部命名空间，防止其他翻译单元的原生 inline
+定义通过 COMDAT 选择替换保护实现。此配置增加首次解密成本，已解密字符串仍沿用
+原有 once 缓存；没有新增持久化派生密钥缓存。
+
+p15 / dex2c 0.1.8 将密钥材料的字节拼装放到与 HKDF 相同的原生 helper 边界，
+`derive` 仍在 VM 中组织材料准备、HKDF 调用与清零；`open` 的认证/解密控制仍在 VM 中。
+这会减少 VM 内部可观察到的低层字节操作，并非新增一层加固；保护计数仍是两个入口。
+测试样本的 derive 字节码从 12,330 降至 143 bytes，输出与原生及历史格式一致。
+解释器的 ChaCha/调度辅助函数允许优化后再执行 post，64 字节块的调度 seed 与既有密钥流一起缓存。
+不改变加密轮数、wire ordinal、私有映射或封装格式，也不新增 CSE 派生密钥缓存。
+
+p16 / dex2c 0.1.9 将恒时标签比较放到原生密码原语边界，避免 16 字节 XOR/OR
+循环在每条字符串的 VM 中解释。open 仍在 VM 中决定认证失败和解密；测试样本的
+open 字节码由 728 降至 172 bytes，derive 保持 143 bytes。每个标签字节的破坏均拒绝，
+且失败时不修改输出。此项属于低层比较离开 VM 的保护范围取舍。
+Android arm64 的 SHA-256 通过 getauxval(AT_HWCAP) 检查 SHA2，在独立 target("sha2")
+函数中执行硬件压缩；无扩展时使用原软件实现，非 Android/arm64 也保留软件路径。
+两条路径通过标准向量、0..257 字节/8 种地址偏移与大输入差分，格式和摘要不变。
+
+VMP 只能提高分析成本，不改变 SO 和公开证书包含全部本地解密材料的事实，不能宣称
+修复 APK-only 离线恢复。设备语义、差分及性能回归：
+
+```bash
+python tests/cse-hardened/device_test.py --ndk "$NDK" --clang "$CLANG" \
+  --serial "$SERIAL" --runtime-vmp --work-dir build/cse-vmp-device
+```
 
 ## 数据与运行时行为
 

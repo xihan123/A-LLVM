@@ -13,6 +13,7 @@ def main():
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--serial", required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--sample-root", type=Path, help="Use a private candidate sample build")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     adb = args.sdk / "platform-tools/adb.exe"
@@ -20,7 +21,7 @@ def main():
         adb = adb.with_suffix("")
     device = [adb, "-s", args.serial]
     for apk in ("module/build/outputs/apk/release/module-release.apk", "host/build/outputs/apk/debug/host-debug.apk"):
-        run([*device, "install", "-r", repo / "dex2c/samples/xposed" / apk])
+        run([*device, "install", "-r", (args.sample_root or repo / "dex2c/samples/xposed") / apk])
     # LSPosed must already have this module enabled for this test host.
     since = run([*device, "shell", "date", "+%m-%d\\ %H:%M:%S.000"])
     run([*device, "shell", "am", "force-stop", "io.github.xihan123.dex2c.sample.host"])

@@ -87,6 +87,21 @@ public class Run {
     static void check(boolean result) { if(!result)throw new AssertionError(); }
     public static void main(String[] args) throws Exception {
         Logic logic=new Logic();
+        java.util.concurrent.CountDownLatch ready=new java.util.concurrent.CountDownLatch(8);
+        java.util.concurrent.CountDownLatch start=new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<Throwable> failure=new java.util.concurrent.atomic.AtomicReference<>();
+        Thread[] firstUse=new Thread[8];
+        for(int i=0;i<firstUse.length;i++) {
+            firstUse[i]=new Thread(()->{
+                ready.countDown();
+                try { start.await(); check(logic.recurse(6)==720); }
+                catch(Throwable error) { failure.compareAndSet(null,error); }
+            });
+            firstUse[i].start();
+        }
+        ready.await(); start.countDown();
+        for(Thread thread:firstUse)thread.join();
+        if(failure.get()!=null)throw new AssertionError(failure.get());
         check("sample/Aa".hashCode()=="sample/BB".hashCode() && logic.distinctTypes());
         check(MethodOnly.selected(6).applyAsInt(5)==11 && MethodOnly.untouched()==123);
         check(logic.defaultValue(6)==42 && Defaults.staticValue(9)==7 && logic.callbackDefault(11).applyAsInt(6)==17);

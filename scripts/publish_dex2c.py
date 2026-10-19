@@ -30,8 +30,13 @@ NATIVE_TESTS = {"nativeAndJvmSemanticsMatchWithCheckJni", "kotlinNativeMatchesJv
 
 def release_version(root=DEX2C):
     matches = re.findall(r"^\s*version\s*=\s*'([^']+)'", (root / "build.gradle").read_text("utf-8"), re.M)
-    if len(matches) != 1 or not re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", matches[0]):
-        raise ValueError("build.gradle must declare one numeric major.minor.patch release version")
+    number = r"(?:0|[1-9][0-9]*)"
+    identifier = rf"(?:{number}|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    pattern = rf"{number}\.{number}\.{number}(?:-{identifier}(?:\.{identifier})*)?"
+    if (len(matches) != 1 or not re.fullmatch(pattern, matches[0]) or
+            matches[0].upper().endswith("-SNAPSHOT")):
+        raise ValueError("build.gradle must declare one major.minor.patch release version "
+                         "with an optional prerelease suffix (no SNAPSHOT)")
     version = matches[0]
     for file, expected in (
         (root / "gradle-plugin/src/main/java/io/github/xihan123/dex2c/gradle/Dex2cPlugin.java", 2),
@@ -196,7 +201,7 @@ def main(argv=None):
     modes.add_argument("--check", action="store_true", help="Run host JNI/VMP tests and stage all five publications; no upload")
     modes.add_argument("--publish", action="store_true", help="Check, stage, publish a NEW release and verify remote bytes")
     modes.add_argument("--verify-only", action="store_true", help="Compare existing staging with Maven; no build/upload")
-    parser.add_argument("--clang", type=Path, help="A-LLVM p11 LLVM 21 clang.exe (check/publish)")
+    parser.add_argument("--clang", type=Path, help="A-LLVM LLVM 21 clang.exe with strict/post support (check/publish)")
     parser.add_argument("--ndk", type=Path, help="NDK r30 directory (check/publish)")
     parser.add_argument("--staging", type=Path, help="Existing Maven staging directory (verify-only; default dex2c/build/maven-staging)")
     args = parser.parse_args(argv)

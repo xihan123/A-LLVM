@@ -7,12 +7,28 @@ import kotlin.metadata.jvm.JvmExtensionsKt;
 import kotlin.metadata.jvm.KotlinClassMetadata;
 import org.objectweb.asm.tree.AnnotationNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.MethodNode;
 
 import java.lang.reflect.Proxy;
 import java.util.*;
+import static org.objectweb.asm.Opcodes.*;
 
 final class KotlinInfo {
     static Set<String> inlineMethods(ClassNode owner) {
+        return methods(owner, true);
+    }
+
+    static boolean lambdaImplementation(ClassNode owner, MethodNode method) {
+        // Kotlin 2.4 indy bodies are private static methods, without ACC_SYNTHETIC.
+        // The implementation handle establishes the call edge; metadata separates
+        // compiler bodies from source methods used as callable references.
+        return method.name.contains("$lambda$")
+                && (method.access & (ACC_PRIVATE | ACC_STATIC)) == (ACC_PRIVATE | ACC_STATIC)
+                && Selector.annotation(owner.visibleAnnotations, "Lkotlin/Metadata;") != null
+                && !methods(owner, false).contains(method.name + method.desc);
+    }
+
+    private static Set<String> methods(ClassNode owner, boolean inlineOnly) {
         AnnotationNode node = Selector.annotation(owner.visibleAnnotations, "Lkotlin/Metadata;");
         if (node == null) return Set.of();
         Map<String, Object> values = new HashMap<>();
@@ -39,7 +55,7 @@ final class KotlinInfo {
             Set<String> result = new HashSet<>();
             for (KmFunction function : functions) {
                 var signature = JvmExtensionsKt.getSignature(function);
-                if (Attributes.isInline(function) && signature != null)
+                if ((!inlineOnly || Attributes.isInline(function)) && signature != null)
                     result.add(signature.getName() + signature.getDescriptor());
             }
             var properties = switch (metadata) {
@@ -51,8 +67,8 @@ final class KotlinInfo {
             for (var property : properties) {
                 var getter = JvmExtensionsKt.getGetterSignature(property);
                 var setter = JvmExtensionsKt.getSetterSignature(property);
-                if (getter != null && Attributes.isInline(property.getGetter())) result.add(getter.getName() + getter.getDescriptor());
-                if (setter != null && property.getSetter() != null && Attributes.isInline(property.getSetter())) result.add(setter.getName() + setter.getDescriptor());
+                if (getter != null && (!inlineOnly || Attributes.isInline(property.getGetter()))) result.add(getter.getName() + getter.getDescriptor());
+                if (setter != null && property.getSetter() != null && (!inlineOnly || Attributes.isInline(property.getSetter()))) result.add(setter.getName() + setter.getDescriptor());
             }
             return result;
         } catch (RuntimeException e) {

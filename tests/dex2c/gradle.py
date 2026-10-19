@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--clang", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
+    parser.add_argument("--verify-apk-signature", action="store_true")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     out = args.work_dir.resolve()
@@ -65,8 +66,10 @@ def main():
 
     def build(label, *tasks, success=True):
         start = time.monotonic()
-        command = [str(args.gradle.resolve()), "-p", str(out), *tasks, "--console=plain", "--build-cache",
+        command = [str(args.gradle.resolve()), "-p", str(out), *tasks, "--console=plain", "--build-cache", "--configuration-cache",
                    "-Pdex2c.clang=" + str(args.clang.resolve()),"-Pdex2c.certificate="+str(certificate)]
+        if args.verify_apk_signature:
+            command.append("-Pdex2c.verifyApkSignature=true")
         log = out / (label + ".log")
         with log.open("w", encoding="utf-8") as stream:
             result = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, timeout=1200)
@@ -84,6 +87,9 @@ def main():
     assert len(report["methods"]) >= 5 and any("lambda" in m["method"] for m in report["methods"])
     assert report["bytecodeVerified"]
     verify_wrappers(release, report)
+    verification = json.loads((out / "module/build/reports/dex2c/release/apk-verification.json").read_text())
+    assert verification["protectedMethods"] == len(report["methods"])
+    assert verification["apkSignatureVerification"] == args.verify_apk_signature
     text = build("up-to-date", ":module:assembleRelease")
     assert ":module:compileReleaseDex2cNative UP-TO-DATE" in text
     build("clean", ":module:clean", ":shared:clean")

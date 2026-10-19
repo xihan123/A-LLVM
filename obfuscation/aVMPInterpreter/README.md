@@ -16,7 +16,16 @@
     scripts/gen_vm_bitcode.sh <ndk_clang> aarch64
 产出并覆盖 `obfuscation/llvm-{20,21}/include/aVMP/vm.h`（垂直切片只需 aarch64）。
 
-## vm.h 生成状态（已本地重生成，去品牌）
+## p15 生成状态
+
+LLVM 21 的 `vm.h` 已用 LLVM 21 重新生成（152604 字节 bitcode）：优化密码辅助函数，
+缓存同一元组/64 字节块共用的调度 seed。wire 格式、轮数和每方法私有指令映射保持不变。
+`tests/vmp/crypto_cache_driver.cpp` 对照 p14 黄金摘要验证随机位置、块切换和嵌套上下文，
+由 CSE 设备回归编译执行；调用帧、ART、post 和篡改拒绝另行验证。
+LLVM 21 的 CMake 对生成头增加显式对象依赖，避免本地增量编译漏掉 bitcode 更新。
+LLVM 20 的 `vm.h` 保留 p9，未使用 LLVM 21 bitcode 覆盖旧 reader。
+
+## p9 vm.h 生成状态（历史）
 仓库提交的 `vm.h` 已用本目录解释器源码、经本地 LLVM 20 编译器
 （`--target=aarch64-linux-android21 -frtti -fexceptions -O2 -fno-inline -emit-llvm`）
 本地重新生成（p9，158212 字节 bitcode），同时供 LLVM 20/21 使用。

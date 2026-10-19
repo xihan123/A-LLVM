@@ -43,6 +43,16 @@ __attribute__((annotate("vmp"))) int protected(int x) {
         compile(source, raw, "-O1", "-mllvm", "-irobf-vmp", "-mllvm", "-irobf-vmp-strict")
         original = raw.read_text()
         assert "ndkp.vmp.protected" in original and "ndkp.vmp.post" not in original
+        # Each private interpreter resolves TLS locations once, while reads and
+        # writes remain live across recursive/native callbacks.
+        for header, body in re.findall(r"^(define [^\n]+)\n([\s\S]*?)^}", original, re.M):
+            if "@vm_interpreter_" not in header or "callinst_dispatch" in header:
+                continue
+            addresses = re.findall(r"call ptr @llvm.threadlocal.address.p0\(ptr (@[^)]+)\)", body)
+            assert addresses and len(addresses) == len(set(addresses)), header
+            for address in addresses:
+                uses = [line for line in body.splitlines() if re.search(re.escape(address) + r"(?=[, )])", line)]
+                assert len(uses) == 1 and "@llvm.threadlocal.address" in uses[0], (header, address, uses)
         # The binding marker may be on a later XOR than the literal key operand.
         original += '''
 define hidden i64 @entry_key_probe(i64 %x) "aproc-vmp-artifact" {
@@ -73,6 +83,10 @@ define hidden i64 @entry_key_probe(i64 %x) "aproc-vmp-artifact" {
         probe = re.search(r'^define .*@entry_key_probe\([^\n]*\n([\s\S]*?)^}', hardened, re.M)[1]
         assert '12345678901234567' not in probe and 'load volatile i64' in probe
         assert ".post.targets" in hardened and "dso_local_equivalent" in hardened
+        # Global blockaddresses must use names: printing an unnamed target
+        # rebuilds the giant function's SlotTracker once per table element.
+        addresses = re.findall(r'blockaddress\(@[^,]+, %([^)]*)\)', hardened)
+        assert addresses and all(not name.isdigit() for name in addresses), addresses[:5]
         # The relative label expressions must survive the real ELF backend too.
         result = subprocess.run(common[:-2] + ["-Oz", "-Xclang", "-disable-llvm-passes",
                                 "-c", str(final), "-o", str(out / "post.o")],

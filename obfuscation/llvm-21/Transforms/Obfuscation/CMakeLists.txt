@@ -8,6 +8,14 @@ if(MSVC)
   add_compile_options(/utf-8)
 endif()
 
+# The embedded interpreter is generated independently of the pass source.
+# Track it explicitly even when localized MSVC include scanning misses headers.
+set_property(SOURCE aVMP/aVMP.cpp APPEND PROPERTY OBJECT_DEPENDS
+  "${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms/Obfuscation/aVMP/vm.h")
+set_property(SOURCE StringEncryption.cpp APPEND PROPERTY OBJECT_DEPENDS
+  "${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms/Obfuscation/cse_crypto.h"
+  "${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms/Obfuscation/sha256.h")
+
 add_llvm_pass_plugin(Obfuscation
   CryptoUtils.cpp
   Utils.cpp
@@ -15,6 +23,7 @@ add_llvm_pass_plugin(Obfuscation
   ObfuscationPassManager.cpp
   ObfuscationPlugin.cpp
   StringEncryption.cpp
+  SegmentedData.cpp
   Flattening.cpp
   LegacyLowerSwitch.cpp
   IndirectBranch.cpp

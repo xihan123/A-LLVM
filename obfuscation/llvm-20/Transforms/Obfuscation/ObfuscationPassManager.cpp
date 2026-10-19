@@ -87,6 +87,10 @@ EnableStrPerKey("irobf-cse-perkey", cl::init(false), cl::NotHidden,
 static cl::opt<bool> EnableStrHardened(
     "irobf-cse-hardened", cl::init(false), cl::NotHidden,
     cl::desc("Opt-in arm64 Android CSE AEAD and post-link code binding."));
+static cl::opt<bool> SegmentedUnsupported("irobf-segmented-data", cl::init(false),
+    cl::desc("Segmented data is available only in LLVM 21."));
+static cl::opt<std::string> SegmentedOutputUnsupported("irobf-segmented-output", cl::init(""),
+    cl::desc("Segmented data is available only in LLVM 21."));
 // bind：把运行期包名（/proc/self/cmdline）哈希折进 pepper；错包名 → 解出乱码
 //       （非分支、无可 patch 的 if）。bind 蕴含 perkey。
 static cl::opt<bool>
@@ -291,7 +295,7 @@ uint64_t llvm::getCertBindHi() {
 }
 
 bool llvm::isIRObfuscationEnabled() {
-  return EnableIRObfuscation || EnableIndirectBr || EnableIndirectCall ||
+  return SegmentedUnsupported || !SegmentedOutputUnsupported.empty() || EnableIRObfuscation || EnableIndirectBr || EnableIndirectCall ||
          EnableIndirectGV || EnableIRFlattening || EnableIRStringEncryption ||
          EnableStrPerKey || EnableStrBind || EnableStrHardened ||
          EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
@@ -401,6 +405,8 @@ struct ObfuscationPassManager : public ModulePass {
   }
 
   bool runOnModule(Module &M) override {
+    if (SegmentedUnsupported || !SegmentedOutputUnsupported.empty())
+      report_fatal_error("segmented-data options require LLVM 21");
     bool hasObf = EnableIndirectBr || EnableIndirectCall || EnableIndirectGV ||
                   EnableIRFlattening || EnableIRStringEncryption ||
                   EnableStrPerKey || EnableStrBind || EnableStrHardened || EnableStrHardened ||
@@ -426,9 +432,11 @@ struct ObfuscationPassManager : public ModulePass {
         report_fatal_error("-irobf-cse-hardened requires Android arm64");
     }
     if (Function *Helper = M.getFunction("ndkp_cse_decode_region_v1"))
-      if (!Helper->isDeclaration())
-        report_fatal_error("compile ndkp_cse_runtime.cpp separately without "
-                           "obfuscation flags and with -fno-lto");
+      if (!Helper->isDeclaration() &&
+          (!EnableVMProtect || EnableIRStringEncryption || EnableStrPerKey ||
+           EnableStrBind || EnableStrHardened || EnableCertBind))
+        report_fatal_error("compile ndkp_cse_runtime.cpp separately with -fno-lto; "
+                           "only crypto-core VMP without CSE/cert-bind is allowed");
 
     if (EnableCertBind) {
       if (Function *Helper = M.getFunction("ndkp_certbind_mix"))

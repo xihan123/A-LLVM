@@ -30,6 +30,7 @@
 #include <vector>
 
 #define DEBUG_TYPE "selfcheck"
+#include "llvm/Transforms/Obfuscation/SegmentedData.h"
 
 using namespace llvm;
 
@@ -185,7 +186,14 @@ bool SelfCheck::runOnModule(Module &M) {
   BasicBlock *BB = BasicBlock::Create(Ctx, "entry", CtorFn);
   IRBuilder<> B(BB);
   Value *Acc = ConstantInt::get(Int64Ty, 0);
+  if (isSegmentedDataEnabled()) {
+    auto Verify = M.getOrInsertFunction("ndkp_qseg_verify", FunctionType::get(VoidTy, false));
+    cast<Function>(Verify.getCallee())->setVisibility(GlobalValue::HiddenVisibility);
+    B.CreateCall(Verify);
+    Acc = ConstantInt::get(Int64Ty, ExpectedAcc);
+  }
   for (const Blob &Bl : Blobs) {
+    if (isSegmentedDataEnabled()) continue;
     Value *H = B.CreateCall(CheckOne, {Bl.GV, ConstantInt::get(Int64Ty, Bl.Len),
                                        ConstantInt::get(Int64Ty, Bl.Expected)});
     Acc = B.CreateXor(Acc, H);
@@ -196,7 +204,7 @@ bool SelfCheck::runOnModule(Module &M) {
 
   // 注册为 ELF 构造器（.init_array）。优先级 101：在应用 ctor（默认 65535）之前、
   // 加载期即校验；101 避开 0..100 的系统/ABI 保留区。
-  appendToGlobalCtors(M, CtorFn, /*Priority=*/101);
+  appendToGlobalCtors(M, CtorFn, /*Priority=*/isSegmentedDataEnabled() ? 102 : 101);
 
   // 入口标记在整数混淆后仍保留；排除 vm_restore_call_frame 的无标记动态存储。
   // 未篡改时 expected_acc 与 runtime_acc 抵消。
@@ -224,7 +232,7 @@ bool SelfCheck::runOnModule(Module &M) {
         if (!Current)
           report_fatal_error("selfcheck-entry cannot identify VMP entry bytecode");
         Value *Hash = IB.CreateCall(CheckOne, {
-            Current->GV, ConstantInt::get(Int64Ty, Current->Len),
+            segmentVMData(IB, Current->GV), ConstantInt::get(Int64Ty, Current->Len),
             ConstantInt::get(Int64Ty, Current->Expected)});
         Biased = IB.CreateXor(Biased, IB.CreateXor(
             Hash, ConstantInt::get(Int64Ty, Current->Expected)));

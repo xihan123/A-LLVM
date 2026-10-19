@@ -76,10 +76,6 @@ Transforms/Obfuscation/
 | `-irobf-cse-hardened` | Android arm64 专用的 CSE v1：ChaCha20-Poly1305、代码哈希及 build_nonce 绑定、加密元数据和诱饵；要求 `-irobf-cse`，必须链接独立运行时并在链接后封装，见 [接入说明](../runtime/CSE_HARDENED.md) |
 | `-irobf-cse-bind` | 字符串加密强化：把运行期包名（`/proc/self/cmdline`，截到首个 `:` 前）哈希折进 pepper，`.so` 仅在目标 App 内解出正确明文（错包名→乱码，非分支）。蕴含 `-irobf-cse-perkey`；也可用 `NDKP_STR_BIND` 注解，标签 `ndkp.str_bind` |
 | `-irobf-cse-bind-package=` | `-irobf-cse-bind` 的期望包名（如 `com.example.app`；若误带 `:proc` 后缀会被自动截断）；bind 开启但缺此项则构建失败（fail-closed） |
-
-> **多进程说明**：解码器把 `/proc/self/cmdline` 截到首个 `:` 前再算哈希，因此**主进程与所有 `android:process=":suffix"` 私有子进程**都能正确解密（私有子进程 cmdline 为 `包名:suffix`，去后缀即包名；合法包名不含 `:`，截断无歧义）。**不支持**全局命名子进程（`android:process="some.other.name"`，无前导 `:`）——其进程名与包名无关，绑定串在该进程内会 fail-closed 解出乱码；请勿在此类进程放置绑定字符串。
->
-> **运行期开销**：包名哈希每进程只算一次（`ready` 缓存），文件 I/O 一次性；每条串受 `dec_status` 幂等守卫，**每进程至多解密一次**（惰性、首次使用时，原子 acquire/release 发布），后续访问保留原子状态检查。解密后的字符串保持静态存储期，不在基本块结束时擦除，以支持保存指针和跨线程读取。派生的 ChaCha 主密钥仅依赖 pepper（+包名），每串重算而**不缓存**——刻意让主密钥不常驻 RW 内存，避免一次内存 dump 离线解出整表。
 | `-irobf-cie` | 整数常量加密 |
 | `-irobf-cfe` | 浮点常量加密 |
 | `-irobf-fla` | 控制流平坦化 |
@@ -103,6 +99,10 @@ Transforms/Obfuscation/
 | `-irobf-cert-file=` | `-irobf-cert-bind` 的期望签名者证书（DER，也接受 PEM）；其 SHA-256 在构建期折入。bind 开启但缺此项/不可读则构建失败（fail-closed） |
 | `-level-*` | 强度，范围 1 到 3 |
 | `-irobf-debug` | 调试模式（默认关）。关闭时（release）额外做落地去指纹，见下 |
+
+> **多进程说明**：解码器把 `/proc/self/cmdline` 截到首个 `:` 前再算哈希，因此**主进程与所有 `android:process=":suffix"` 私有子进程**都能正确解密（私有子进程 cmdline 为 `包名:suffix`，去后缀即包名；合法包名不含 `:`，截断无歧义）。**不支持**全局命名子进程（`android:process="some.other.name"`，无前导 `:`）——其进程名与包名无关，绑定串在该进程内会 fail-closed 解出乱码；请勿在此类进程放置绑定字符串。
+>
+> **运行期开销**：包名哈希每进程只算一次（`ready` 缓存），文件 I/O 一次性；每条串受 `dec_status` 幂等守卫，**每进程至多解密一次**（惰性、首次使用时，原子 acquire/release 发布），后续访问保留原子状态检查。解密后的字符串保持静态存储期，不在基本块结束时擦除，以支持保存指针和跨线程读取。派生的 ChaCha 主密钥仅依赖 pepper（+包名），每串重算而**不缓存**——刻意让主密钥不常驻 RW 内存，避免一次内存 dump 离线解出整表。
 
 没有开关时不得执行 IR 变换。函数注解定义在 `include/ndkp.h`；当前注解仍需配合对应总开关。（`NDKP_STR_BIND` 会在模块级开启 bind 模式，但仍需 `-irobf-cse` 基础开关与 `-irobf-cse-bind-package=<包名>`。）
 

@@ -16,14 +16,44 @@
 
 #include <cstddef>
 #include <cstdint>
+#if defined(__ANDROID__) && defined(__aarch64__)
+#include <arm_neon.h>
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#endif
 
 namespace stringarmor {
 namespace sha2 {
 
 inline uint32_t ror(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
 
-// Writes the 32-byte big-endian SHA-256 digest of msg[0..len) into out.
-inline void sha256(const uint8_t* msg, size_t len, uint8_t out[32]) {
+namespace detail {
+#if defined(__ANDROID__) && defined(__aarch64__)
+// Keep optional instructions behind a runtime HWCAP check and a target boundary.
+__attribute__((target("sha2"), noinline))
+inline void compress_sha2(uint32_t h[8], const uint8_t* p, const uint32_t k[64]) {
+    uint32x4_t abcd = vld1q_u32(h), efgh = vld1q_u32(h + 4);
+    const uint32x4_t saved_abcd = abcd, saved_efgh = efgh;
+    uint32x4_t w[4];
+    for (unsigned i = 0; i < 4; ++i)
+        w[i] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(p + i * 16)));
+    for (unsigned round = 0; round < 16; ++round) {
+        const unsigned i = round & 3;
+        const uint32x4_t wk = vaddq_u32(w[i], vld1q_u32(k + round * 4));
+        const uint32x4_t previous_abcd = abcd;
+        abcd = vsha256hq_u32(abcd, efgh, wk);
+        efgh = vsha256h2q_u32(efgh, previous_abcd, wk);
+        if (round < 12) {
+            w[i] = vsha256su0q_u32(w[i], w[(i + 1) & 3]);
+            w[i] = vsha256su1q_u32(w[i], w[(i + 2) & 3], w[(i + 3) & 3]);
+        }
+    }
+    vst1q_u32(h, vaddq_u32(abcd, saved_abcd));
+    vst1q_u32(h + 4, vaddq_u32(efgh, saved_efgh));
+}
+#endif
+inline void sha256_impl(const uint8_t* msg, size_t len, uint8_t out[32], bool accelerated) {
+    (void)accelerated;
     static const uint32_t K[64] = {
         0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
         0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
@@ -38,6 +68,12 @@ inline void sha256(const uint8_t* msg, size_t len, uint8_t out[32]) {
                      0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
 
     auto processBlock = [&](const uint8_t* p) {
+#if defined(__ANDROID__) && defined(__aarch64__)
+        if (accelerated) {
+            compress_sha2(h, p, K);
+            return;
+        }
+#endif
         uint32_t w[64];
         for (int t = 0; t < 16; ++t) {
             w[t] = (static_cast<uint32_t>(p[t * 4]) << 24) | (static_cast<uint32_t>(p[t * 4 + 1]) << 16) |
@@ -82,6 +118,24 @@ inline void sha256(const uint8_t* msg, size_t len, uint8_t out[32]) {
         out[j * 4 + 2] = static_cast<uint8_t>(h[j] >> 8);
         out[j * 4 + 3] = static_cast<uint8_t>(h[j]);
     }
+}
+}  // namespace detail
+
+inline bool sha256_acceleration_available() {
+#if defined(__ANDROID__) && defined(__aarch64__)
+    return (getauxval(AT_HWCAP) & HWCAP_SHA2) != 0;
+#else
+    return false;
+#endif
+}
+
+// Writes the same FIPS 180-4 digest on CPUs with and without SHA2 instructions.
+#if defined(NDKP_CSE_VMP)
+// shortcut: keep SHA native until inlined VM SHA passes differential tests.
+__attribute__((noinline))
+#endif
+inline void sha256(const uint8_t* msg, size_t len, uint8_t out[32]) {
+    detail::sha256_impl(msg, len, out, sha256_acceleration_available());
 }
 
 }  // namespace sha2

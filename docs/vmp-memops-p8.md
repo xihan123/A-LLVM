@@ -23,7 +23,7 @@ Windows x86_64，设备 OnePlus 7 GM1901、arm64、4 KiB 页：
 | LLVM | Base revision | 结果 |
 | --- | --- | --- |
 | 20 | `f142f8afe21bceb00fb495468aa0b5043e98c419` | 构建、内存操作 O0/O2、回调指针/并发/递归/TLS、完整性复验通过 |
-| 21 | `2d287f51eff2a5fbf84458a33f7fb2493cf67965` | 同上；QD 生产接入通过独立设备自检 |
+| 21 | `2d287f51eff2a5fbf84458a33f7fb2493cf67965` | 同上；接入项目生产接入通过独立设备自检 |
 
 两版本 registration.patch 在精确基线文件副本上通过 `git apply --check`，
 在对应已应用源码树上通过完整反向检查；注册补丁本身未修改。
@@ -38,7 +38,7 @@ python -B tests/cse-hardened/recheck_test.py --ndk <独立NDK> --serial <序列�
 ```
 
 本地日志保存在 `work/memops-*.log` 和 `work/memops20-*.log`。
-QD 接入实际对象记录了 11 次比较、1 次复制，共六个业务函数；另外新增三个初始化/安装 VMP 目标。
+接入项目实际对象记录了 11 次比较、1 次复制，共六个业务函数；另外新增三个初始化/安装 VMP 目标。
 发布门禁同时要求字节码、转换计数和新编译参数。完整性仍不保证行为不可观察。
 
 未验证 Linux 宿主构建、真实 LSPosed 或 16 KiB 页设备；LLVM 20 沿用已有验证 NDK 布局，

@@ -29,6 +29,23 @@ class KotlinTransformerTest {
         Selector selector=new Selector(Map.of(node.name,node));
         assertThrows(IllegalArgumentException.class,selector::run);
     }
+    @Test void methodAnnotationIncludesNonSyntheticKotlinIndyBodies() throws Exception {
+        ClassNode node=new ClassNode();
+        try(InputStream stream=kfixture.MethodFixture.class.getResourceAsStream("/kfixture/MethodFixture.class")) {
+            new ClassReader(Objects.requireNonNull(stream)).accept(node,0);
+        }
+        var bodies=node.methods.stream().filter(m->m.name.startsWith("nested$lambda$")).toList();
+        assertTrue(bodies.size()>=2, "fixture must exercise nested indy lambdas");
+        assertTrue(bodies.stream().anyMatch(m->(m.access&Opcodes.ACC_SYNTHETIC)==0));
+        var reference=Selector.find(node,"named$lambda$reference","(I)I");
+        assertNotNull(reference);
+        assertEquals(Opcodes.ACC_PRIVATE|Opcodes.ACC_STATIC,
+                reference.access&(Opcodes.ACC_PRIVATE|Opcodes.ACC_STATIC|Opcodes.ACC_SYNTHETIC));
+        var result=new Transformer().transform(List.of(input()),temp.resolve("method-only"),"dex2c_method");
+        for(var body:bodies) assertTrue(result.methods().contains(new MethodKey(node.name,body.name,body.desc)),body.name);
+        assertFalse(result.methods().stream().anyMatch(m->m.owner().equals(node.name)&&m.name().equals(reference.name)),
+                "source callable references do not opt unrelated implementations into protection");
+    }
     @Test void kotlinNativeMatchesJvm() throws Exception {
         String compiler=System.getProperty("dex2c.hostCompiler","");
         Assumptions.assumeFalse(compiler.isBlank());

@@ -97,6 +97,15 @@ Windows x86_64 上完成 Clang 构建；设备为 arm64、API 37、4 KiB 页。
 
 ## 生成解释器 bitcode
 
+LLVM 21 p12 的离线指令映射回归：
+
+```bash
+python tests/vmp/opcode_diversity.py --clang "$CLANG" --ndk "$NDK"
+```
+
+验证每方法映射与 payload key 独立，并保留无开关不变换。运行语义还需执行上面的
+设备回归；旧恢复器失败不等于无法恢复，见 [离线加固记录](../../docs/vmp-offline-p12.md)。
+
 ```bash
 bash scripts/gen_vm_bitcode.sh "$CLANG" aarch64 20
 ```

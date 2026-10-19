@@ -14,9 +14,36 @@ def allvmResources = tasks.register('bundleAllvmRuntime', Sync) {
     into layout.buildDirectory.dir('generated/allvm-resources')
     into('a_llvm') {
         from(rootProject.file('../runtime')) {
-            include 'ndkp_apkcert.cpp', 'ndkp_cse_runtime.cpp', 'cse_crypto.h', 'cse_region.h', 'apkcert.h', 'apkcert_io.h', 'sha256.h'
+            include 'ndkp_apkcert.cpp', 'ndkp_cse_runtime.cpp', 'cse_crypto.h', 'cse_region.h', 'apkcert.h', 'apkcert_io.h', 'sha256.h', 'qseg.h', 'ndkp_qseg_runtime.cpp'
+            include 'apkverify*', 'ndkp_apkverify.cpp', 'third_party/mbedtls/**'
         }
         from(rootProject.file('../scripts/seal_cse.py'))
+        from(rootProject.file('../scripts/seal_qseg.py'))
+        from(rootProject.file('../scripts/verify_dex2c_apk.py'))
+        from(rootProject.file('../scripts/dex2c_artifacts.py'))
+    }
+    doLast {
+        def base = destinationDir.toPath().resolve('a_llvm')
+        def vendor = base.resolve('third_party/mbedtls')
+        def manifest = new groovy.json.JsonSlurper().parse(vendor.resolve('MANIFEST.json').toFile())
+        manifest.files.each { name, expected ->
+            def actual = java.security.MessageDigest.getInstance('SHA-256').digest(vendor.resolve(name).toFile().bytes).encodeHex().toString()
+            if (actual != expected) throw new GradleException("Mbed TLS source digest mismatch: ${name}")
+        }
+        def verifierFiles
+        try (def paths = java.nio.file.Files.walk(base)) {
+            verifierFiles = paths.filter { java.nio.file.Files.isRegularFile(it) }.map { it.toFile() }
+                    .filter { f ->
+                        def name = base.relativize(f.toPath()).toString().replace('\\', '/')
+                        name != 'apkverify-resources.txt' && (name.startsWith('apkverify') ||
+                                name == 'ndkp_apkverify.cpp' || name.startsWith('third_party/mbedtls/'))
+                    }.collect(java.util.stream.Collectors.toCollection { new ArrayList() })
+            verifierFiles.sort { base.relativize(it.toPath()).toString() }
+        }
+        base.resolve('apkverify-resources.txt').toFile().text = verifierFiles.collect { f ->
+            java.security.MessageDigest.getInstance('SHA-256').digest(f.bytes).encodeHex().toString() + ' ' +
+                    base.relativize(f.toPath()).toString().replace('\\', '/')
+        }.join('\n') + '\n'
     }
 }
 sourceSets.main.resources.srcDir(allvmResources)
@@ -28,7 +55,10 @@ tasks.register('prepareDeviceFixtures', JavaExec) {
     dependsOn testClasses
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'io.github.xihan123.dex2c.core.DeviceFixtures'
-    args layout.buildDirectory.dir('device-fixtures').get().asFile.absolutePath,
+    args providers.gradleProperty('dex2c.fixtureDirectory').getOrElse(layout.buildDirectory.dir('device-fixtures').get().asFile.absolutePath),
             providers.gradleProperty('dex2c.ndk').getOrElse(''),
-            providers.gradleProperty('dex2c.hostCompiler').getOrElse('')
+            providers.gradleProperty('dex2c.hostCompiler').getOrElse(''),
+            providers.gradleProperty('dex2c.segmentedData').getOrElse('false'),
+            providers.gradleProperty('dex2c.verifyApkSignature').getOrElse('false'),
+            providers.gradleProperty('dex2c.nativeOnly').getOrElse('false')
 }

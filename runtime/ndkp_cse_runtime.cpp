@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
-// Compile separately without obfuscation and with -fno-lto (see README.md).
+// Compile separately with -fno-lto. NDKP_CSE_VMP selects only crypto cores;
+// never enable CSE/certificate binding on this bootstrap translation unit.
 #if !defined(__ANDROID__) || !defined(__aarch64__)
 #error "hardened CSE requires Android arm64"
 #endif
 #include "cse_crypto.h"
 #include "cse_region.h"
 #include "apkcert.h"
+#if defined(NDKP_APK_VERIFY)
+#include "apkverify_runtime.h"
+#endif
 #include <elf.h>
 #include <link.h>
+#if defined(NDKP_QSEG)
+#include "qseg.h"
+#endif
 
 namespace {
 using namespace ndkp_cse;
@@ -121,6 +128,11 @@ void inputs(const uint8_t* blob, uint8_t out[48]) {
     wipe(other, sizeof other);
   }
   if (load32(blob + 16) & 2) {
+#if defined(NDKP_APK_VERIFY)
+    uint8_t a[32]; ndkp_verified_apk(a, nullptr);
+    for (unsigned i = 0; i < 16; ++i) out[32 + i] = a[i] ^ a[16 + i];
+    wipe(a, sizeof a);
+#else
     uint8_t a[32], b[32]; struct stat sa{}, sb{};
     using namespace stringarmor::apkcert;
     Mapping ma{}, mb{};
@@ -132,6 +144,7 @@ void inputs(const uint8_t* blob, uint8_t out[48]) {
         sa.st_dev != sb.st_dev || sa.st_ino != sb.st_ino || sa.st_size != sb.st_size || !equal(a, b, 32)) fail();
     for (unsigned i = 0; i < 16; ++i) out[32 + i] = a[i] ^ a[16 + i];
     wipe(a, sizeof a); wipe(b, sizeof b);
+#endif
   }
 }
 
@@ -224,3 +237,23 @@ extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_recheck_module_v1
   ndkp_cse_decode_region_v1(scratch.data(), module, sentinel);
   wipe(scratch.data(), scratch.size());
 }
+
+#if defined(NDKP_QSEG)
+extern "C" void ndkp_qseg_measure(uint8_t code[32], uint8_t actualInputs[48]) {
+  Image image{};
+  image.anchor = reinterpret_cast<uintptr_t>(ndkp_qseg_image);
+  image.regions = reinterpret_cast<uintptr_t>(&ndkp_qseg_measure);
+  image.regionsSize = 4;
+  if (dl_iterate_phdr(hashImage, &image) || image.matches != 1 || !image.valid) fail();
+  std::memcpy(code, image.digest, 32);
+  inputs(ndkp_qseg_image, actualInputs);
+}
+extern "C" void ndkp_qseg_derive(const uint8_t code[32], const uint8_t actualInputs[48], uint8_t key[32]) {
+  ndkp_cse::derive(ndkp_qseg_image, code, actualInputs, key);
+}
+extern "C" bool ndkp_qseg_open(const uint8_t key[32], const uint8_t* aad, size_t an,
+                               uint8_t* data, size_t size, const uint8_t tag[16]) {
+  const uint8_t nonce[12] = {};
+  return ndkp_cse::open(key, nonce, aad, an, data, size, tag);
+}
+#endif

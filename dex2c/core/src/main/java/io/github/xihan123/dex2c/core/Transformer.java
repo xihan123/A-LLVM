@@ -14,6 +14,10 @@ public final class Transformer {
     public record Result(List<MethodKey> methods, Path classes, Path nativeSource, Path registration, Path rules, Path report) {}
 
     public Result transform(List<Path> inputs,Path output,String library) throws IOException {
+        return transform(inputs,output,library,Set.of());
+    }
+
+    public Result transform(List<Path> inputs,Path output,String library,Set<String> inheritedMethods) throws IOException {
         if(!library.matches("[A-Za-z][A-Za-z0-9_]*"))throw new IllegalArgumentException("dex2c: invalid library name");
         SortedMap<String,ClassNode> classes=new TreeMap<>();Map<String,byte[]> original=new TreeMap<>();
         for(Path input:inputs) {
@@ -26,11 +30,12 @@ public final class Transformer {
                     try(InputStream stream=jar.getInputStream(entry)){add(stream.readAllBytes(),classes,original);}
             }
         }
-        Selector selector=new Selector(classes);selector.run();
+        Selector selector=new Selector(classes);selector.run(inheritedMethods);
         RuntimeLayout runtime=new RuntimeLayout(library,selector.selected.isEmpty()?"Runtime":selector.selected.firstKey().owner());
         Set<String> changed=new HashSet<>(),keep=new TreeSet<>(),ids=new HashSet<>();
         Map<String,Set<String>> resolverTypes=new TreeMap<>();
         StringBuilder cpp=new StringBuilder("#include \"dex2c_runtime.h\"\n");
+        StringBuilder nativeCpp=new StringBuilder("#include \"dex2c_runtime.h\"\n");
         StringBuilder registration=new StringBuilder("#include \"dex2c_runtime.h\"\n#include <string.h>\n");
         SortedMap<String,List<String>> registrations=new TreeMap<>();
         Map<String,ClassNode> interfaceBridges=new HashMap<>();
@@ -50,7 +55,8 @@ public final class Transformer {
                 }
             }
             DynamicCalls.lower(owner,method,key);
-            cpp.append(new CppEmitter(key,method,keep,resolverTypes.computeIfAbsent(bridgeOwner.name,n->new TreeSet<>())).emit());
+            (selector.policies.get(key)==Selector.Policy.NATIVE_TREE?nativeCpp:cpp)
+                    .append(new CppEmitter(key,method,keep,resolverTypes.computeIfAbsent(bridgeOwner.name,n->new TreeSet<>())).emit());
             registration.append("extern \"C\" ").append(ctype(Type.getReturnType(method.desc))).append(' ').append(key.symbol())
                     .append('(').append(CppEmitter.parameters(key,method)).append(");\n");
             String descriptor=(method.access&ACC_STATIC)!=0?method.desc:"(L"+owner.name+";"+method.desc.substring(1);
@@ -109,18 +115,28 @@ public final class Transformer {
         verifyBytecode(jarPath,bridges,runtime);
         Path source=output.resolve("protected.cpp"),reg=output.resolve("registration.cpp"),rules=output.resolve("keep-rules.pro"),report=output.resolve("selection.json");
         Files.writeString(source,cpp);Files.writeString(reg,registration);
+        Files.writeString(output.resolve("native.cpp"),nativeCpp);
         Files.writeString(rules,String.join("\n",keep)+"\n");
-        Files.writeString(output.resolve("symbols.txt"),String.join("\n",selector.selected.keySet().stream().map(MethodKey::symbol).toList())+(selector.selected.isEmpty()?"":"\n"));
-        StringBuilder json=new StringBuilder("{\"schemaVersion\":2,\"bytecodeVerified\":true,\"library\":").append(json(library))
+        for(boolean nativeOnly:List.of(false,true)) {
+            var symbols=selector.selected.keySet().stream().filter(k->(selector.policies.get(k)==Selector.Policy.NATIVE_TREE)==nativeOnly).map(MethodKey::symbol).toList();
+            Files.writeString(output.resolve(nativeOnly?"native-symbols.txt":"symbols.txt"),String.join("\n",symbols)+(symbols.isEmpty()?"":"\n"));
+        }
+        StringBuilder json=new StringBuilder("{\"schemaVersion\":3,\"bytecodeVerified\":true,\"library\":").append(json(library))
                 .append(",\"registrationCall\":").append(json(runtime.ensure())).append(",\"methods\":[");
         boolean first=true;
         for(var entry:selector.selected.entrySet()) {
             if(!first)json.append(',');first=false;
             json.append("{\"method\":").append(json(entry.getKey().toString())).append(",\"symbol\":").append(json(entry.getKey().symbol()))
                     .append(",\"reason\":").append(json(entry.getValue()))
+                    .append(",\"protection\":").append(json(selector.policies.get(entry.getKey())==Selector.Policy.NATIVE_TREE?"native-cse":"vmp"))
                     .append(",\"bridge\":").append(json(bridges.get(entry.getKey()).toString())).append('}');
         }
-        json.append("],\"excluded\":[");first=true;
+        json.append("],\"inherited\":{");first=true;
+        for(var entry:selector.inherited.entrySet()) {
+            if(!first)json.append(',');first=false;
+            json.append(json(entry.getKey())).append(':').append(json(entry.getValue().toString()));
+        }
+        json.append("},\"excluded\":[");first=true;
         for(var entry:selector.excluded.entrySet()) {
             if(!first)json.append(',');first=false;
             json.append("{\"method\":").append(json(entry.getKey().toString())).append(",\"reason\":").append(json(entry.getValue())).append('}');

@@ -13,6 +13,33 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class TransformerTest {
     @TempDir Path temp;
+    @Test void primitiveInstructionsDoNotCreateJniExceptionEdges() {
+        var method=new MethodNode(Opcodes.ACC_STATIC,"sum","()I",null,null);
+        method.visitInsn(Opcodes.ICONST_2);method.visitInsn(Opcodes.ICONST_3);
+        method.visitInsn(Opcodes.IADD);method.visitInsn(Opcodes.IRETURN);method.visitMaxs(2,0);
+        String cpp=new CppEmitter(new MethodKey("sample/Primitive","sum","()I"),method,
+                new HashSet<>(),new HashSet<>()).emit();
+        assertEquals(1,cpp.lines().filter(line->line.contains("ExceptionCheck()")).count());
+        assertFalse(cpp.contains("goto E"));
+    }
+    @Test void referenceAllocationAndIntegerDivisionRetainExceptionEdges() {
+        var ref=new MethodNode(Opcodes.ACC_STATIC,"copy","(Ljava/lang/Object;)Ljava/lang/Object;",null,null);
+        ref.visitVarInsn(Opcodes.ALOAD,0);ref.visitInsn(Opcodes.ARETURN);ref.visitMaxs(1,1);
+        String cpp=new CppEmitter(new MethodKey("sample/Reference","copy",ref.desc),ref,
+                new HashSet<>(),new HashSet<>()).emit();
+        assertTrue(cpp.contains("goto E0;"),"NewLocalRef OOM must still propagate");
+        var divide=new MethodNode(Opcodes.ACC_STATIC,"divide","(II)I",null,null);
+        Label start=new Label(),end=new Label(),handler=new Label();
+        divide.visitTryCatchBlock(start,end,handler,"java/lang/ArithmeticException");
+        divide.visitLabel(start);divide.visitVarInsn(Opcodes.ILOAD,0);divide.visitVarInsn(Opcodes.ILOAD,1);
+        divide.visitInsn(Opcodes.IDIV);divide.visitLabel(end);divide.visitInsn(Opcodes.IRETURN);
+        divide.visitLabel(handler);divide.visitVarInsn(Opcodes.ASTORE,2);
+        divide.visitInsn(Opcodes.ICONST_M1);divide.visitInsn(Opcodes.IRETURN);divide.visitMaxs(2,3);
+        cpp=new CppEmitter(new MethodKey("sample/Division","divide",divide.desc),divide,
+                new HashSet<>(),new HashSet<>()).emit();
+        assertTrue(cpp.contains("goto E3;"));
+        assertTrue(cpp.contains("d2c_catch(f, \"java/lang/ArithmeticException\""));
+    }
     Path compileFixture() throws Exception {
         Path source=temp.resolve("Run.java");
         try(InputStream input=getClass().getResourceAsStream("/fixtures/Run.java")){Files.copy(Objects.requireNonNull(input),source);}

@@ -28,6 +28,12 @@ __pycache__/
 *.swp
 .DS_Store
 
+# AI 编码助手本地目录
+/.claude/
+/.agents/
+/.zcode/
+CLAUDE.md
+
 # 本地 discover 干跑输出
 matrix.json
 

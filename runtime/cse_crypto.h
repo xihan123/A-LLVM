@@ -8,8 +8,23 @@
 #include <cstring>
 #include <vector>
 
+// Only the separately compiled runtime opts in. Business CSE constants and the
+// sealer's host-side primitives must not acquire VMP annotations implicitly.
+#if defined(NDKP_CSE_VMP)
+#define NDKP_CSE_CORE __attribute__((annotate("ndkp.vmp"), noinline))
+#define NDKP_CSE_PRIMITIVE __attribute__((noinline))
+#else
+#define NDKP_CSE_CORE
+#define NDKP_CSE_PRIMITIVE
+#endif
+
 namespace ndkp_cse {
-inline void wipe(void* p, size_t n) {
+#if defined(NDKP_CSE_VMP)
+// Do not let a native inline definition from another TU win COMDAT selection
+// over a protected crypto implementation (or collide with its promoted linkage).
+namespace vmp {
+#endif
+NDKP_CSE_PRIMITIVE inline void wipe(void* p, size_t n) {
   volatile uint8_t* v = static_cast<volatile uint8_t*>(p);
   while (n--) *v++ = 0;
 }
@@ -25,7 +40,7 @@ inline void store32(uint8_t* p, uint32_t x) {
 inline void store64(uint8_t* p, uint64_t x) {
   for (unsigned i = 0; i < 8; ++i) p[i] = uint8_t(x >> (i * 8));
 }
-inline bool equal(const uint8_t* a, const uint8_t* b, size_t n) {
+NDKP_CSE_PRIMITIVE inline bool equal(const uint8_t* a, const uint8_t* b, size_t n) {
   uint32_t diff = 0;
   for (size_t i = 0; i < n; ++i) diff |= a[i] ^ b[i];
   return diff == 0;
@@ -35,7 +50,7 @@ inline void qr(uint32_t& a, uint32_t& b, uint32_t& c, uint32_t& d) {
   a += b; d = rotl(d ^ a, 16); c += d; b = rotl(b ^ c, 12);
   a += b; d = rotl(d ^ a, 8); c += d; b = rotl(b ^ c, 7);
 }
-inline void block(const uint8_t key[32], const uint8_t nonce[12], uint32_t counter,
+NDKP_CSE_PRIMITIVE inline void block(const uint8_t key[32], const uint8_t nonce[12], uint32_t counter,
                   uint8_t out[64]) {
   uint32_t s[16] = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574};
   for (unsigned i = 0; i < 8; ++i) s[4 + i] = load32(key + 4 * i);
@@ -51,7 +66,7 @@ inline void block(const uint8_t key[32], const uint8_t nonce[12], uint32_t count
   for (unsigned i = 0; i < 16; ++i) store32(out + 4 * i, x[i] + s[i]);
   wipe(x, sizeof x); wipe(s, sizeof s);
 }
-inline void crypt(const uint8_t key[32], const uint8_t nonce[12], uint8_t* p, size_t n) {
+NDKP_CSE_PRIMITIVE inline void crypt(const uint8_t key[32], const uint8_t nonce[12], uint8_t* p, size_t n) {
   uint8_t ks[64]; uint32_t counter = 1;
   while (n) {
     block(key, nonce, counter++, ks);
@@ -62,7 +77,7 @@ inline void crypt(const uint8_t key[32], const uint8_t nonce[12], uint8_t* p, si
   wipe(ks, sizeof ks);
 }
 // 26-bit-limb Poly1305; all arithmetic has fixed iteration counts.
-inline void poly1305(const uint8_t key[32], const uint8_t* msg, size_t n, uint8_t tag[16]) {
+NDKP_CSE_PRIMITIVE inline void poly1305(const uint8_t key[32], const uint8_t* msg, size_t n, uint8_t tag[16]) {
   const uint32_t r0 = load32(key) & 0x3ffffff;
   const uint32_t r1 = (load32(key + 3) >> 2) & 0x3ffff03;
   const uint32_t r2 = (load32(key + 6) >> 4) & 0x3ffc0ff;
@@ -115,7 +130,7 @@ inline void poly1305(const uint8_t key[32], const uint8_t* msg, size_t n, uint8_
   f = uint64_t(uint32_t(h3 >> 18 | h4 << 8)) + load32(key + 28) + (f >> 32);
   store32(tag + 12, uint32_t(f));
 }
-inline void auth(const uint8_t key[32], const uint8_t nonce[12],
+NDKP_CSE_PRIMITIVE inline void auth(const uint8_t key[32], const uint8_t nonce[12],
                  const uint8_t* aad, size_t an, const uint8_t* data, size_t n, uint8_t tag[16]) {
   std::vector<uint8_t> mac((an + 15) / 16 * 16 + (n + 15) / 16 * 16 + 16, 0);
   if (an) std::memcpy(mac.data(), aad, an);
@@ -130,14 +145,14 @@ inline void seal(const uint8_t key[32], const uint8_t nonce[12], const uint8_t* 
                  size_t an, uint8_t* data, size_t n, uint8_t tag[16]) {
   crypt(key, nonce, data, n); auth(key, nonce, aad, an, data, n, tag);
 }
-inline bool open(const uint8_t key[32], const uint8_t nonce[12], const uint8_t* aad,
+NDKP_CSE_CORE inline bool open(const uint8_t key[32], const uint8_t nonce[12], const uint8_t* aad,
                  size_t an, uint8_t* data, size_t n, const uint8_t tag[16]) {
   uint8_t computed[16]; auth(key, nonce, aad, an, data, n, computed);
   const bool ok = equal(computed, tag, 16); wipe(computed, sizeof computed);
   if (ok) crypt(key, nonce, data, n);
   return ok;
 }
-inline void hmac(const uint8_t* key, size_t kn, const uint8_t* msg, size_t n, uint8_t out[32]) {
+NDKP_CSE_PRIMITIVE inline void hmac(const uint8_t* key, size_t kn, const uint8_t* msg, size_t n, uint8_t out[32]) {
   uint8_t k[64] = {}, outer[96];
   if (kn > 64) stringarmor::sha2::sha256(key, kn, k);
   else if (kn) std::memcpy(k, key, kn);
@@ -148,7 +163,7 @@ inline void hmac(const uint8_t* key, size_t kn, const uint8_t* msg, size_t n, ui
   stringarmor::sha2::sha256(outer, sizeof outer, out);
   wipe(k, sizeof k); wipe(outer, sizeof outer); wipe(inner.data(), inner.size());
 }
-inline void hkdf(const uint8_t* ikm, size_t n, const uint8_t salt[32],
+NDKP_CSE_PRIMITIVE inline void hkdf(const uint8_t* ikm, size_t n, const uint8_t salt[32],
                  const uint8_t* info, size_t in, uint8_t out[32]) {
   uint8_t prk[32]; hmac(salt, 32, ikm, n, prk);
   std::vector<uint8_t> expanded(info, info + in); expanded.push_back(1);
@@ -163,12 +178,18 @@ constexpr uint8_t Magic[8] = {'N','D','K','P','C','S','E',1};
 // Header: size@8, state@12, flags@16, count@20, module-id@24, seed@40,
 // nonce@72, expected-inputs@104 (48 staging bytes), code-hash@152,
 // seed-mask@184..215, reserved@216..255. Expected inputs are erased after sealing.
-inline void derive(const uint8_t* h, const uint8_t code[32], const uint8_t inputs[48], uint8_t key[32]) {
-  uint8_t ikm[80], info[64] = {};
+// Material assembly is a primitive, like HKDF; keep byte loops outside VM control.
+NDKP_CSE_PRIMITIVE inline void key_material(const uint8_t* h, const uint8_t code[32],
+                                           const uint8_t inputs[48], uint8_t ikm[80], uint8_t info[64]) {
   for (unsigned i = 0; i < 32; ++i) ikm[i] = h[40 + i] ^ h[184 + i];
   std::memcpy(ikm + 32, inputs, 48);
+  std::memset(info, 0, 64);
   std::memcpy(info, "NDKP-CSE-v1", 11); std::memcpy(info + 16, h + 24, 16);
   std::memcpy(info + 32, code, 32);
+}
+NDKP_CSE_CORE inline void derive(const uint8_t* h, const uint8_t code[32], const uint8_t inputs[48], uint8_t key[32]) {
+  uint8_t ikm[80], info[64];
+  key_material(h, code, inputs, ikm, info);
   hkdf(ikm, sizeof ikm, h + 72, info, sizeof info, key); wipe(ikm, sizeof ikm);
 }
 inline void aad(const uint8_t* h, uint32_t ordinal, uint32_t cap, uint8_t out[40]) {
@@ -176,5 +197,11 @@ inline void aad(const uint8_t* h, uint32_t ordinal, uint32_t cap, uint8_t out[40
   store32(out + 20, load32(h + 16)); store32(out + 24, ordinal); store32(out + 28, cap);
   store32(out + 32, load32(h + 8)); store32(out + 36, load32(h + 20));
 }
+#if defined(NDKP_CSE_VMP)
+} // namespace vmp
+using namespace vmp;
+#endif
 } // namespace ndkp_cse
+#undef NDKP_CSE_CORE
+#undef NDKP_CSE_PRIMITIVE
 #endif

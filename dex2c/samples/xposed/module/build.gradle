@@ -22,3 +22,6 @@ if (providers.gradleProperty('dex2c.clang').isPresent()) {
 if (providers.gradleProperty('dex2c.certificate').isPresent()) {
     dex2c { certificateFile=file(providers.gradleProperty('dex2c.certificate').get()) }
 }
+if (providers.gradleProperty('dex2c.verifyApkSignature').isPresent()) {
+    dex2c { verifyApkSignature=providers.gradleProperty('dex2c.verifyApkSignature').map { it.toBoolean() } }
+}

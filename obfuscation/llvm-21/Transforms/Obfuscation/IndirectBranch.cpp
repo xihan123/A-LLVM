@@ -135,6 +135,14 @@ struct IndirectBranch : public FunctionPass {
     std::shuffle(Targets.begin(), Targets.end(), Engine);
     auto &M = *Fn.getParent();
     auto &Ctx = M.getContext();
+    // AsmWriter otherwise rebuilds a whole function's SlotTracker for every
+    // unnamed blockaddress in this global table (quadratic for large VMs).
+    const bool DiscardNames = Ctx.shouldDiscardValueNames();
+    Ctx.setDiscardValueNames(false);
+    for (BasicBlock *Target : Targets)
+      if (!Target->hasName())
+        Target->setName("ndkp.bb");
+    Ctx.setDiscardValueNames(DiscardNames);
     auto *Int32 = Type::getInt32Ty(Ctx);
     auto *IntPtr = M.getDataLayout().getIntPtrType(Ctx);
     auto *Key = ConstantInt::get(Int32, RandomEngine.get_uint32_t());

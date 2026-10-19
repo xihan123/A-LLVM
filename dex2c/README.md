@@ -1,12 +1,61 @@
 # dex2c：Java/Kotlin 方法保护
 
-独立 Gradle 构建，插件 ID 为 `io.github.xihan123.dex2c`，当前版本 `0.1.3`。标注方法的实现转换为 JNI/C++，经 A-LLVM VMP、强化字符串加密、自校验和签名证书绑定后生成 SO；原方法保留为调用 native 的薄包装。Debug 默认保持原实现，Release 转换失败会终止构建。
+独立 Gradle 构建，插件 ID 为 `io.github.xihan123.dex2c`，当前发布版本 `0.1.12`，配套 A-LLVM `p17`。标注方法的实现转换为 JNI/C++，经 A-LLVM VMP、强化字符串加密、自校验和签名证书绑定后生成 SO；原方法保留为调用 native 的薄包装。Debug 默认保持原实现，Release 转换失败会终止构建。
+
+`segmentedData` 提供独立的 QSEG 分段容器，插件默认关闭，由接入方显式开启。
+格式、加载流程及验收门槛见 [QSEG 说明](../runtime/QSEG.md)。
+
+本版包含默认关闭的 `verifyApkSignature` 和分层注解，均由接入方按需启用。
+`@dex2c` 保持 VMP 默认行为；`@dex2c(mode = ProtectionMode.NATIVE)` 选择 JNI + CSE，
+`@dex2c(mode = ProtectionMode.VMP)` 显式选择 VMP。Java/Kotlin 使用同一 `ProtectionMode` 枚举。
+选择优先级为方法注解、继承根规则、类注解、自动回调策略；`selection.json` 记录最终级别和生效原因。
+继承根仍选择 VMP 入口、native 回调；NATIVE-only 构建受支持。显式不支持的方法拒绝构建，Release 不保留原实现备用。
+完整验签、初始化顺序和最终 APK 任务见 [接入说明](../runtime/APK_VERIFY.md)，
+历史测试和未满足门槛见 [候选验证记录](APK_VERIFY_VALIDATION.md)，当前发布步骤见 [0.1.12 发布记录](RELEASE_0.1.12.md)。
 
 ## 工具链
 
-本版验收环境：Windows、JDK 21、Gradle 9.8.1、AGP 9.4.1、Kotlin 2.4.20、NDK `30.0.16248370`、LLVM 21 / patchset p11、`arm64-v8a`、minSdk 26。
+本版构建环境：Windows、JDK 21、Gradle 9.8.1、AGP 9.4.1、Kotlin 2.4.20、NDK `30.0.16248370`、LLVM 21 / patchset p17、`arm64-v8a`、minSdk 26。
 
 NDK 中的 Clang 必须支持 `-irobf-vmp-strict`、`-irobf-vmp-post` 及对应的保护 receipt。插件通过实际编译及逐方法 IR 验证探测能力，不仅检查版本字符串。开发时可指定本仓库 `build/bin/clang.exe`，链接器、资源头文件和 sysroot 仍使用指定 NDK。p10 及更早工具链无法通过本版二次混淆检查。
+
+0.1.4 修复 Kotlin 2.4 非 synthetic 的嵌套 lambda 选择。p12 编译器另提供离线的每方法指令映射随机化。
+Maven 插件不包含 Clang；本版使用 p17，包含此前的多 VMP TU 链接修复、字符串 runtime 和 QSEG pass。
+
+0.1.8 / p15 缓存同一 payload 块的 schedule seed，允许优化解码算术，并以 switch 分发 native 调用，
+仅在选中调用后读取参数。CSE 字节材料拼装移至原生 noinline helper；derive/open 仍受 VMP 保护。
+这减少了 VM 中的低层操作，保护范围存在取舍；公开证书的离线恢复边界不变。详见 [验收记录](VALIDATION.md)。
+
+0.1.7 为每份 IR 建立一次索引，复用全部保护校验；生成 C++ 时省去不会抛异常的基本指令检查，
+保留 JNI 引用复制的 OOM 和整数除零异常边。LLVM 21 p14 按实际字节码裁剪每方法解释器的无用 handler，
+保留独立随机指令映射、payload 加密、非法 opcode 路径及两个字符串 VMP 入口。
+样例接入实测 native 编译 86 → 25 秒量级，SO 体积减少约 37%；
+这是单次构建对比，完整验证与限制见 [验收记录](VALIDATION.md)。LLVM 20 本轮未改动。
+
+0.1.5 候选增加显式继承根选择。0.1.6 配合 A-LLVM p13 消除 VMP 跳转表文本输出的重复编号扫描，
+保留全部文本 IR 校验，并将字符串密钥派生与认证解密入口纳入 VMP、自校验和 post CFG。
+此候选尚未发布到远端 Maven；构建需指定本机 staging 仓库。接入及性能边界见
+[CSE 运行时说明](../runtime/CSE_HARDENED.md)。
+
+```kotlin
+dex2c {
+    inheritedMethods.set(setOf(
+        "com.example.shared.BaseHook#startHook()V",
+        "com.example.shared.BaseHook#lateInitHook()V",
+    ))
+}
+```
+
+跨输入 JAR 的具体子类解析到实际父类/覆写实现；该路径的入口使用 VMP，lambda、匿名类、命名方法引用和同一顶层类的普通辅助调用使用 native+CSE。旧注解仍保持 VMP 递归选择，显式注解优先。只支持父类链，接口 default 根、无匹配根、inline/reified 和无效方法直接失败。不会递归转换整个依赖库；构造器、初始化器和跨顶层普通调用必须额外审查。
+
+`selection.json` schema 3 记录每方法策略与逐子类继承映射，`native.cpp` / `native-symbols.txt` 保存非 VM 回调；`protection.json` schema 4 绑定选择清单、实际 VM/native 符号和 SO 摘要。原生回调从单独通过 CSE 校验的 IR 生成，不进入 VM。
+
+p16 / 0.1.9 将 16 字节认证标签的恒时比较放在原生密码原语边界，open 的认证与解密决策仍在 VM；
+Android arm64 的 SHA-256 根据 HWCAP_SHA2 选择硬件指令，其他 CPU 和主机保留软件实现。
+LLVM 21 的私有解释器按调用解析 TLS 地址，解码器复用该地址，保留实时状态读写与重入。
+算法、轮数、认证失败处理和两个 CSE VMP 入口保持不变，没有新增派生密钥缓存。
+
+转换与字符串封装不保证 APK-only 保密：若全部密钥材料仍可从 SO 和公开证书取得，离线恢复仍然可行。0.1.9 不包含远程敏感材料装载协议，也不宣称修复该缺口；使用者必须单独验收体积、性能和授权架构。
 
 ## 接入
 
@@ -32,7 +81,7 @@ dependencyResolutionManagement {
 ```kotlin
 plugins {
     id("com.android.application")
-    id("io.github.xihan123.dex2c") version "0.1.3"
+    id("io.github.xihan123.dex2c") version "0.1.12"
 }
 android {
     ndkVersion = "30.0.16248370"
@@ -44,7 +93,7 @@ android {
 dex2c {
     buildTypes.set(setOf("release"))
     certificateFile.set(file("signing-cert.der")) // 最终 APK 签名的公开证书，DER 或 PEM
-    // NDK 中已安装 p11 时无需指定。
+    // NDK 中已安装 p17 时无需指定。
     clangExecutable.set(file("F:/Project/android/LLVM-Patch/build/bin/clang.exe"))
 }
 ```
@@ -58,7 +107,7 @@ Python 可执行文件、Clang、NDK、证书和插件所带运行时/脚本均�
 插件自动加入应用的注解和运行时依赖。在需要注解的依赖模块中另加：
 
 ```kotlin
-dependencies { compileOnly("io.github.xihan123.dex2c:annotations:0.1.3") }
+dependencies { compileOnly("io.github.xihan123.dex2c:annotations:0.1.12") }
 ```
 
 插件应用在 application 模块；通过 AGP 公共 `ScopedArtifact.CLASSES` / `Scope.ALL` 统一处理应用及依赖模块。SO 使用生成 jniLibs 接口加入，兼容应用自己的 CMake/ndk-build，不修改它们的编译参数。
@@ -70,7 +119,7 @@ dependencies { compileOnly("io.github.xihan123.dex2c:annotations:0.1.3") }
 发布包含 annotations、runtime、core、gradle-plugin，以及 `plugins {}` DSL 使用的 plugin marker；各 Java 库附带 sources JAR、POM 和 Gradle metadata。测试模块 kotlin-fixtures 不发布。
 
 使用仓库根目录的 `scripts/publish_dex2c.py`（Python 3.11+）。设置 JDK 21 的 `JAVA_HOME`，
-准备 Windows / NDK r30 / A-LLVM p11 工具链后运行：
+准备 Windows / NDK r30 / A-LLVM p17 工具链后运行：
 
 ```powershell
 $env:JAVA_HOME = 'C:\Program Files\Java\jdk-21'
@@ -85,8 +134,10 @@ python scripts/publish_dex2c.py --check --clang $clang --ndk $ndk
 此步骤不上传，也不替代下文的设备和 LSPosed 回归；编译器或运行时变更仍需先完成真机验收。
 
 正式发布前，将 `build.gradle` 中版本递增，并同步 `Dex2cPlugin.java` 的 annotations/runtime
-依赖、`samples/xposed/shared/build.gradle` 以及文档示例。脚本校验代码依赖版本一致，不接受
-SNAPSHOT 或覆写已发布版本。通过当前进程环境变量提供凭据，不要写入源码或命令行：
+依赖、`samples/xposed/shared/build.gradle` 以及文档示例。脚本校验代码依赖版本一致，接受
+`major.minor.patch` 和带候选后缀的版本（如 `0.1.11-verify1`、`0.1.10-qseg2`、`1.2.3-rc.1`），
+不接受 SNAPSHOT、构建元数据后缀或覆写已发布版本。候选版本仍使用独立 Maven 坐标，
+通过发布检查不代表已完成全部设备验收。通过当前进程环境变量提供凭据，不要写入源码或命令行：
 
 ```powershell
 $publishCredential = Get-Credential -UserName release -Message 'Maven 发布凭据'

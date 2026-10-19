@@ -263,8 +263,10 @@ inline bool parseSignerCertSha256Fd(int fd, uint64_t fileSize, uint8_t out[32]) 
 }
 
 // Check central and local record boundaries without inflating file contents.
+struct ZipLibrary { uint64_t offset, compressed, size; uint16_t method; };
 template <class IO = apkio::Posix>
-inline bool zipHasLibrary(int fd, uint64_t size, const char* entry, bool& found) {
+inline bool zipHasLibrary(int fd, uint64_t size, const char* entry, bool& found,
+                          ZipLibrary* library = nullptr) {
     ZipDirectory cd{};
     if (!zipDirectory<IO>(fd, size, cd)) return false;
     uint64_t pos = cd.offset;
@@ -324,6 +326,7 @@ inline bool zipHasLibrary(int fd, uint64_t size, const char* entry, bool& found)
         if (match) {
             if (found || le32(h + 24) == 0) return false;
             found = true;
+            if (library) *library = {data, compressed, le32(h + 24), method};
         }
         pos += recordSize;
     }

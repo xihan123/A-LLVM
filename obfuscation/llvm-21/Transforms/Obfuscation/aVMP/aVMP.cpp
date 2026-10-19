@@ -8,12 +8,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/InlineCost.h"
 #include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/IR/ReplaceConstant.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -35,17 +37,20 @@
 #include "llvm/Linker/Linker.h"
 #include "llvm/Pass.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
+#include "llvm/Transforms/Obfuscation/SegmentedData.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/PrettyStackTrace.h"
+#include "llvm/Support/RandomNumberGenerator.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/SystemUtils.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Transforms/Obfuscation/aVMP/aVMP.h"
@@ -53,6 +58,7 @@
 #include "llvm/Transforms/Obfuscation/aVMP/aVMPCrypto.h"
 #include "llvm/Transforms/Obfuscation/aVMP/aVMPDispatcher.h"
 #include "llvm/Transforms/Obfuscation/aVMP/aVMPMemoryOps.h"
+#include "llvm/Transforms/Obfuscation/CryptoUtils.h"
 #include <assert.h>
 
 static uint64_t vmpSplitmix64NextLocal(uint64_t &State) {
@@ -495,6 +501,8 @@ class GOVMTranslator {
         GlobalVariable *get_data_seg_addr() { return this->data_seg_addr; }
         GlobalVariable *get_code_seg_addr() { return this->code_seg_addr; }
         uint64_t get_vm_function_key() const { return this->vm_function_key; }
+        const uint8_t *get_opcode_dispatch_map() const { return opcode_dispatch_map; }
+        const bool *get_used_opcodes() const { return used_opcodes; }
         int get_data_seg_size() { return this->curr_data_offset; }
         std::map<GlobalValue *, int> *get_gv_value_map() { return &gv_value_map; }
         std::map<int, GEPInfo> *get_gep_info_map() { return &gep_info_map; }
@@ -565,6 +573,8 @@ class GOVMTranslator {
         uint64_t xorshift32_seed = 0;
         uint8_t opcode_encode_map[OP_TOTAL + 1] = {};
         uint8_t opcode_decode_map[OP_TOTAL + 1] = {};
+        uint8_t opcode_dispatch_map[OP_TOTAL + 1] = {};
+        bool used_opcodes[OP_TOTAL + 1] = {};
 
         /* encrypt vm_code */
         // mark seed for each basicblock
@@ -609,6 +619,22 @@ class GOVMTranslator {
                     opcode_encode_map[semantic] = static_cast<uint8_t>(ordinal);
                 }
             }
+
+            // Keep wire ordinals independent of the recoverable payload key.
+            // Sattolo's cycle changes every semantic; its inverse lives in dispatch edges.
+            CryptoUtils RandomEngine;
+            // CryptoUtils defaults to a time-based seed on Windows.
+            uint8_t OpcodeSeed[16];
+            if (getRandomBytes(OpcodeSeed, sizeof(OpcodeSeed)))
+                report_fatal_error("VMP: cannot obtain private opcode randomness");
+            RandomEngine.prng_seed(toHex(ArrayRef<uint8_t>(OpcodeSeed)));
+            for (unsigned i = OP_TOTAL; i > 1; --i) {
+                unsigned j = RandomEngine.get_range(i - 1) + 1;
+                std::swap(opcode_encode_map[i], opcode_encode_map[j]);
+            }
+            for (unsigned semantic = 1; semantic <= OP_TOTAL; ++semantic)
+                opcode_dispatch_map[semantic] =
+                    opcode_decode_map[opcode_encode_map[semantic]];
 
             if (isIRObfuscationDebugEnabled()) {
                 errs() << "[VMP_VARIANT] function=" << F->getName()
@@ -705,6 +731,8 @@ class GOVMTranslator {
 
         // pack one byte opcode
         std::vector<uint8_t> pack_op(uint8_t op){
+            if (op <= OP_TOTAL)
+                used_opcodes[op] = true;
             uint8_t ordinal = op;
             if (op > 0 && op <= OP_TOTAL) {
                 ordinal = opcode_encode_map[op] ? opcode_encode_map[op] : op;
@@ -972,6 +1000,10 @@ void GOVMTranslator::construct_gv() {
                                                     /*Name=*/"gv_code_seg_"+F->getName());
     // 设置段名为 .AProtect.data
     gv_code_seg->setSection(".AProtect.data");
+    if (isSegmentedDataEnabled()) {
+      GlobalVariable *Ref = stageSegment(*Mod, F->getName(), 1, vm_code);
+      gv_code_seg->setMetadata("ndkp.qseg", MDNode::get(Mod->getContext(), ValueAsMetadata::get(Ref)));
+    }
     
 
 
@@ -1063,7 +1095,9 @@ void GOVMTranslator::setup_callinst_handler() {
     this->callinst_handler_curr_idx = 0;
 
     this->callinst_handler = func;
-    this->callinst_handler_conBBL = entryBB;  // 使用entryBB作为conBBL
+    BasicBlock *defaultBB = BasicBlock::Create(func->getContext(), "unknownCall", func);
+    IRBentryBB.CreateSwitch(target_id_value, defaultBB);
+    this->callinst_handler_conBBL = defaultBB;
 
     this->targetfunc_id = target_id_value;
     
@@ -1113,7 +1147,9 @@ void GOVMTranslator::handle_callinst(CallBase *inst, long long curr_func_id) {
         return;
     }
     
-    IRBuilder<> IRBcon(this->callinst_handler_conBBL);
+    // Decode arguments only for the selected call site, never for other frames.
+    BasicBlock *callFunction = BasicBlock::Create(Mod->getContext(), "callFunction_" + to_string(this->callinst_handler_curr_idx), this->callinst_handler);
+    IRBuilder<> IRBcon(callFunction);
     Value *dataFrame = IRBcon.CreateLoad(gv_data_seg->getValueType(),
                                         gv_data_seg, "vm_caller_frame");
     Function *directCallee = inst->isIndirectCall() ? nullptr : inst->getCalledFunction();
@@ -1392,7 +1428,6 @@ void GOVMTranslator::handle_callinst(CallBase *inst, long long curr_func_id) {
 
     // errs() << "[handle_callinst] Args done, creating callFunction BB\n";
     // secondly, we create a new basic block to construct callinst
-    BasicBlock *callFunction = BasicBlock::Create(Mod->getContext(), "callFunction_" + to_string(this->callinst_handler_curr_idx), this->callinst_handler);
     IRBuilder<> IRBcallFunction(callFunction);
     
     // DEBUG: 添加调试输出
@@ -1635,13 +1670,8 @@ void GOVMTranslator::handle_callinst(CallBase *inst, long long curr_func_id) {
     resultBuilder->CreateRetVoid();
     
 
-    // compare and jmp
-    BasicBlock *falseconBBL = BasicBlock::Create(Mod->getContext(), "falseconBBL", this->callinst_handler);
-
-    Value *currfunc_id = ConstantInt::get(Type::getInt64Ty(Mod->getContext()), curr_func_id);
-    Value *condition = IRBcon.CreateICmpEQ(this->targetfunc_id, currfunc_id);
-    IRBcon.CreateCondBr(condition, callFunction, falseconBBL);
-    this->callinst_handler_conBBL = falseconBBL;
+    auto *dispatch = cast<SwitchInst>(this->callinst_handler_entryBB->getTerminator());
+    dispatch->addCase(ConstantInt::get(Type::getInt64Ty(Mod->getContext()), curr_func_id), callFunction);
 
 }
 
@@ -3845,9 +3875,9 @@ void GOVMModifier::run() {
 
     Value * data_seg_ptr2int = irbuilder.CreatePtrToInt(dataFrame, Type::getInt64Ty(Mod->getContext()));
     irbuilder.CreateStore(data_seg_ptr2int, data_seg_addr);
-    Value * code_seg_ptr2int = irbuilder.CreatePtrToInt(gv_code_seg, Type::getInt64Ty(Mod->getContext()));
+    Value * code_seg_ptr2int = irbuilder.CreatePtrToInt(segmentVMData(irbuilder, gv_code_seg), Type::getInt64Ty(Mod->getContext()));
     irbuilder.CreateStore(code_seg_ptr2int, code_seg_addr);
-    irbuilder.CreateStore(code_seg_ptr2int, dispatch_code_seg_addr);
+    irbuilder.CreateStore(irbuilder.CreatePtrToInt(gv_code_seg, Type::getInt64Ty(Mod->getContext())), dispatch_code_seg_addr);
 
     StoreInst *ndkp_vmkey_store = irbuilder.CreateStore(ConstantInt::get(Type::getInt64Ty(Mod->getContext()), vm_function_key), vm_function_key_gv);
     // 打 !ndkp.vmpkey.entry 标记：供 CertBind（-irobf-cert-bind）按标记命中此入口桩密钥常量
@@ -4438,7 +4468,9 @@ static void removePhiIncomingForOldDispatchPred(BasicBlock *Dest,
 
 static bool randomizeVmOpcodeDispatch(Function *Clone,
                                       uint64_t FunctionKey,
-                                      GlobalVariable *SaltGV) {
+                                      GlobalVariable *SaltGV,
+                                      const uint8_t *DispatchMap,
+                                      const bool *UsedOpcodes) {
     SwitchInst *SI = findVmOpcodeDispatchSwitch(Clone);
     if (!SI) {
         if (isIRObfuscationDebugEnabled() && Clone) {
@@ -4457,9 +4489,19 @@ static bool randomizeVmOpcodeDispatch(Function *Clone,
     }
 
     std::vector<VMPDispatchCase> Cases;
+    std::set<BasicBlock *> OriginalDestinations = {DefaultDest};
     Cases.reserve(SI->getNumCases());
     for (auto CaseIt = SI->case_begin(); CaseIt != SI->case_end(); ++CaseIt) {
-        Cases.push_back({CaseIt->getCaseValue(), CaseIt->getCaseSuccessor()});
+        uint64_t Semantic = CaseIt->getCaseValue()->getZExtValue();
+        if (Semantic > OP_TOTAL)
+            return false;
+        OriginalDestinations.insert(CaseIt->getCaseSuccessor());
+        // Only remove handlers unreachable from this method's serialized code.
+        // Wire mappings, payload encryption and the invalid-opcode path stay intact.
+        if (!UsedOpcodes[Semantic])
+            continue;
+        Cases.push_back({ConstantInt::get(OpcodeTy, DispatchMap[Semantic]),
+                         CaseIt->getCaseSuccessor()});
     }
     if (Cases.empty()) {
         return false;
@@ -4485,14 +4527,12 @@ static bool randomizeVmOpcodeDispatch(Function *Clone,
             Ctx, BaseName + "." + std::to_string(I), F));
     }
 
-    std::set<BasicBlock *> Destinations;
     for (size_t I = 0; I < Cases.size(); ++I) {
         BasicBlock *TestBB = TestBlocks[I];
         BasicBlock *CaseDest = Cases[I].Dest;
         BasicBlock *FalseDest = (I + 1 < Cases.size()) ? TestBlocks[I + 1] : DefaultDest;
 
         addPhiIncomingForNewDispatchPred(CaseDest, SwitchBB, TestBB);
-        Destinations.insert(CaseDest);
 
         IRBuilder<> Builder(TestBB);
         Value *LHS = OpcodeValue;
@@ -4516,15 +4556,15 @@ static bool randomizeVmOpcodeDispatch(Function *Clone,
     }
 
     addPhiIncomingForNewDispatchPred(DefaultDest, SwitchBB, TestBlocks.back());
-    Destinations.insert(DefaultDest);
 
     IRBuilder<> EntryBuilder(SI);
     EntryBuilder.CreateBr(TestBlocks.front());
     SI->eraseFromParent();
 
-    for (BasicBlock *Dest : Destinations) {
+    for (BasicBlock *Dest : OriginalDestinations) {
         removePhiIncomingForOldDispatchPred(Dest, SwitchBB);
     }
+    removeUnreachableBlocks(*Clone);
 
     if (isIRObfuscationDebugEnabled()) {
         errs() << "[VMP_DISPATCH_RANDOMIZE] clone=" << F->getName()
@@ -4537,12 +4577,33 @@ static bool randomizeVmOpcodeDispatch(Function *Clone,
     return true;
 }
 
+// Resolve each TLS address once per invocation; keep all loads/stores live so
+// nested VM calls still observe the wrapper's saved/restored active frame.
+static void pinInterpreterTLSAddresses(Function &F) {
+  SmallVector<Constant *, 32> TLS;
+  for (GlobalVariable &GV : F.getParent()->globals())
+    if (GV.isThreadLocal()) TLS.push_back(&GV);
+  convertUsersOfConstantsToInstructions(TLS, &F);
+  IRBuilder<> B(&*F.getEntryBlock().getFirstInsertionPt());
+  for (Constant *C : TLS) {
+    SmallVector<Use *, 32> Uses;
+    for (Use &U : C->uses())
+      if (auto *I = dyn_cast<Instruction>(U.getUser()))
+        if (I->getFunction() == &F) Uses.push_back(&U);
+    if (Uses.empty()) continue;
+    Value *Address = B.CreateThreadLocalAddress(C);
+    for (Use *U : Uses) U->set(Address);
+  }
+}
+
 static Function *cloneVmInterpreterForFunction(Module *M,
                                                Function *SharedInterpreter,
                                                Function *TargetFunction,
-                                               uint64_t FunctionKey) {
+                                               uint64_t FunctionKey,
+                                               const uint8_t *DispatchMap,
+                                               const bool *UsedOpcodes) {
     if (!M || !SharedInterpreter || !TargetFunction || SharedInterpreter->empty()) {
-        return SharedInterpreter;
+        report_fatal_error("VMP: missing interpreter for private opcode dispatch");
     }
 
     std::string Suffix = vmpMakeSafeSymbolSuffix(TargetFunction->getName(), FunctionKey);
@@ -4588,7 +4649,10 @@ static Function *cloneVmInterpreterForFunction(Module *M,
     LoadInst *SaltLoad = Builder.CreateLoad(I64Ty, SaltGV, "vmp.clone.salt");
     SaltLoad->setVolatile(true);
 
-    randomizeVmOpcodeDispatch(Clone, FunctionKey, SaltGV);
+    if (!randomizeVmOpcodeDispatch(Clone, FunctionKey, SaltGV, DispatchMap, UsedOpcodes))
+        report_fatal_error("VMP: private opcode dispatch specialization failed");
+
+    pinInterpreterTLSAddresses(*Clone);
 
     if (isIRObfuscationDebugEnabled()) {
         errs() << "[VMP_INTERPRETER_CLONE] function=" << TargetFunction->getName()
@@ -4727,6 +4791,9 @@ void GOVMInterpreter::run() {
         if (pre_link_functions.count(Fn.getName().str()))
             continue;
         Fn.setLinkage(GlobalValue::InternalLinkage);
+        // Internal helpers belong to this VM instance. Keeping their original
+        // COMDAT lets another VMP TU discard sections still referenced here.
+        Fn.setComdat(nullptr);
         Fn.setDSOLocal(true);
         Fn.setSection(".AProtect.text");
         normalizeLocalDefaultVisibility(&Fn);
@@ -5032,7 +5099,8 @@ struct VMProtect : public ModulePass {
       for (GOVMTranslator *translator : translators) {
         Function *F = translator->get_function();
         Function *vm_interpreter_func = cloneVmInterpreterForFunction(
-            &M, shared_vm_interpreter_func, F, translator->get_vm_function_key());
+            &M, shared_vm_interpreter_func, F, translator->get_vm_function_key(),
+            translator->get_opcode_dispatch_map(), translator->get_used_opcodes());
         GOVMModifier *modifier = new GOVMModifier(F, translator->get_gv_value_map(), translator->get_gep_info_map(),
                                                    translator->get_blockaddress_info_map(),
                                                    translator->get_value_map(),
@@ -5154,7 +5222,8 @@ PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM)
   for (GOVMTranslator *translator : translators) {
     Function *F = translator->get_function();
     Function *vm_interpreter_func = cloneVmInterpreterForFunction(
-        &M, shared_vm_interpreter_func, F, translator->get_vm_function_key());
+        &M, shared_vm_interpreter_func, F, translator->get_vm_function_key(),
+        translator->get_opcode_dispatch_map(), translator->get_used_opcodes());
     GOVMModifier *modifier = new GOVMModifier(F, translator->get_gv_value_map(), translator->get_gep_info_map(),
                                                translator->get_blockaddress_info_map(),
                                                translator->get_value_map(),

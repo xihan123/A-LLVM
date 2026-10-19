@@ -4699,6 +4699,9 @@ void GOVMInterpreter::run() {
         if (pre_link_functions.count(Fn.getName().str()))
             continue;
         Fn.setLinkage(GlobalValue::InternalLinkage);
+        // Internal helpers belong to this VM instance. Keeping their original
+        // COMDAT lets another VMP TU discard sections still referenced here.
+        Fn.setComdat(nullptr);
         Fn.setDSOLocal(true);
         Fn.setSection(".AProtect.text");
         normalizeLocalDefaultVisibility(&Fn);

@@ -16,14 +16,17 @@ public abstract class NativeTask extends DefaultTask {
     @InputFile @Optional @PathSensitive(PathSensitivity.NONE) public abstract RegularFileProperty getPythonExecutable();
     @Input public abstract Property<Integer> getMinSdk();
     @Input public abstract Property<String> getLibraryName();
+    @Input public abstract Property<Boolean> getSegmentedData();
+    @Input public abstract Property<Boolean> getVerifyApkSignature();
     @OutputDirectory public abstract DirectoryProperty getOutputDirectory();
     @Internal public abstract DirectoryProperty getJniDirectory();
+    @Internal public abstract DirectoryProperty getAssetsDirectory();
     @TaskAction public void compile() throws Exception {
         Path compiler=getClangExecutable().isPresent()?getClangExecutable().get().getAsFile().toPath():null;
         new NativeCompiler().compile(getGeneratedDirectory().get().getAsFile().toPath(),getOutputDirectory().get().getAsFile().toPath(),
                 getNdkDirectory().get().getAsFile().toPath(),compiler,getLibraryName().get(),getMinSdk().get(),
                 getCertificateFile().isPresent()?getCertificateFile().get().getAsFile().toPath():null,
-                getPythonExecutable().isPresent()?getPythonExecutable().get().getAsFile().toPath():null);
+                getPythonExecutable().isPresent()?getPythonExecutable().get().getAsFile().toPath():null,getSegmentedData().get(),getVerifyApkSignature().get());
         getLogger().lifecycle("dex2c: verified native library; {}",getOutputDirectory().file("protection.json").get().getAsFile());
     }
 }

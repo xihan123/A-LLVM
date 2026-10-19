@@ -26,6 +26,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ndk", type=Path, required=True)
     parser.add_argument("--clang", type=Path)
+    parser.add_argument("--runtime-vmp", action="store_true", help="virtualize and verify runtime key derivation and authenticated open (LLVM 21)")
     parser.add_argument("--serial")
     parser.add_argument("--compile-only", action="store_true", help="cross-build and verify ELF artifacts without adb")
     parser.add_argument("--work-dir", type=Path, help="retain local artifacts for inspection")
@@ -56,15 +57,43 @@ def main():
                 source / "loader.cpp", "-ldl", "-o", out / "loader")
             device("push", out / "loader", remote + "/loader")
             device("shell", "chmod", "700", remote + "/loader")
-            run(clang, *common, "-O2", "-fno-lto", "-fno-exceptions", "-Wall", "-Wextra", "-Werror",
-                "-c", ROOT / "runtime/ndkp_cse_runtime.cpp", "-o", out / "runtime.o")
+            runtime_flags = ["-fno-lto", "-fno-exceptions", "-Wall", "-Wextra", "-Werror"]
+            if args.runtime_vmp:
+                vmp_flags = ["-O1", "-frtti", "-fno-vectorize", "-fno-slp-vectorize", "-fno-unroll-loops",
+                             "-DNDKP_CSE_VMP", "-mllvm", "-irobf-vmp", "-mllvm", "-irobf-vmp-strict",
+                             "-mllvm", "-irobf-vmp-memops", "-mllvm", "-irobf-selfcheck",
+                             "-mllvm", "-irobf-selfcheck-entry"]
+                raw, final = out / "runtime.raw.ll", out / "runtime.ll"
+                run(clang, *common, *runtime_flags, *vmp_flags, "-S", "-emit-llvm",
+                    ROOT / "runtime/ndkp_cse_runtime.cpp", "-o", raw)
+                run(clang, *common, "-Oz", "-mllvm", "-irobf-vmp-post", "-S", "-emit-llvm", raw, "-o", final)
+                original, hardened = raw.read_text(), final.read_text()
+                names = re.findall(r'^define [^\n]*@(_ZN8ndkp_cse\w+)\([^\n]*!ndkp.vmp.protected', hardened, re.M)
+                assert len(names) == 2 and "ndkp_selfcheck_one" in hardened, names
+                code = r'^@gv_code_seg_\w+ = .*? c"([^"\n]+)"'
+                assert re.findall(code, original, re.M) == re.findall(code, hardened, re.M)
+                assert "ndkp.vmp.post" in hardened and "ndkp_certbind_mix" not in hardened
+                run(clang, *common, *runtime_flags, "-Oz", "-Xclang", "-disable-llvm-passes",
+                    "-c", final, "-o", out / "runtime.o")
+                print("[runtime-vmp] key derivation/authenticated open; bytecode unchanged; selfcheck and post enabled", flush=True)
+                run(clang, *common, "--driver-mode=g++", "-O2", "-static-libstdc++", "-I", ROOT / "runtime",
+                    source / "runtime_crypto_driver.cpp", out / "runtime.o", "-ldl", "-o", out / "differential")
+                device("push", out / "differential", remote + "/differential")
+                device("shell", "chmod", "700", remote + "/differential")
+                print(device("shell", remote + "/differential").stdout.strip(), flush=True)
+            else:
+                run(clang, *common, "-O2", *runtime_flags,
+                    "-c", ROOT / "runtime/ndkp_cse_runtime.cpp", "-o", out / "runtime.o")
             for test, file, extra in (
                 ("regions", source / "region_test.cpp", [out / "runtime.o", "-ldl"]),
+                ("sha256", source / "sha256_driver.cpp", []),
+                ("vm-decoder", source.parent / "vmp/crypto_cache_driver.cpp",
+                 ["-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections"]),
                 ("raw-exit", ROOT / "tests/anti-tamper/raw_exit.c",
                  ["-Wl,--wrap=getpid,--wrap=kill,--wrap=tgkill,--wrap=raise,--wrap=syscall"]),
             ):
                 profile = common if test == "regions" else [flag for flag in common if flag != "-std=c++17"]
-                cxx = ["--driver-mode=g++", "-static-libstdc++"] if test == "regions" else []
+                cxx = ["--driver-mode=g++", "-static-libstdc++"] if test != "raw-exit" else []
                 run(clang, *profile, *cxx, "-O2", "-I", ROOT / "runtime", file, *extra, "-o", out / test)
                 device("push", out / test, remote + "/" + test)
                 device("shell", "chmod", "700", remote + "/" + test)

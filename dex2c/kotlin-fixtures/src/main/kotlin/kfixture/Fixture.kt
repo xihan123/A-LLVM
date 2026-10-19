@@ -33,7 +33,23 @@ object InlineBoundary {
     inline val answer: Int get() = 42
 }
 
+object MethodFixture {
+    @dex2c
+    fun nested(input: Int): Int {
+        val outer = { a: Int -> { b: Int -> input + a + b } }
+        return outer(2)(3)
+    }
+
+    @dex2c
+    fun reference(): (Int) -> Int = ::`named$lambda$reference`
+
+    @JvmStatic
+    private fun `named$lambda$reference`(input: Int) = input * 7
+}
+
 fun main() {
+    check(MethodFixture.nested(4) == 9)
+    check(MethodFixture.reference()(3) == 21)
     check(Fixture.call(3) == "16")
     Fixture.anonymous().run()
     check(Fixture.runState() == 18)

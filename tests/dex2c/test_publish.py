@@ -35,21 +35,31 @@ class PublishTest(unittest.TestCase):
     def metadata(self, *versions):
         return {a: (set(versions), versions[-1] if versions else None) for a in publish.ARTIFACTS}
 
+    def test_checkout_dependency_versions_are_synchronized(self):
+        publish.release_version()
+
     def test_release_version_and_dependency_consistency(self):
         java = self.root / "gradle-plugin/src/main/java/io/github/xihan123/dex2c/gradle/Dex2cPlugin.java"
         sample = self.root / "samples/xposed/shared/build.gradle"
         for file in (java, sample):
             file.parent.mkdir(parents=True)
-        java.write_text('"io.github.xihan123.dex2c:annotations:0.1.2" "io.github.xihan123.dex2c:runtime:0.1.2"')
-        sample.write_text("'io.github.xihan123.dex2c:annotations:0.1.2'")
-        (self.root / "build.gradle").write_text("version = '0.1.2'")
-        self.assertEqual(publish.release_version(self.root), "0.1.2")
-        for invalid in ("0.1.2-SNAPSHOT", "../0.1.2", "01.1.2", "0.1"):
+        for version in ("0.1.2", "0.1.10-qseg2", "0.1.11-verify1", "1.2.3-rc.1"):
+            with self.subTest(version=version):
+                java.write_text(f'"{publish.GROUP}:annotations:{version}" "{publish.GROUP}:runtime:{version}"')
+                sample.write_text(f"'{publish.GROUP}:annotations:{version}'")
+                (self.root / "build.gradle").write_text(f"version = '{version}'")
+                self.assertEqual(publish.release_version(self.root), version)
+        for invalid in ("0.1.2-SNAPSHOT", "0.1.2-snapshot", "0.1.2-rc1-SNAPSHOT", "../0.1.2",
+                        "01.1.2", "0.1", "0.1.2-", "0.1.2-rc..1", "0.1.2-rc.01",
+                        "0.1.2-verify1/other", "0.1.2+build1"):
             (self.root / "build.gradle").write_text(f"version = '{invalid}'")
             with self.assertRaisesRegex(ValueError, "release version"):
                 publish.release_version(self.root)
         (self.root / "build.gradle").write_text("version = '0.1.3'")
         with self.assertRaisesRegex(ValueError, "Synchronize"):
+            publish.release_version(self.root)
+        (self.root / "build.gradle").write_text("version = '0.1.2'\nversion = '0.1.2'")
+        with self.assertRaisesRegex(ValueError, "release version"):
             publish.release_version(self.root)
 
     def test_new_version_requires_absence_of_all_files(self):
@@ -65,6 +75,19 @@ class PublishTest(unittest.TestCase):
             fetch.assert_not_called()
 
     def test_partial_checksum_upload_rejects_publish(self):
+        orphan = next(p for p in publish.version_files(self.version) if p.endswith(".jar.sha256"))
+        with patch.object(publish, "read_metadata", return_value=self.metadata()), patch.object(publish, "fetch", side_effect=lambda p: b"" if p == orphan else None):
+            with self.assertRaisesRegex(ValueError, "partially published"):
+                publish.require_new_version(self.version)
+
+    def test_candidate_staging_and_overwrite_guards(self):
+        self.version = "0.1.11-verify1"
+        self.stage()
+        self.assertEqual(len(publish.staged_manifest(self.root, self.version)), 85)
+        with patch.object(publish, "read_metadata", return_value=self.metadata(self.version)), patch.object(publish, "fetch") as fetch:
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                publish.require_new_version(self.version)
+            fetch.assert_not_called()
         orphan = next(p for p in publish.version_files(self.version) if p.endswith(".jar.sha256"))
         with patch.object(publish, "read_metadata", return_value=self.metadata()), patch.object(publish, "fetch", side_effect=lambda p: b"" if p == orphan else None):
             with self.assertRaisesRegex(ValueError, "partially published"):

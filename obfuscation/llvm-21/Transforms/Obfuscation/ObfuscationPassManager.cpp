@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
+#include "llvm/Transforms/Obfuscation/SegmentedData.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Instructions.h"
@@ -303,7 +304,7 @@ uint64_t llvm::getCertBindHi() {
 }
 
 bool llvm::isIRObfuscationEnabled() {
-  return EnableIRObfuscation || EnableIndirectBr || EnableIndirectCall ||
+  return isSegmentedDataEnabled() || EnableIRObfuscation || EnableIndirectBr || EnableIndirectCall ||
          EnableIndirectGV || EnableIRFlattening || EnableIRStringEncryption ||
          EnableStrPerKey || EnableStrBind || EnableStrHardened ||
          EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
@@ -476,7 +477,10 @@ struct ObfuscationPassManager : public ModulePass {
   }
 
   bool runOnModule(Module &M) override {
-    bool hasObf = EnableIndirectBr || EnableIndirectCall || EnableIndirectGV ||
+    validateSegmentedData(M);
+    if (isSegmentedDataEnabled() && (!EnableStrHardened || !EnableCertBind))
+      report_fatal_error("segmented-data requires hardened CSE and certificate binding");
+    bool hasObf = isSegmentedDataEnabled() || EnableIndirectBr || EnableIndirectCall || EnableIndirectGV ||
                   EnableIRFlattening || EnableIRStringEncryption ||
                   EnableStrPerKey || EnableStrBind || EnableStrHardened || EnableStrHardened ||
                   EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
@@ -506,9 +510,11 @@ struct ObfuscationPassManager : public ModulePass {
         report_fatal_error("-irobf-cse-hardened requires Android arm64");
     }
     if (Function *Helper = M.getFunction("ndkp_cse_decode_region_v1"))
-      if (!Helper->isDeclaration())
-        report_fatal_error("compile ndkp_cse_runtime.cpp separately without "
-                           "obfuscation flags and with -fno-lto");
+      if (!Helper->isDeclaration() &&
+          (!(EnableVMProtect || PostVMProtect) || EnableIRStringEncryption || EnableStrPerKey ||
+           EnableStrBind || EnableStrHardened || EnableCertBind))
+        report_fatal_error("compile ndkp_cse_runtime.cpp separately with -fno-lto; "
+                           "only crypto-core VMP without CSE/cert-bind is allowed");
 
     if (EnableCertBind) {
       if (Function *Helper = M.getFunction("ndkp_certbind_mix"))
@@ -586,6 +592,7 @@ struct ObfuscationPassManager : public ModulePass {
       add(llvm::createCertBindPass());
 
     bool Changed = run(M);
+    finishSegmentedData(M);
     if (PostVMProtect)
       verifyVMPostProtection(M);
     // Release 模式（默认，未开 -irobf-debug）：所有 pass 跑完后统一去指纹。

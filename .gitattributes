@@ -9,3 +9,9 @@ obfuscation/**/registration.patch -text
 # （仍按 LF 文本处理，供编译器 #include）。用 scripts/gen_vm_bitcode.sh 重新生成。
 obfuscation/**/aVMP/vm.h -diff
 
+# Windows Git Bash 也需要 LF，避免 autocrlf 破坏本地构建入口。
+scripts/build_clang_local.sh text eol=lf
+
+# Preserve vendored upstream bytes for the pinned SHA-256 manifest on every host.
+runtime/third_party/mbedtls/** -text
+

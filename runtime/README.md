@@ -117,6 +117,9 @@ python tests/cert-bind/test_apkcert.py --ndk "$NDK" --serial "$SERIAL"
 
 ## 威胁模型（诚实声明）
 
+以下描述适用于旧的证书提取路径。候选 `verifyApkSignature=true` 另外执行原生 v2/v3 签名和
+完整内容摘要核验，并检查解压 SO 与 APK 条目一致性；接口和限制见 [APK_VERIFY.md](APK_VERIFY.md)。
+
 证书绑定针对重打包、换签名后仍想恢复原绑定数据的情形。它直接读取证书，不调用
 PackageManager，也**不执行 APK 整体签名验证**。ZIP 条目匹配用于确定解压库的归属，
 不证明 APK 内容或解压库没有被修改。
@@ -125,3 +128,5 @@ PackageManager，也**不执行 APK 整体签名验证**。ZIP 条目匹配用�
 **解压库的 APK 没有映射证据时，不能保证发现单独替换或挂载该 APK**；同 inode 内容
 改写也不属于文件身份校验的保证。任意 native hook、伪造 maps/fstat/pread 或直接修改
 解密结果的动态能力不在本机制的防护范围。
+
+默认关闭的分段容器候选见 [QSEG v1](QSEG.md)，保留 CSE v1 ABI 与系统 linker 加载方式。

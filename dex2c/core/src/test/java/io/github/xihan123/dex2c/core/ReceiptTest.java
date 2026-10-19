@@ -5,6 +5,25 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ReceiptTest {
+    @Test void cryptoCoresRequireVmBodiesAndIntegrityWithoutBootstrapDependencies() {
+        StringBuilder ir=new StringBuilder();
+        int id=0;
+        for(String symbol:NativeCompiler.CSE_VMP_SYMBOLS) {
+            ir.append("@gv_code_seg_").append(symbol).append(" = internal constant [1 x i8] c\"a\"\n")
+                    .append("define void @").append(symbol).append("() !ndkp.vmp.protected !").append(++id)
+                    .append(" {\n call void @vm_test()\n call i64 @ndkp_selfcheck_one()\n store i64 1, ptr @key, !ndkp.vmpkey.entry !0\n ret void\n}\n")
+                    .append("!").append(id).append(" = !{ptr @gv_code_seg_").append(symbol).append(", ptr @vm_test}\n");
+        }
+        ir.append("define void @vm_test() {\n ret void\n}\n");
+        String valid=ir.toString();
+        assertDoesNotThrow(()->NativeCompiler.verifyCryptoIr(valid));
+        for(String broken:List.of(valid.replace("!ndkp.vmp.protected", "!unprotected"),
+                valid.replace("@ndkp_selfcheck_one", "@ordinary"),
+                valid.replace("!ndkp.vmpkey.entry", "!unbound"),
+                valid+"declare void @ndkp_certbind_mix()\n",
+                valid+"@strings = global [1 x i8] zeroinitializer, section \".ndkp.cse\"\n"))
+            assertThrows(IllegalStateException.class,()->NativeCompiler.verifyCryptoIr(broken));
+    }
     @Test void postReceiptMustMatchNativeControlFlow() {
         String symbol="d2c_0123456789abcdef01234567";
         String ir="@gv_code_seg_"+symbol+" = internal global [1 x i8] c\"a\"\n"
@@ -35,12 +54,29 @@ class ReceiptTest {
         assertThrows(IllegalStateException.class,()->NativeCompiler.verifyIr(ir.replace("!ndkp.vmp.protected !1",""),List.of(symbol)));
         assertThrows(IllegalStateException.class,()->NativeCompiler.verifyIr(ir.replace(" ret i32 0"," call void @_Z10d2c_invoke()\n ret i32 0"),List.of(symbol)));
         assertThrows(IllegalStateException.class,()->NativeCompiler.verifyHardenedIr(ir,List.of(symbol)));
+        assertThrows(IllegalStateException.class,()->NativeCompiler.verifyIr(ir+ir,List.of(symbol)),
+                "duplicate indexed definitions must fail closed");
+        assertThrows(IllegalStateException.class,()->NativeCompiler.verifyIr(ir+"!1 = !{}\n",List.of(symbol)),
+                "duplicate metadata must fail closed");
     }
     @Test void cseRequiresPayloadAndRemovesPlaintext() {
         String ir="@payload = private global [1 x i8] c\"a\", section \".ndkp.cse\"\ndeclare void @ndkp_cse_decode_region_v1()\n";
         assertDoesNotThrow(()->NativeCompiler.verifyCseIr(ir));
         assertThrows(IllegalStateException.class,()->NativeCompiler.verifyCseIr(ir.replace(".ndkp.cse",".data")));
         assertThrows(IllegalStateException.class,()->NativeCompiler.verifyCseIr(ir+"@.str = private constant [7 x i8] c\"secret\\00\"\n"));
+    }
+    @Test void segmentedReceiptRequiresRetainedDescriptorAndAccessor() {
+        String symbol="d2c_0123456789abcdef01234567";
+        String ir="@gv_code_seg_"+symbol+" = internal constant i8 0, !ndkp.qseg !2\n"
+                +"@ref = private constant [24 x i8] c\"abcdefghijklmnopqrstuvwx\", section \".text.ndkp.qseg.refs\"\n"
+                +"define i32 @"+symbol+"() !ndkp.vmp.protected !1 {\n %p = call ptr @ndkp_qseg_get(ptr @ref)\n call void @vm_test()\n ret i32 0\n}\n"
+                +"define void @vm_test() {\n ret void\n}\n"
+                +"!1 = !{ptr @gv_code_seg_"+symbol+", ptr @vm_test}\n!2 = !{ptr @ref}\n";
+        assertDoesNotThrow(()->NativeCompiler.verifyIr(ir,List.of(symbol)));
+        for(String broken:List.of(ir.replace("[24 x i8]","[23 x i8]"),
+                ir.replace("!2 = !{ptr @ref}","!2 = !{ptr @missing}"),
+                ir.replace(".text.ndkp.qseg.refs",".data"),ir.replace("@ndkp_qseg_get(","@ordinary(")))
+            assertThrows(IllegalStateException.class,()->NativeCompiler.verifyIr(broken,List.of(symbol)));
     }
     @Test void finalLibraryMustContainVerifiedBytecode() {
         String symbol="d2c_0123456789abcdef01234567";

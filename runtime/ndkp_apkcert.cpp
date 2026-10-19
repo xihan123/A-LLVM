@@ -20,6 +20,9 @@
 #include <cstdint>
 
 #include "apkcert.h"  // stringarmor::apkcert::certSha256ForLibrary (pulls in sha256.h)
+#if defined(NDKP_APK_VERIFY)
+#include "apkverify_runtime.h"
+#endif
 
 namespace {
 // Little-endian u64 from 8 bytes — byte-identical to apkcert.h/jni.cpp so the runtime mix
@@ -39,8 +42,12 @@ extern "C" __attribute__((visibility("hidden"))) void ndkp_certbind_mix(uint64_t
                                                                         uint64_t* out_hi) {
     uint8_t sha[32];
     uint64_t lo = 0, hi = 0;  // fail-closed default if this library's certificate cannot be read.
+#if defined(NDKP_APK_VERIFY)
+    if (ndkp_verified_apk(sha, nullptr) >= 0) {
+#else
     if (stringarmor::apkcert::certSha256ForLibrary(
             reinterpret_cast<const void*>(&ndkp_certbind_mix), sha)) {
+#endif
         lo = le64(sha) ^ le64(sha + 16);
         hi = le64(sha + 8) ^ le64(sha + 24);
     }

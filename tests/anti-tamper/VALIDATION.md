@@ -1,7 +1,7 @@
 # 裸 syscall 与 CSE region 验证（2026-10-18）
 
 实现分支：`feat/raw-syscall-cse`，基于 `f2ac7ef`，patchset `p6`。
-LLVM-Patch 原工作区的 CSE v2 改动未带入；消费项目 在现有目录接入。
+本仓库工作区的 CSE v2 改动未带入；接入项目在现有目录接入。
 
 ## 构建环境
 
@@ -22,8 +22,8 @@ LLVM-Patch 原工作区的 CSE v2 改动未带入；消费项目 在现有目录
 - 原生裸终止：替换 libc getpid/kill/tgkill/raise/syscall 后 SIGKILL 仍生效，seccomp 拒绝 kill 时 exit_group 兜底生效。
 - LLVM 21：string-enc、anti-tamper、fingerprint-scrub、四 ABI、CMake/ndk-build、cert-bind 冒烟；VMP 并发、递归、回调、全局地址和 TLS 的设备语义。
 - LLVM 21：hardened 证书绑定，base/split × extracted/direct × 正确/错误证书，8 种设备组合。
-- 消费项目：O0/O2 和 CSE+VMP+selfcheck 原生自检；自身两个信号过滤、其他进程/进程组透传、无效信号/线程、缺失原函数及 errno；过滤生效后裸终止仍能结束子进程。
-- Python：LLVM CSE 13 项、overlay 25 项；消费项目 构建来源/封装 33 项。Windows overlay 测试显式指定 Git Bash，构建系统测试使用本机 Ninja。
+- 接入项目：O0/O2 和 CSE+VMP+selfcheck 原生自检；自身两个信号过滤、其他进程/进程组透传、无效信号/线程、缺失原函数及 errno；过滤生效后裸终止仍能结束子进程。
+- Python：LLVM CSE 13 项、overlay 25 项；接入项目构建来源/封装 33 项。Windows overlay 测试显式指定 Git Bash，构建系统测试使用本机 Ninja。
 
 ## 应用产物
 
