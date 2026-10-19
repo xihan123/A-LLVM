@@ -1,0 +1,7 @@
+plugins { id 'com.android.application' }
+android {
+    namespace='io.github.xihan123.dex2c.sample.host'
+    compileSdk=37
+    defaultConfig { applicationId='io.github.xihan123.dex2c.sample.host'; minSdk=26; targetSdk=37; versionCode=1; versionName='0.1' }
+    compileOptions { sourceCompatibility=JavaVersion.VERSION_21; targetCompatibility=JavaVersion.VERSION_21 }
+}

@@ -25,6 +25,7 @@ on:
     - "scripts/make_release_meta.py"
     - "scripts/overlay_ndk.sh"
     - "tests/**"
+    - "dex2c/**"
     - "scripts/discover_ndk.py"
     - ".github/workflows/build.yml"
     - ".github/workflows/patch-check.yml"

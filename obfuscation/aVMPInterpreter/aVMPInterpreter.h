@@ -61,7 +61,7 @@ extern uint64_t expected_bb_token;
 #define BINOP_XOR       30
 #define BINOP_FNEG      31
 
-// Cast opcodes (from LLVM Instruction.def)
+// Bytecode cast ordinals; the translator maps LLVM Instruction.def explicitly.
 #define CAST_TRUNC      0
 #define CAST_ZEXT       1
 #define CAST_SEXT       2
@@ -75,6 +75,7 @@ extern uint64_t expected_bb_token;
 #define CAST_INTTOPTR   10
 #define CAST_BITCAST    11
 #define CAST_ADDRSPACECAST 12
+#define CAST_TRUNC_I1   13
 
 // ICMP predicates (from LLVM Instruction.def)
 #define ICMP_EQ     32

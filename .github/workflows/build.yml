@@ -363,6 +363,27 @@ jobs:
       if: ${{ inputs.mode == 'build' }}
       run: python scripts/build_snapshot.py run --phase test-vmp-call-frames -- python tests/vmp/call_frames.py --ndk "$NDK_DIR"
 
+    - name: LLVM 21 VMP strict 与数值转换
+      if: ${{ inputs.mode == 'build' && steps.loc.outputs.llvm_major == '21' }}
+      run: |
+        EXT=""; [ "$HOST" != windows-x86_64 ] || EXT=.exe
+        CLANG="$PWD/build/bin/clang$EXT"
+        python tests/vmp/strict.py --clang "$CLANG" --ndk "$NDK_DIR"
+        python tests/vmp/casts.py --clang "$CLANG" --ndk "$NDK_DIR"
+
+    - uses: actions/setup-java@v5
+      if: ${{ inputs.mode == 'build' && inputs.host == 'windows-x86_64' && steps.loc.outputs.llvm_major == '21' }}
+      with:
+        distribution: temurin
+        java-version: "21"
+
+    - name: dex2c 主机语义与 ARM64 VMP 产物
+      if: ${{ inputs.mode == 'build' && inputs.host == 'windows-x86_64' && steps.loc.outputs.llvm_major == '21' }}
+      run: |
+        bash dex2c/gradlew -p dex2c :core:test :gradle-plugin:validatePlugins --console=plain \
+          "-Pdex2c.hostCompiler=$(cygpath -m "$PWD/build/bin/clang.exe")" \
+          "-Pdex2c.ndk=$(cygpath -m "$NDK_DIR")"
+
     - name: 打包
       run: |
         python scripts/build_snapshot.py run --phase package -- "$BASH" -euo pipefail <<'BUILD_STEP'

@@ -1,0 +1,56 @@
+allprojects {
+    group = 'io.github.xihan123.dex2c'
+    version = '0.1.3'
+}
+subprojects {
+    apply plugin: 'java-library'
+    java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+    tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+    tasks.withType(Test).configureEach { useJUnitPlatform() }
+    dependencies {
+        testImplementation 'org.junit.jupiter:junit-jupiter:5.12.2'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.12.2'
+    }
+}
+
+configure([project(':annotations'), project(':runtime'), project(':core'), project(':gradle-plugin')]) {
+    apply plugin: 'maven-publish'
+    java { withSourcesJar() }
+    tasks.withType(Jar).configureEach {
+        from(rootProject.file('../LICENSE')) { into 'META-INF' }
+    }
+    publishing {
+        // java-gradle-plugin supplies pluginMaven and the plugin marker itself.
+        if (project.name != 'gradle-plugin') {
+            publications { mavenJava(MavenPublication) { from components.java } }
+        }
+        publications.withType(MavenPublication).configureEach {
+            pom {
+                name = "A-LLVM dex2c ${project.name}"
+                description = 'Java/Kotlin method protection through JNI and A-LLVM VMP.'
+                url = 'https://github.com/xihan123/A-LLVM'
+                licenses {
+                    license {
+                        name = 'GNU General Public License, version 3'
+                        url = 'https://www.gnu.org/licenses/gpl-3.0.html'
+                    }
+                }
+                scm { url = 'https://github.com/xihan123/A-LLVM' }
+            }
+        }
+        repositories {
+            maven {
+                name = 'staging'
+                url = rootProject.providers.gradleProperty('dex2c.stagingRepository')
+                        .map { rootProject.uri(it) }
+                        .getOrElse(rootProject.layout.buildDirectory.dir('maven-staging').get().asFile.toURI())
+            }
+            maven {
+                name = 'xihan'
+                url = 'https://mirrors.xihan.website/repository/maven-releases/'
+                credentials(PasswordCredentials)
+                authentication { basic(BasicAuthentication) }
+            }
+        }
+    }
+}

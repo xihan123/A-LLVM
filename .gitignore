@@ -30,3 +30,11 @@ __pycache__/
 
 # 本地 discover 干跑输出
 matrix.json
+
+# Gradle dex2c build and local Android configuration
+/dex2c/.gradle/
+/dex2c/**/build/
+/dex2c/**/.gradle/
+/dex2c/**/local.properties
+/dex2c/**/.cxx/
+/dex2c/.kotlin/

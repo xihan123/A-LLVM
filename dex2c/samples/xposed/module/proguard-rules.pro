@@ -1,0 +1,3 @@
+-keep class io.github.xihan123.dex2c.sample.module.Entry { *; }
+-dontwarn io.github.libxposed.**
+-keep class io.github.xihan123.dex2c.sample.module.ExistingNative { native <methods>; }

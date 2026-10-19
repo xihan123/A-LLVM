@@ -1,0 +1,16 @@
+plugins { id 'java-gradle-plugin' }
+dependencies {
+    implementation project(':core')
+    compileOnly 'com.android.tools.build:gradle-api:9.4.1'
+    testImplementation 'com.android.tools.build:gradle-api:9.4.1'
+}
+gradlePlugin {
+    plugins {
+        dex2c {
+            id = 'io.github.xihan123.dex2c'
+            implementationClass = 'io.github.xihan123.dex2c.gradle.Dex2cPlugin'
+            displayName = 'A-LLVM dex2c'
+            description = 'Protect annotated Java/Kotlin methods with JNI and A-LLVM VMP.'
+        }
+    }
+}

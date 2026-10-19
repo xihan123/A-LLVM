@@ -77,6 +77,12 @@ struct ConstantIntEncryption : public FunctionPass {
       Changed |= expandConstantExpr(F);
       for (auto& BB : F) {
         for (auto& I : BB) {
+          // Post-VMP: conceal dispatch comparisons and the entry key, not JNI
+          // stack offsets/argument counts that multiply tables in every clone.
+          if (F.getMetadata("ndkp.vmp.post.cie") && !isa<CmpInst>(I) &&
+              !I.getMetadata("ndkp.vmpkey.entry") &&
+              !(F.hasFnAttribute("aproc-vmp-artifact") && isa<BinaryOperator>(I)))
+            continue;
           if (I.isEHPad() || isa<AllocaInst>(&I) ||
               isa<IntrinsicInst>(&I) || isa<SwitchInst>(I)||
               I.isAtomic()) {

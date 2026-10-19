@@ -53,6 +53,12 @@ struct IndirectBranch : public FunctionPass {
 
   void NumberBasicBlock(Module &M) {
     for (auto &F : M) {
+      if (!ArgsOptions->toObfuscate(ArgsOptions->indBrOpt(), &F).isEnabled())
+        continue;
+      // Post-VMP uses per-function relative offsets, avoiding thousands of ELF
+      // dynamic relocations and duplicated page-index decoding sequences.
+      if (F.getMetadata("ndkp.vmp.post.target"))
+        continue;
       if (F.empty() || F.isWeakForLinker() ||
           F.getSection() == ".text.startup" ||
           F.isIntrinsic()) {
@@ -111,6 +117,60 @@ struct IndirectBranch : public FunctionPass {
     return false;
   }
 
+  bool runPostOnFunction(Function &Fn) {
+    SmallVector<BranchInst *, 32> Branches;
+    std::vector<BasicBlock *> Targets;
+    for (BasicBlock &BB : Fn) {
+      auto *Br = dyn_cast<BranchInst>(BB.getTerminator());
+      if (!Br || !Br->isConditional())
+        continue;
+      Branches.push_back(Br);
+      for (BasicBlock *Target : Br->successors())
+        if (llvm::find(Targets, Target) == Targets.end())
+          Targets.push_back(Target);
+    }
+    if (Branches.empty())
+      return false;
+    std::mt19937_64 Engine(RandomEngine.get_uint64_t());
+    std::shuffle(Targets.begin(), Targets.end(), Engine);
+    auto &M = *Fn.getParent();
+    auto &Ctx = M.getContext();
+    auto *Int32 = Type::getInt32Ty(Ctx);
+    auto *IntPtr = M.getDataLayout().getIntPtrType(Ctx);
+    auto *Key = ConstantInt::get(Int32, RandomEngine.get_uint32_t());
+    // Keep offsets relative to this definition even for a preemptible symbol.
+    Constant *Anchor = DSOLocalEquivalent::get(&Fn);
+    auto *Base = ConstantExpr::getPtrToInt(&Fn, IntPtr);
+    SmallVector<Constant *, 32> Offsets;
+    DenseMap<BasicBlock *, unsigned> Index;
+    for (BasicBlock *Target : Targets) {
+      Index[Target] = Offsets.size();
+      auto *Address = ConstantExpr::getPtrToInt(BlockAddress::get(Target), IntPtr);
+      auto *Offset = ConstantExpr::getTruncOrBitCast(ConstantExpr::getSub(Address, Base), Int32);
+      Offsets.push_back(ConstantExpr::getAdd(Offset, Key));
+    }
+    auto *TableType = ArrayType::get(Int32, Offsets.size());
+    auto *Table = new GlobalVariable(M, TableType, false, GlobalValue::PrivateLinkage,
+        ConstantArray::get(TableType, Offsets), Fn.getName() + ".post.targets");
+    Table->setSection(".AProtect.data");
+    Table->setAlignment(Align(4));
+    Table->setMetadata("noobf", MDNode::get(Ctx, {}));
+    for (BranchInst *Br : Branches) {
+      IRBuilder<> IRB(Br);
+      auto *True = Br->getSuccessor(0), *False = Br->getSuccessor(1);
+      Value *Slot = IRB.CreateSelect(Br->getCondition(),
+          ConstantInt::get(Int32, Index[True]), ConstantInt::get(Int32, Index[False]));
+      Value *Ptr = IRB.CreateGEP(TableType, Table, {ConstantInt::get(Int32, 0), Slot});
+      Value *Encoded = IRB.CreateAlignedLoad(Int32, Ptr, Align(4), true);
+      Value *Offset = IRB.CreateSExtOrTrunc(IRB.CreateSub(Encoded, Key), IntPtr);
+      Value *Address = IRB.CreateGEP(Type::getInt8Ty(Ctx), Anchor, Offset);
+      auto *Indirect = IndirectBrInst::Create(Address, 2);
+      ReplaceInstWithInst(Br, Indirect);
+      Indirect->addDestination(True);
+      Indirect->addDestination(False);
+    }
+    return true;
+  }
 
   bool runOnFunction(Function &Fn) override {
     if (isIRObfuscationDebugEnabled()) {
@@ -124,6 +184,8 @@ struct IndirectBranch : public FunctionPass {
     if (!opt.isEnabled()) {
       return false;
     }
+    if (Fn.getMetadata("ndkp.vmp.post.target"))
+      return runPostOnFunction(Fn);
 
     LLVMContext &Ctx = Fn.getContext();
     auto& M = *Fn.getParent();

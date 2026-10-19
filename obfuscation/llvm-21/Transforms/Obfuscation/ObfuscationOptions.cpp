@@ -180,6 +180,9 @@ ObfOpt ObfuscationOptions::toObfuscate(const std::shared_ptr<ObfOpt> &option,
   if (f->isDeclaration() || f->getMetadata("noobf")) {
     return result;
   }
+  if ((option->attributeName() == "indbr" && f->getMetadata("ndkp.vmp.post.target")) ||
+      (option->attributeName() == "cie" && f->getMetadata("ndkp.vmp.post.cie")))
+    return ObfOpt{true, 0, option->attributeName()};
 
   if (f->hasAvailableExternallyLinkage() != 0) {
     return result;

@@ -2043,6 +2043,9 @@ void cast_handler() {
 	uint64_t res_value = 0;
 
 	switch (cast_op) {
+		case CAST_TRUNC_I1:
+			res_value = op_value & 1;
+			break;
 		case CAST_TRUNC:
 			res_value = op_value & (((uint64_t)1 << (res_size * 8)) - 1);
 			break;
@@ -2051,7 +2054,9 @@ void cast_handler() {
 			break;
 		case CAST_SEXT: {
 			int64_t sval;
-			if (op_size == 1) {
+			if (op_size == 0) {
+				sval = -(int64_t)(op_value & 1);
+			} else if (op_size == 1) {
 				sval = (int64_t)(int8_t)(uint8_t)op_value;
 			} else if (op_size == 2) {
 				sval = (int64_t)(int16_t)(uint16_t)op_value;
@@ -2119,7 +2124,11 @@ void cast_handler() {
 			break;
 		}
 		case CAST_SITOFP: {
-			int64_t sval = (int64_t)op_value;
+			int64_t sval = op_size == 0 ? -(int64_t)(op_value & 1)
+			               : op_size == 1 ? (int64_t)(int8_t)op_value
+			               : op_size == 2 ? (int64_t)(int16_t)op_value
+			               : op_size == 4 ? (int64_t)(int32_t)op_value
+			               : (int64_t)op_value;
 			if (res_size <= 4) {
 				float fval = (float)sval;
 				res_value = (uint64_t) * (uint32_t*)&fval;

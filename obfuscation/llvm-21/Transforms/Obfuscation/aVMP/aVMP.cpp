@@ -1655,6 +1655,15 @@ static bool vmpTypeIsUnsupported(Type *Ty) {
         return false;
     if (Ty->isVectorTy() || Ty->isTokenTy())  // isVectorTy 涵盖 Fixed 与 Scalable
         return true;
+    if (isVMProtectStrictEnabled()) {
+        if (auto *Integer = dyn_cast<IntegerType>(Ty)) {
+            unsigned Bits = Integer->getBitWidth();
+            if (Bits != 1 && Bits != 8 && Bits != 16 && Bits != 32 && Bits != 64)
+                return true;
+        }
+        if (Ty->isFloatingPointTy() && !Ty->isFloatTy() && !Ty->isDoubleTy())
+            return true;
+    }
     return false;
 }
 
@@ -2027,8 +2036,27 @@ void GOVMTranslator::handle_inst(Instruction *ins) {
         int res_size = modDataLayout->getTypeAllocSize(inst->getType());
         curr_data_offset += res_size;
 
-        uint8_t cast_op = (uint8_t)inst->getOpcode();
+        // The bytecode cast ordinals are independent of LLVM Instruction.def.
+        uint8_t cast_op;
+        switch (inst->getOpcode()) {
+        case Instruction::Trunc: cast_op = inst->getType()->isIntegerTy(1) ? 13 : 0; break;
+        case Instruction::ZExt: cast_op = 1; break;
+        case Instruction::SExt: cast_op = 2; break;
+        case Instruction::FPTrunc: cast_op = 3; break;
+        case Instruction::FPExt: cast_op = 4; break;
+        case Instruction::FPToUI: cast_op = 5; break;
+        case Instruction::FPToSI: cast_op = 6; break;
+        case Instruction::UIToFP: cast_op = 7; break;
+        case Instruction::SIToFP: cast_op = 8; break;
+        case Instruction::PtrToInt: cast_op = 9; break;
+        case Instruction::IntToPtr: cast_op = 10; break;
+        case Instruction::BitCast: cast_op = 11; break;
+        case Instruction::AddrSpaceCast: cast_op = 12; break;
+        default: llvm_unreachable("unrecognized cast instruction");
+        }
         int op_size = modDataLayout->getTypeAllocSize(inst->getOperand(0)->getType());
+        if (inst->getOperand(0)->getType()->isIntegerTy(1))
+            op_size = 0; // i1 is stored in a byte, but its sign bit is bit zero.
         std::vector<uint8_t> packed_cast_op = pack(cast_op, 1);
         std::vector<uint8_t> packed_op_size = pack(op_size, 1);
         std::vector<uint8_t> packed_res = GET_PACK_VALUE(inst);
@@ -4866,6 +4894,49 @@ namespace {
         return false;
     }
 
+// A receipt is attached only after replacement and interpreter linkage succeed.
+static void recordVMProtection(Function *F, GlobalVariable *Code, Function *Interpreter) {
+  bool CallsInterpreter = false;
+  if (Interpreter)
+    for (Instruction &I : instructions(F))
+      if (auto *Call = dyn_cast<CallBase>(&I))
+        CallsInterpreter |= Call->getCalledFunction() == Interpreter;
+  bool Valid = Code && Code->hasInitializer() && Interpreter &&
+               !Interpreter->isDeclaration() && CallsInterpreter &&
+               !verifyFunction(*F, &errs());
+  if (!Valid) {
+    if (isVMProtectStrictEnabled())
+      report_fatal_error(Twine("VMP strict: replacement or interpreter linkage failed for ") + F->getName());
+    return;
+  }
+  F->setMetadata("ndkp.vmp.protected", MDNode::get(F->getContext(), {
+      ValueAsMetadata::get(Code), ValueAsMetadata::get(Interpreter)}));
+}
+
+static void rejectStrictVMProtection(Function *F, StringRef Reason) {
+  if (isVMProtectStrictEnabled())
+    report_fatal_error(Twine("VMP strict: ") + F->getName() + ": " + Reason);
+}
+
+static void validateStrictVMTargets(Module &M) {
+  if (!isVMProtectStrictEnabled())
+    return;
+  for (Function &F : M)
+    if (isVMProtectTarget(&F) && F.isDeclaration())
+      rejectStrictVMProtection(&F, "declaration-only function");
+  std::istringstream Names(getVMFunctionsList());
+  std::string Name;
+  while (std::getline(Names, Name, ';')) {
+    if (Name.empty())
+      continue;
+    Function *F = M.getFunction(Name);
+    if (!F || !isVMProtectTarget(F))
+      report_fatal_error(Twine("VMP strict: requested function missing or excluded: ") + Name);
+    if (F->isDeclaration())
+      rejectStrictVMProtection(F, "declaration-only function");
+  }
+}
+
 struct VMProtect : public ModulePass {
   static char ID;
   bool flag;
@@ -4876,6 +4947,7 @@ struct VMProtect : public ModulePass {
   }
   virtual bool runOnModule(Module &M)
   {
+      validateStrictVMTargets(M);
 
       if (isIRObfuscationDebugEnabled()) {
         errs() << "[DEBUG] VMProtect: Starting runOnModule\n";
@@ -4891,12 +4963,14 @@ struct VMProtect : public ModulePass {
         if(toObfuscateFunction(this->flag,F,"vmp"))
         {
           if(F->isVarArg()) {
+            rejectStrictVMProtection(F, "variadic function");
             errs() << "[VMP Warning] Function '" << F->getName()
                    << "' is variadic, which is not supported by VMP.\n";
             errs() << "[VMP Warning] Skipping VMP protection for this function.\n";
             continue;
           }
           if (F->isDeclaration()) {
+            rejectStrictVMProtection(F, "declaration-only function");
             errs() << "[VMP Warning] Function '" << F->getName()
                    << "' is declaration-only, which is not supported by VMP.\n";
             errs() << "[VMP Warning] Skipping VMP protection for this function.\n";
@@ -4920,6 +4994,8 @@ struct VMProtect : public ModulePass {
         GOVMTranslator *translator = new GOVMTranslator(F);
         if (translator->run()) {
           translators.push_back(translator);
+        } else {
+          rejectStrictVMProtection(F, "translation rejected; see preceding diagnostic");
         }
       }
 
@@ -4979,6 +5055,7 @@ struct VMProtect : public ModulePass {
                                                    resume_unwind_helper_func,
                                                    translator->get_data_seg_size());
         modifier->run();
+        recordVMProtection(F, translator->get_gv_code_seg(), vm_interpreter_func);
         if (isIRObfuscationDebugEnabled()) {
           errs() << "[VMP] Function done: " << F->getName() << "\n";
         }
@@ -5001,6 +5078,7 @@ Pass *llvm::createVMProtectPass(bool flag) {
 
 // New PassManager support
 PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM) {
+  validateStrictVMTargets(M);
   bool changed = false;
   
   std::vector<Function *> functions_to_process;
@@ -5010,12 +5088,14 @@ PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM)
     if(toObfuscateFunction(this->flag,F,"vmp"))
     {
       if(F->isVarArg()) {
+        rejectStrictVMProtection(F, "variadic function");
         errs() << "[VMP Warning] Function '" << F->getName()
                << "' is variadic, which is not supported by VMP.\n";
         errs() << "[VMP Warning] Skipping VMP protection for this function.\n";
         continue;
       }
       if (F->isDeclaration()) {
+        rejectStrictVMProtection(F, "declaration-only function");
         errs() << "[VMP Warning] Function '" << F->getName()
                << "' is declaration-only, which is not supported by VMP.\n";
         errs() << "[VMP Warning] Skipping VMP protection for this function.\n";
@@ -5036,6 +5116,8 @@ PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM)
     GOVMTranslator *translator = new GOVMTranslator(F);
     if (translator->run()) {
       translators.push_back(translator);
+    } else {
+      rejectStrictVMProtection(F, "translation rejected; see preceding diagnostic");
     }
   }
 
@@ -5095,6 +5177,7 @@ PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM)
                                                resume_unwind_helper_func,
                                                translator->get_data_seg_size());
     modifier->run();
+    recordVMProtection(F, translator->get_gv_code_seg(), vm_interpreter_func);
     changed = true;
   }
 

@@ -1,0 +1,34 @@
+dependencies {
+    api 'org.ow2.asm:asm:9.9.1'
+    implementation 'org.ow2.asm:asm-tree:9.9.1'
+    implementation 'org.ow2.asm:asm-analysis:9.9.1'
+    implementation 'org.ow2.asm:asm-commons:9.9.1'
+    implementation project(':runtime')
+    implementation 'org.jetbrains.kotlin:kotlin-metadata-jvm:2.4.20'
+    testImplementation project(':annotations')
+    testImplementation project(':runtime')
+    testImplementation project(':kotlin-fixtures')
+}
+// Ship the same audited runtime and sealer as A-LLVM; no checkout is needed by consumers.
+def allvmResources = tasks.register('bundleAllvmRuntime', Sync) {
+    into layout.buildDirectory.dir('generated/allvm-resources')
+    into('a_llvm') {
+        from(rootProject.file('../runtime')) {
+            include 'ndkp_apkcert.cpp', 'ndkp_cse_runtime.cpp', 'cse_crypto.h', 'cse_region.h', 'apkcert.h', 'apkcert_io.h', 'sha256.h'
+        }
+        from(rootProject.file('../scripts/seal_cse.py'))
+    }
+}
+sourceSets.main.resources.srcDir(allvmResources)
+tasks.withType(Test).configureEach {
+    systemProperty 'dex2c.hostCompiler', providers.gradleProperty('dex2c.hostCompiler').getOrElse('')
+    systemProperty 'dex2c.ndk', providers.gradleProperty('dex2c.ndk').getOrElse('')
+}
+tasks.register('prepareDeviceFixtures', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'io.github.xihan123.dex2c.core.DeviceFixtures'
+    args layout.buildDirectory.dir('device-fixtures').get().asFile.absolutePath,
+            providers.gradleProperty('dex2c.ndk').getOrElse(''),
+            providers.gradleProperty('dex2c.hostCompiler').getOrElse('')
+}

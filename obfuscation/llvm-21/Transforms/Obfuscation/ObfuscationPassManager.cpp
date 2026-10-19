@@ -10,6 +10,8 @@
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationOptions.h"
 #include "llvm/Transforms/Obfuscation/aVMP/aVMP.h"
@@ -20,6 +22,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Transforms/Obfuscation/LegacyLowerSwitch.h"
 #include <cstdint>
 #include <vector>
 
@@ -186,6 +189,14 @@ static cl::opt<bool>
 ForceNoInline("irobf-vmp-noinline", cl::init(false), cl::NotHidden,
               cl::desc("Force disable inlining for all functions in VMP."),
               cl::ZeroOrMore);
+static cl::opt<bool>
+StrictVMProtect("irobf-vmp-strict", cl::init(false), cl::NotHidden,
+                cl::desc("Fail compilation unless every selected VMP function is virtualized."),
+                cl::ZeroOrMore);
+static cl::opt<bool>
+PostVMProtect("irobf-vmp-post", cl::init(false), cl::NotHidden,
+              cl::desc("Harden verified VMP native IR after size optimization."),
+              cl::ZeroOrMore);
 
 // APK 签名证书绑定：把运行期 APK 签名证书 SHA-256 派生的 128-bit 混合值折进 CSE 字符串
 // pepper 与 VMP 函数密钥。产物仅在被 -irobf-cert-file 指定证书签名时才正确运行（非分支、
@@ -211,6 +222,7 @@ bool llvm::isIRObfuscationDebugEnabled() { return EnableIRObfuscationDebug; }
 std::string llvm::getVMFunctionsList() { return VMFunctions; }
 bool llvm::isForceNoInlineEnabled() { return ForceNoInline; }
 bool llvm::isVMProtectEnabled() { return EnableVMProtect; }
+bool llvm::isVMProtectStrictEnabled() { return StrictVMProtect; }
 
 // bind 蕴含 perkey：开启包名绑定即启用 ChaCha8 派生密钥路径。
 bool llvm::isCsePerKeyEnabled() { return EnableStrPerKey || EnableStrBind || EnableStrHardened; }
@@ -295,7 +307,7 @@ bool llvm::isIRObfuscationEnabled() {
          EnableIndirectGV || EnableIRFlattening || EnableIRStringEncryption ||
          EnableStrPerKey || EnableStrBind || EnableStrHardened ||
          EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
-         EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
+         EnableVMProtect || StrictVMProtect || PostVMProtect || EnableIdaDetect || EnableTimeDetect ||
          EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
          EnableHideMaps || EnableFakeMaps || EnableSelfCheck ||
          EnableSelfCheckEntry || EnableCertBind;
@@ -334,6 +346,69 @@ static void scrubPostLinkFingerprints(Module &M) {
 }
 
 namespace llvm {
+
+// Run on the final optimized VM, without virtualizing it a second time. The
+// existing FLA deliberately excludes these giant functions; lower switches and
+// indirect branches instead, keeping native ABI/EH edges and the bytecode intact.
+static void prepareVMPostProtection(Module &M) {
+  if (EnableVMProtect)
+    report_fatal_error("-irobf-vmp-post requires previously virtualized IR, without -irobf-vmp");
+  bool HasReceipt = false;
+  for (Function &F : M)
+    HasReceipt |= F.getMetadata("ndkp.vmp.protected") != nullptr;
+  if (!HasReceipt)
+    report_fatal_error("-irobf-vmp-post requires VMP protection receipts");
+  auto Lower = std::unique_ptr<FunctionPass>(createLegacyLowerSwitchPass());
+  unsigned Targets = 0;
+  for (Function &F : M) {
+    if (F.isDeclaration())
+      continue;
+    bool Entry = F.hasFnAttribute("aproc-vmp-artifact");
+    if (!Entry && F.getSection() != ".AProtect.text" && F.getSection() != ".s0")
+      continue;
+    if (F.getMetadata("ndkp.vmp.post"))
+      report_fatal_error("-irobf-vmp-post cannot be applied twice");
+    Lower->runOnFunction(F);
+    unsigned Edges = 0;
+    for (BasicBlock &BB : F)
+      if (auto *Br = dyn_cast<BranchInst>(BB.getTerminator()))
+        Edges += Br->isConditional();
+    F.setMetadata("ndkp.vmp.post.target", MDNode::get(M.getContext(),
+        ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(M.getContext()), Edges))));
+    // Encrypt entry keys and JNI dispatch constants. Encrypting every public
+    // ChaCha/arithmetic constant in each VM clone only duplicates large tables.
+    if (Entry || F.getName().contains("dispatch") ||
+        F.getName() == "call_handler_with_exception_handling")
+      F.setMetadata("ndkp.vmp.post.cie", MDNode::get(M.getContext(), {}));
+    ++Targets;
+  }
+  if (!Targets)
+    report_fatal_error("-irobf-vmp-post found no native VMP artifacts");
+}
+
+static void verifyVMPostProtection(Module &M) {
+  for (Function &F : M) {
+    MDNode *Target = F.getMetadata("ndkp.vmp.post.target");
+    if (!Target)
+      continue;
+    unsigned Indirect = 0;
+    for (BasicBlock &BB : F) {
+      Instruction *Term = BB.getTerminator();
+      if (isa<SwitchInst>(Term) ||
+          (isa<BranchInst>(Term) && cast<BranchInst>(Term)->isConditional()))
+        report_fatal_error(Twine("VMP post: native control flow was not hardened: ") + F.getName());
+      Indirect += isa<IndirectBrInst>(Term);
+    }
+    auto *Before = mdconst::extract<ConstantInt>(Target->getOperand(0));
+    if (Indirect != Before->getZExtValue() || verifyFunction(F, &errs()))
+      report_fatal_error(Twine("VMP post: invalid native transformation: ") + F.getName());
+    F.setMetadata("ndkp.vmp.post", MDNode::get(M.getContext(), {
+        ConstantAsMetadata::get(Before), ConstantAsMetadata::get(
+            ConstantInt::get(Type::getInt32Ty(M.getContext()), Indirect))}));
+    F.setMetadata("ndkp.vmp.post.target", nullptr);
+    F.setMetadata("ndkp.vmp.post.cie", nullptr);
+  }
+}
 
 struct ObfuscationPassManager : public ModulePass {
   static char ID;
@@ -405,7 +480,7 @@ struct ObfuscationPassManager : public ModulePass {
                   EnableIRFlattening || EnableIRStringEncryption ||
                   EnableStrPerKey || EnableStrBind || EnableStrHardened || EnableStrHardened ||
                   EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
-                  EnableVMProtect || EnableIdaDetect || EnableTimeDetect ||
+                  EnableVMProtect || StrictVMProtect || PostVMProtect || EnableIdaDetect || EnableTimeDetect ||
                   EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
                   EnableHideMaps || EnableFakeMaps || EnableSelfCheck || EnableSelfCheckEntry ||
                   EnableCertBind;
@@ -415,6 +490,11 @@ struct ObfuscationPassManager : public ModulePass {
     if (!EnableIRObfuscation)
       return run(M);
 
+    if (PostVMProtect)
+      prepareVMPostProtection(M);
+
+    if (StrictVMProtect && !EnableVMProtect)
+      report_fatal_error("-irobf-vmp-strict requires -irobf-vmp");
     if (EnableSelfCheckEntry && (!EnableSelfCheck || !EnableVMProtect))
       report_fatal_error("-irobf-selfcheck-entry requires -irobf-selfcheck and -irobf-vmp");
 
@@ -464,7 +544,7 @@ struct ObfuscationPassManager : public ModulePass {
     if (EnableVMProtect)
       add(llvm::createVMProtectPass(true));
 
-    if (EnableIRConstantIntEncryption || Options->cieOpt()->isEnabled())
+    if (PostVMProtect || EnableIRConstantIntEncryption || Options->cieOpt()->isEnabled())
       add(llvm::createConstantIntEncryptionPass(Options.get()));
     if (EnableIRConstantFPEncryption || Options->cfeOpt()->isEnabled())
       add(llvm::createConstantFPEncryptionPass(Options.get()));
@@ -477,7 +557,7 @@ struct ObfuscationPassManager : public ModulePass {
       add(llvm::createIndirectCallPass(Options.get()));
     if (EnableIRFlattening || Options->flaOpt()->isEnabled())
       add(llvm::createFlatteningPass(pointerSize, Options.get()));
-    if (EnableIndirectBr || Options->indBrOpt()->isEnabled())
+    if (PostVMProtect || EnableIndirectBr || Options->indBrOpt()->isEnabled())
       add(llvm::createIndirectBranchPass(Options.get()));
 
     if (EnableIdaDetect)
@@ -506,6 +586,8 @@ struct ObfuscationPassManager : public ModulePass {
       add(llvm::createCertBindPass());
 
     bool Changed = run(M);
+    if (PostVMProtect)
+      verifyVMPostProtection(M);
     // Release 模式（默认，未开 -irobf-debug）：所有 pass 跑完后统一去指纹。
     if (!isIRObfuscationDebugEnabled())
       scrubPostLinkFingerprints(M);
