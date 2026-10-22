@@ -23,7 +23,7 @@
 本版构建环境：Windows、JDK 21、Gradle 9.8.1、AGP 9.4.1、Kotlin 2.4.20、NDK `30.0.16248370`、LLVM 21 / patchset p17、`arm64-v8a`、minSdk 26。
 
 上述 p17 为历史稳定版环境。当前源码包含后续 QSEG acquire/release 生命周期协议；使用此能力时须采用
-匹配的 `p18-candidate1` 工具链及 receipt。插件版本调整不自动发布或晋升该工具链。
+匹配的 `p18` 工具链及 receipt。`p18` 已按维护者要求设为正式版本号，远端 NDK 尚未发布。
 
 NDK 中的 Clang 必须支持 `-irobf-vmp-strict`、`-irobf-vmp-post` 及对应的保护 receipt。插件通过实际编译及逐方法 IR 验证探测能力，不仅检查版本字符串。开发时可指定本仓库 `build/bin/clang.exe`，链接器、资源头文件和 sysroot 仍使用指定 NDK。p10 及更早工具链无法通过本版二次混淆检查。
 
