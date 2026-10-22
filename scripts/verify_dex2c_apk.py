@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import zipfile
 from dex2c_artifacts import verify_wrappers
+from seal_qseg import zip_entry_range
 
 
 def digest(data):
@@ -101,6 +102,9 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report):
     require(digest(selection_bytes) == receipt['selectionSha256'], 'selection receipt changed')
     methods = selection['methods']
     require(len(methods) == receipt['protectedMethods'], 'method count differs')
+    require(len({m['method'] for m in methods}) == len(methods) and
+            len({m['symbol'] for m in methods}) == len(methods), 'duplicate selected method or symbol')
+    require(all(m['protection'] in ('vmp', 'native-cse') for m in methods), 'unknown protection policy')
     require({m['symbol'] for m in methods if m['protection'] == 'vmp'} == set(receipt['symbols']), 'VMP manifest differs')
     require({m['symbol'] for m in methods if m['protection'] == 'native-cse'} == set(receipt['nativeSymbols']), 'native manifest differs')
     library_path = 'lib/arm64-v8a/lib' + selection['library'] + '.so'
@@ -119,17 +123,28 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report):
             check_runtime_format(data, min_sdk)
         with zipfile.ZipFile(apk) as z:
             names = z.namelist(); require(len(names) == len(set(names)), 'duplicate ZIP entry')
+            for entry in z.infolist():
+                if entry.filename.startswith('lib/') and entry.filename.endswith('.so'):
+                    binary = z.read(entry)
+                    require(entry.filename.startswith('lib/arm64-v8a/') and len(binary) >= 20 and
+                            binary[:7] == b'\x7fELF\x02\x01\x01' and struct.unpack_from('<H', binary, 18)[0] == 183,
+                            'unsupported SO ABI: ' + entry.filename)
             if library_path in names:
                 require(digest(z.read(library_path)) == receipt['librarySha256'], 'packaged SO differs')
                 libraries += 1
             if asset_path in names:
                 require(receipt['segmentedData'] and digest(z.read(asset_path)) == receipt['containerSha256'], 'packaged QSEG differs')
                 require(z.getinfo(asset_path).compress_type == zipfile.ZIP_STORED, 'QSEG must be STORED')
+                zip_entry_range(data, z.getinfo(asset_path), z.start_dir)
                 require(library_path in names, 'QSEG must share its SO APK'); containers += 1
+            require(all(not name.endswith('.qseg') or name == asset_path for name in names), 'unexpected QSEG container')
         outputs.append({'file': apk.name, 'sha256': digest(data), 'bytes': len(data), 'certificateSha256': certificates[0].lower()})
     require(libraries >= 1 and containers == (libraries if receipt['segmentedData'] else 0), 'missing SO or container')
     if receipt['segmentedData']:
         require(digest((native / 'segments.json').read_bytes()) == receipt['segmentsReceiptSha256'], 'segment receipt changed')
+        segments = json.loads((native / 'segments.json').read_text())
+        require(segments.get('schemaVersion') == 1 and segments.get('containerSha256') == receipt['containerSha256'] and
+                segments.get('containerBytes') == receipt['containerBytes'], 'segment receipt identity differs')
     verify_wrappers(apks, selection)
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps({'schemaVersion': 1, 'protectedMethods': len(methods), 'apkSignatureVerification': receipt.get('apkSignatureVerification', False),

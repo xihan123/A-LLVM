@@ -1,5 +1,6 @@
 """Exercise the final verifier against real signed dex2c device fixtures (no device needed)."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -31,13 +32,15 @@ class FinalApkTest(unittest.TestCase):
         verify(list(apks) or [ARGS.fixtures / 'protected.apk'], self.native, self.generated,
                ARGS.java, ARGS.apksigner, 26, self.report)
 
-    def repack(self, transform):
+    def repack(self, transform, additions=()):
         unsigned, signed = self.out / 'unsigned.apk', self.out / 'signed.apk'
         with zipfile.ZipFile(ARGS.fixtures / 'protected.apk') as source, zipfile.ZipFile(unsigned, 'w') as output:
             for item in source.infolist():
                 data = transform(item.filename, source.read(item))
                 if data is not None:
                     output.writestr(item.filename, data)
+            for name, data in additions:
+                output.writestr(name, data)
         subprocess.run([str(ARGS.java), '-jar', str(ARGS.apksigner), 'sign', '--ks', str(ARGS.fixtures / 'test.jks'),
                         '--ks-key-alias', 'test', '--ks-pass', 'pass:android', '--min-sdk-version', '26',
                         '--out', str(signed), str(unsigned)], check=True, capture_output=True)
@@ -91,6 +94,47 @@ class FinalApkTest(unittest.TestCase):
             self.skipTest('requires QSEG fixture')
         path.write_bytes(path.read_bytes() + b' ')
         with self.assertRaisesRegex(ValueError, 'segment receipt changed'):
+            self.check()
+
+    def test_signed_extra_container_or_abi_is_rejected(self):
+        binary = b'\x7fELF\x02\x01\x01' + bytes(11) + b'\xb7\0'
+        for entry, message in (('assets/stale.qseg', 'unexpected QSEG'), ('lib/x86_64/extra.so', 'unsupported SO ABI')):
+            apk = self.repack(lambda name, data: data, [(entry, binary)])
+            with self.subTest(entry=entry), self.assertRaisesRegex(ValueError, message):
+                self.check(apk)
+
+    def test_signed_wrong_machine_in_arm64_path_is_rejected(self):
+        def change(name, data):
+            if name.endswith('.so'):
+                return data[:18] + b'\x3e\0' + data[20:]
+            return data
+        apk = self.repack(change)
+        with self.assertRaisesRegex(ValueError, 'unsupported SO ABI'):
+            self.check(apk)
+
+    def test_duplicate_method_with_updated_digest_is_rejected(self):
+        selection = self.generated / 'selection.json'
+        data = json.loads(selection.read_text())
+        data['methods'].append(data['methods'][0])
+        selection.write_text(json.dumps(data))
+        receipt = self.native / 'protection.json'
+        data = json.loads(receipt.read_text())
+        data['selectionSha256'] = hashlib.sha256(selection.read_bytes()).hexdigest()
+        data['protectedMethods'] += 1
+        receipt.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, 'duplicate selected'):
+            self.check()
+
+    def test_self_consistent_stale_segment_receipt_is_rejected(self):
+        path = self.native / 'segments.json'
+        if not path.exists():
+            self.skipTest('requires QSEG fixture')
+        data = json.loads(path.read_text()); data['containerSha256'] = '0' * 64
+        path.write_text(json.dumps(data))
+        receipt = self.native / 'protection.json'
+        data = json.loads(receipt.read_text()); data['segmentsReceiptSha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+        receipt.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, 'segment receipt identity differs'):
             self.check()
 
     def test_duplicate_split_classes(self):

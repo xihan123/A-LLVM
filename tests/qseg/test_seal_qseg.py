@@ -4,6 +4,8 @@ import secrets
 import struct
 import sys
 import unittest
+import zlib
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -78,6 +80,68 @@ class SegmentedTests(unittest.TestCase):
             qseg.unpack(lib, other_blob, self.cert)
         with self.assertRaises(ValueError):
             qseg.unpack(another, blob, self.cert)
+
+    def test_build_material_and_domains_are_distinct(self):
+        builds = [self.fixture([(bytes(16), 2, b'A' * 1000, 'pool')]) for _ in range(3)]
+        headers = [lib[qseg.locate_image(lib)[1]:qseg.locate_image(lib)[1] + 512] for lib, _, _ in builds]
+        for begin, end in ((24, 40), (40, 72), (72, 104), (184, 216)):
+            self.assertEqual(3, len({h[begin:end] for h in headers}))
+        self.assertEqual(3, len({blob for _, blob, _ in builds}))
+        h = headers[0]
+        root = qseg.derive(h, h[152:184], qseg.expected_inputs(2, certificate=self.cert))
+        keys = [qseg.index_key(root, h), qseg.segment_key(root, h, bytes(16), 1, 0),
+                qseg.segment_key(root, h, bytes(16), 1, 1), qseg.segment_key(root, h, bytes(16), 2, 0),
+                qseg.segment_key(root, h, bytes([1]) * 16, 1, 0)]
+        self.assertEqual(len(keys), len(set(keys)))
+
+    def test_invalid_resources_and_wrong_elf_abi(self):
+        for resources in ([(bytes(16), 2, b'', 'empty')], [(bytes(15), 2, b'x', 'short')],
+                          [(bytes(16), 3, b'x', 'kind')],
+                          [(bytes(16), 1, b'x', 'a'), (bytes(16), 2, b'y', 'b')]):
+            with self.subTest(resources=resources), self.assertRaises(ValueError):
+                self.fixture(resources)
+        lib, blob, _ = self.fixture()
+        for offset, value in ((4, 1), (5, 2), (18, 62)):
+            changed = bytearray(lib); changed[offset] = value
+            with self.assertRaisesRegex(ValueError, 'AArch64'):
+                qseg.unpack(changed, blob, self.cert)
+
+    def compressed_variant(self, stored):
+        lib, blob, _ = self.fixture([(bytes(16), 2, b'A' * 1000, 'pool')])
+        lib = bytearray(lib)
+        _, pos = qseg.locate_image(lib); h = lib[pos:pos + 512]
+        root = qseg.derive(h, h[152:184], qseg.expected_inputs(2, certificate=self.cert))
+        size = qseg.u32(blob, 12)
+        directory = bytearray(qseg.decrypt(qseg.index_key(root, h), bytes(12), blob[:16] + h[24:40],
+            blob[16:16 + size], blob[16 + size:32 + size]))
+        struct.pack_into('<I', directory, 28, len(stored))
+        cipher, tag = qseg.encrypt(qseg.segment_key(root, h, bytes(16), 2, 0), bytes(12), h[24:40] + directory[:48], stored)
+        directory[48:64] = tag
+        index, tag = qseg.encrypt(qseg.index_key(root, h), bytes(12), blob[:16] + h[24:40], directory)
+        changed = blob[:16] + index + tag + cipher
+        struct.pack_into('<I', lib, pos + 8, len(changed))
+        lib[pos + 384:pos + 416] = hashlib.sha256(changed).digest()
+        return lib, changed
+
+    def test_authenticated_malformed_compression(self):
+        def deflate(raw):
+            encoder = zlib.compressobj(wbits=-15)
+            return encoder.compress(raw) + encoder.flush()
+        for stored in (b'\xff' * 11, deflate(b'A' * 1000)[:-1],
+                       deflate(b'A' * 1000) + b'x', deflate(b'A' * 1001)):
+            with self.subTest(stored=stored):
+                lib, blob = self.compressed_variant(stored)
+                with self.assertRaises((ValueError, zlib.error)):
+                    qseg.unpack(lib, blob, self.cert)
+
+    def test_unauthenticated_payload_never_reaches_decompressor(self):
+        lib, blob, _ = self.fixture([(bytes(16), 2, b'A' * 1000, 'pool')])
+        changed = bytearray(blob); changed[-1] ^= 1
+        image = bytearray(lib); _, pos = qseg.locate_image(image)
+        image[pos + 384:pos + 416] = hashlib.sha256(changed).digest()
+        with patch.object(qseg.zlib, 'decompressobj', side_effect=AssertionError('unauthenticated decompression')):
+            with self.assertRaisesRegex(ValueError, 'authentication'):
+                qseg.unpack(image, changed, self.cert)
 
     def test_truncation_trailing_and_reseal(self):
         lib, blob, _ = self.fixture()

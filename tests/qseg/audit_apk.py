@@ -24,11 +24,12 @@ def audit(apk, protection, segments, certificate):
         for entry in archive.infolist():
             if not entry.filename.endswith(".so"):
                 continue
-            name_len, extra_len = struct.unpack_from("<HH", data, entry.header_offset + 26)
-            start = entry.header_offset + 30 + name_len + extra_len
+            start, _ = qseg.zip_entry_range(data, entry, archive.start_dir)
             if entry.compress_type != zipfile.ZIP_STORED or start % 16384:
                 raise ValueError("SO ZIP alignment failed: " + entry.filename)
             library = archive.read(entry)
+            if not entry.filename.startswith('lib/arm64-v8a/') or library[:7] != b'\x7fELF\x02\x01\x01' or struct.unpack_from('<H', library, 18)[0] != 183:
+                raise ValueError("Unsupported SO ABI: " + entry.filename)
             elf = qseg.Elf(library)
             phoff = struct.unpack_from("<Q", library, 32)[0]
             entsize, count = struct.unpack_from("<HH", library, 54)
@@ -47,6 +48,7 @@ def audit(apk, protection, segments, certificate):
         if len(names) != 1 or names[0].filename != asset or names[0].compress_type != zipfile.ZIP_STORED:
             raise ValueError("Missing, extra or compressed container")
         blob = archive.read(names[0])
+        qseg.zip_entry_range(data, names[0], archive.start_dir)
         if hashlib.sha256(blob).hexdigest() != receipt["containerSha256"] or len(blob) != receipt["containerBytes"]:
             raise ValueError("Container changed after sealing")
         resources = qseg.unpack(library, blob, certificate.read_bytes())

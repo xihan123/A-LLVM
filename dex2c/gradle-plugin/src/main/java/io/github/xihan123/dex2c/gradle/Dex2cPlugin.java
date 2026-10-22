@@ -21,8 +21,8 @@ public final class Dex2cPlugin implements Plugin<Project> {
     }
     @SuppressWarnings({"rawtypes","unchecked"})
     private static void configure(Project project,Dex2cExtension extension) {
-        project.getDependencies().add("compileOnly","io.github.xihan123.dex2c:annotations:0.1.12");
-        project.getDependencies().add("implementation","io.github.xihan123.dex2c:runtime:0.1.12");
+        project.getDependencies().add("compileOnly","io.github.xihan123.dex2c:annotations:0.1.13-hardening1");
+        project.getDependencies().add("implementation","io.github.xihan123.dex2c:runtime:0.1.13-hardening1");
         AndroidComponentsExtension components=project.getExtensions().getByType(AndroidComponentsExtension.class);
         var buildTools=project.getObjects().property(String.class);
         components.finalizeDsl((Action<com.android.build.api.dsl.ApplicationExtension>)dsl->{

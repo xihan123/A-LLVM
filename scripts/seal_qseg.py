@@ -6,6 +6,7 @@ import json
 import secrets
 import struct
 import zlib
+import zipfile
 from pathlib import Path
 
 from seal_cse import Elf, derive, encrypt, decrypt, expected_inputs, hkdf, u32
@@ -14,6 +15,25 @@ IMAGE_MAGIC = b"NDKPQSG1"
 FILE_MAGIC = b"QSEGDAT1"
 MAX_SIZE = 1 << 28
 ENTRY = struct.Struct("<16s8I16s")
+
+
+def zip_entry_range(data, entry, central_offset):
+    """按运行时规则核对 STORED 条目的本地头和中央目录，返回真实载荷范围。"""
+    local = entry.header_offset
+    if not 0 <= local <= central_offset - 30 or central_offset > len(data):
+        raise ValueError("ZIP local header bounds")
+    magic, _, flags, method, _, _, crc, compressed, size, names, extra = struct.unpack_from("<I5H3I2H", data, local)
+    encoded = entry.filename.encode('utf-8' if flags & 0x800 else 'cp437')
+    start = local + 30 + names + extra
+    if (magic != 0x04034b50 or flags != entry.flag_bits or flags & ~0x808 or
+            method != zipfile.ZIP_STORED or entry.compress_type != method or
+            entry.compress_size != entry.file_size or names != len(encoded) or
+            data[local + 30:local + 30 + names] != encoded or
+            start > central_offset or entry.file_size > central_offset - start):
+        raise ValueError("ZIP local/central header mismatch")
+    if not flags & 8 and (crc, compressed, size) != (entry.CRC, entry.compress_size, entry.file_size):
+        raise ValueError("ZIP local/central sizes or CRC mismatch")
+    return start, start + entry.file_size
 
 
 def segment_key(root, header, identity, kind, chunk):
@@ -56,6 +76,8 @@ def prepare(resources, asset, certificate):
 
 
 def locate_image(data):
+    if len(data) < 20 or data[:7] != b'\x7fELF\x02\x01\x01' or struct.unpack_from('<H', data, 18)[0] != 183:
+        raise ValueError("QSEG requires ELF64 little-endian AArch64")
     elf = Elf(data)
     found = []
     for flags, offset, _, size, _ in elf.loads:
@@ -74,6 +96,13 @@ def locate_image(data):
 
 
 def pack(data, resources):
+    identities = set()
+    if not resources:
+        raise ValueError("empty segmented image")
+    for identity, kind, raw, _ in resources:
+        if len(identity) != 16 or identity in identities or kind not in (1, 2) or not 0 < len(raw) <= 1 << 24:
+            raise ValueError("invalid/duplicate staged identity or size")
+        identities.add(identity)
     elf, pos = locate_image(data)
     header = bytearray(data[pos:pos + 512])
     if u32(header, 12) or any(header[72:104]) or any(header[152:184]) or any(header[384:]):
