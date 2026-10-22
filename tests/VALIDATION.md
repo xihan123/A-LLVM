@@ -1,8 +1,6 @@
 # 稳定性修复验证记录（2026-10-15）
 
-2026-10-16 的 p3 结果见 [VMP 回归测试](vmp/README.md)。本文保留 p1 的历史结果。
-
-本记录对应 p1 修复及后续代码清理；CI 验证版本为 `5634b305effd549161211d36f6e7bf91235d46e9`。
+2026-10-16 的 p3 结果见 [VMP 回归测试](vmp/README.md)。本记录为 p1 修复及后续代码清理的结果，CI 验证版本为 `5634b305effd549161211d36f6e7bf91235d46e9`。
 
 ## CI 构建（已启动，结果待定）
 
@@ -70,16 +68,16 @@ python tests/cert-bind/device_roundtrip.py \
 
 `build-system-smoke` 要求 CMake/Ninja 在 PATH 中；包结构检查要求先运行 `scripts/make_release_meta.py`。宿主往返测试调用原生可执行文件，不能用 Android target 替代宿主 target。
 
-设备 CSE 验证使用 `tests/string-enc/lifetime.c` 与 `lifetime_driver.c`：driver 独立以 O2、无混淆编译；fixture 以 O0/O2/Oz 和 CSE/perkey 编译，链接成 arm64 可执行文件后通过 adb 执行。本轮该矩阵为手动执行；自动设备脚本目前覆盖 VMP 和 APK 证书绑定。
+设备 CSE 验证使用 `tests/string-enc/lifetime.c` 与 `lifetime_driver.c`：driver 独立以 O2、无混淆编译；fixture 以 O0/O2/Oz 和 CSE/perkey 编译，链接成 arm64 可执行文件后通过 adb 执行。该矩阵为手动执行；自动设备脚本目前覆盖 VMP 和 APK 证书绑定。
 
 ## 行为边界与剩余验证
 
 - 解密后的字符串保留静态存储期，明文会在首次使用后驻留内存；不再在基本块结束时清零，以维持原始字符串字面量的指针语义。
 - 证书 helper 必须单独编译、不带混淆并关闭 LTO；集成示例见 [runtime/README.md](../runtime/README.md)。
-- VMP 解释器仍仅支持 arm64，C 输入也需链接 libc++；本轮未验证信号处理器重入或异常传播。
+- VMP 解释器仍仅支持 arm64，C 输入也需链接 libc++；信号处理器重入或异常传播未验证。
 - CSE/FLA 正向注解不是函数白名单；所有功能仍需要开关。此次未引入 annotation-only 模式。
 - Linux、LLVM 20 与 r30 较新 LLVM 21 基线的完整构建已启动，尚无最终结果。两套 overlay 字节一致不代替各自基线测试。
 - CI 新增宿主语义测试与 Android VMP 编链；CI 不自动执行 adb 设备测试。
-- anti-tamper 本轮做了静态检查及未篡改的组合语义回归，未重跑篡改后终止的设备矩阵。
+- anti-tamper 做了静态检查及未篡改的组合语义回归，未重跑篡改后终止的设备矩阵。
 
 下一步检查四组 CI 的构建与回归结果；通过后再推进 [路线图](../ROADMAP.md) 中的性能/体积基准及功能扩展。

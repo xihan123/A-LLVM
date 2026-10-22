@@ -18,12 +18,12 @@ python tests/vmp/call_frames.py --ndk "$NDK" --serial "$SERIAL"
 外部缓冲区、别名与邻接字段、递归、回调重入、结构体返回、嵌套异常、异常对象释放和八线程并发。
 另在预热 TLS 后注入可执行文件的 malloc 失败，验证 native 错误出参与无堆快照的 VM 递归。
 IR 门禁要求真实字节码、TLS 帧指针、无分发器快照 malloc/free、入口复验，以及未被优化掉的
-VM callee/递归调用。支持 `--clang` 和 `--work-dir`；不传序列号仅编链，CI 不宣称设备通过。
+VM callee/递归调用。支持 `--clang` 和 `--work-dir`；不传序列号仅编链，CI 不含设备验证。
 `--semantic-only` 用于演示旧编译器失败，跳过新帧结构断言。
 
-每次入口增加与 VM 数据帧大小成正比的栈空间和清零成本；大帧及深递归需单独测量。
-不保证跨 VM 的 `longjmp`、线程取消或异步信号重入；原有向量、动态 alloca、过度对齐等
-IR 支持边界未在此扩展。详情见 [p9 验证记录](../../docs/vmp-call-frames-p9.md)。
+每次入口增加与 VM 数据帧大小成正比的栈空间和清零成本，大帧及深递归需单独测量。
+跨 VM 的 `longjmp`、线程取消、异步信号重入不受支持，原有向量、动态 alloca、过度对齐等
+IR 支持边界也未扩展。详情见 [p9 验证记录](../../docs/vmp-call-frames-p9.md)。
 
 ## p8 定长内存操作
 
@@ -31,7 +31,7 @@ IR 支持边界未在此扩展。详情见 [p9 验证记录](../../docs/vmp-call
 标准 `memcmp` / `memcpy` 和非 volatile `llvm.memcpy` 在字节码生成前展开为逐字节标量操作。
 比较保留首个不同的无符号字节所决定的返回值符号，复制保留返回指针；长度为零时不访问内存。
 动态长度、超限长度、自定义实现、`nobuiltin`、volatile、特殊地址空间及特殊调用约定边界
-（musttail、operand bundle）不在本轮转换范围。此开关单独使用不选择函数，也不改变无 VMP 构建。
+（musttail、operand bundle）不在 p8 转换范围。此开关单独使用不选择函数，也不改变无 VMP 构建。
 先执行 VMP eligibility 检查，被拒绝的函数不会被此开关改写。
 实际展开后若无法完成 VMP 翻译（例如超过指令数上限），编译明确失败，禁止输出未保护的展开代码。
 

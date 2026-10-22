@@ -20,14 +20,14 @@
 
 ## 下游接入与验收边界
 
-消费项目 的 app、fanqie、qqreader 统一移除 lsparanoid，分别选择各自业务包和
+下游接入项目的 app、fanqie、qqreader 三模块统一移除 lsparanoid，分别选择各自业务包和
 `com.example.shared`。dex2c 先处理完整方法，字符串插件覆盖剩余方法，不叠加旧字符串混淆。
 使用已有公开证书与同一 `dex2c.clang` 配置，保持现有 QSEG 与完整验签开关。
 
 正式坐标重新执行发布检查：42 项 Gradle、22 项 Python 测试通过，90 个 staging 文件完整，
 本机证据为 `dex2c/build/release-0.1.13-t0062486/manifest.json`；匿名检查确认版本尚不存在。
 历史候选另完成 4 KiB 设备检查。API 26、真实 16 KiB 设备、Linux 消费者及真实业务完整启动/内存
-验收仍有缺项；正式版本号不能用于声称这些验证已完成，也不解除下游既有发布门禁。
+验收仍有缺项；正式版本号不代表这些验证已完成，也不解除下游既有发布门禁。
 运行时明文与 Java 缓存可读取，公开证书不是秘密。
 
 三个实际消费者从正式 staging 构建 Release 与最终分发 APK，R8、签名、证书、DEX、SO、

@@ -1,8 +1,8 @@
 # CSE v1 验证记录 — 2026-10-18
 
-p7 的按需代码复验、VMP 入口复验及最新验证结果见 [增量验证记录](../anti-tamper/RECHECK_VALIDATION.md)。下文保留 p6 的原始结果。
+p7 的按需代码复验、VMP 入口复验及最新验证结果见 [增量验证记录](../anti-tamper/RECHECK_VALIDATION.md)；本记录为 p6 的原始结果。
 
-宿主为 Windows，设备为 GM1901 / Android API 37 / arm64-v8a。Python 为本机 3.14；CI 配置使用 3.11。本记录不代表 Linux 构建或其他 Android 版本已通过。
+宿主为 Windows，设备为 GM1901 / Android API 37 / arm64-v8a。Python 为本机 3.14；CI 配置使用 3.11。Linux 构建和其他 Android 版本未验证。
 
 ## 编译器与基线
 
@@ -11,7 +11,7 @@ p7 的按需代码复验、VMP 入口复验及最新验证结果见 [增量验�
 | 21 | `2d287f51eff2a5fbf84458a33f7fb2493cf67965` | 原始基线文件上 `git apply --check`，构建 clang / clang-resource-headers，通过 |
 | 20 | `f142f8afe21bceb00fb495468aa0b5043e98c419` | 原始基线文件上 `git apply --check`，构建 clang / clang-resource-headers，通过 |
 
-Android 交叉测试使用本地两套新编译器、NDK `30.0.16248370` 的 sysroot/库及 lld。LLVM 20 是对应 r29-beta1 Base revision 的编译器验证，未在本轮重新组装和发布完整官方 r29 NDK。
+Android 交叉测试使用本地两套新编译器、NDK `30.0.16248370` 的 sysroot/库及 lld。LLVM 20 是对应 r29-beta1 Base revision 的编译器验证，p6 未重新组装和发布完整官方 r29 NDK。
 
 ## 已通过
 

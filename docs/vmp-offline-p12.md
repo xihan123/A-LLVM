@@ -14,10 +14,10 @@ LLVM 20 行为不变。没有混淆开关时仍不进行 IR 变换。
 
 - APK SHA-256：`6bdb301c0d1fbec859f572c52600a5c9390b003dfc8ee7b4dc8e1bb6672f7469`。
 - SO SHA-256：`e73245e49420947241a5b4dcc433834dd2847d87bc5dbb56938d64839cde3a11`。
-- 旧恢复器本轮再次完整恢复 9/9 方法、160,110 字节、971 个基本块和 6,260 条指令。
+- 旧恢复器再次完整恢复 9/9 方法、160,110 字节、971 个基本块和 6,260 条指令。
 - MT 可见受保护样例类的类型索引、注册包装和 native 桥接；这些仍能辅助定位语义。
 - 工具初始状态不是此样本：默认 IDA 加载的是旧 SO，MT 原有文件也没有 9 方法基线。
-  本轮另传入基线 APK 并启用独立 IDA 实例，避免跨版本地址混用。
+  此次复核另传入基线 APK 并启用独立 IDA 实例，避免跨版本地址混用。
 
 ## 改动
 
@@ -53,11 +53,11 @@ p12 最终实现使用操作系统随机源显式初始化 `CryptoUtils`，在�
 payload 解密、块标签、操作数布局和 JNI 交互仍可分析；公开证书不是秘密，CSE 的既有
 离线恢复边界没有改变。单纯增加加密轮数、再次平坦化或扩大保护方法数量不能解决这些边界。
 
-## 本轮结果
+## 结果
 
 Windows x86_64、NDK 30.0.16248370、LLVM 21 Base revision
 `2d287f51eff2a5fbf84458a33f7fb2493cf67965`。设备为 OnePlus 7 / API 37 / 4 KB。
-该轮使用本地 dex2c 0.1.4 staging 构建；当时未发布 Maven 或 NDK Release。
+此候选使用本地 dex2c 0.1.4 staging 构建；当时未发布 Maven 或 NDK Release。
 以下 APK、SO 摘要及恢复对照属于发布前审查之前的候选包；显式系统随机种子修复后的
 复验单独记录，不把旧候选包的体积和攻击结果当作最终源码重新构建的测量。
 
@@ -77,19 +77,19 @@ Windows x86_64、NDK 30.0.16248370、LLVM 21 Base revision
 
 SO 体积是单次随机化构建结果，不代表固定增加量；没有进行稳定性能基准。
 APK 为常规 Release（V2/V3），基线为 CI 包（V2），因此不把整包差异全部归因于本次 pass。
-核心 Gradle check / validatePlugins 本轮为 UP-TO-DATE；设备 fixture 已重新生成和执行。
+核心 Gradle check / validatePlugins 当时为 UP-TO-DATE；设备 fixture 已重新生成和执行。
 
 候选 APK SHA-256：`360b8d79515265f9dec140e02667e68d051a30928092118c6196035490be227c`。
 候选 SO SHA-256：`cdc5dfa6726e4980efc0a99bf5e723e7eff58c9561dd2dab0e799de335badf24`。
 
-本机证据保存在 `work/offline-p12/`：`baseline/` 为本轮 IDA MCP 与恢复对照；
+本机证据保存在 `work/offline-p12/`：`baseline/` 为 2026-10-19 的 IDA MCP 与恢复对照；
 `candidate/` 包含 APK、SO、MT MCP 记录、IDA MCP 入口、`legacy-probe.json` 和
 `hardening.json`；`art-device-results.json`、`p12-device.json`、`installed.json`
 保存设备结果。编译和回归日志为 `work/offline-p12-*.log`。
 
 没有编写适配新映射的恢复器，也没有给出攻击耗时倍数。Linux、API 26 和 16 KB
 真机未覆盖；此次不是 LLVM 20 升级。结论限于旧恢复规则需要增加逐方法语义分析，
-不能表述为 9 个方法已不可恢复。
+并非证明 9 个方法已不可恢复。
 
 ## 0.1.4 发布前审查复验
 
@@ -111,7 +111,7 @@ APK 为常规 Release（V2/V3），基线为 CI 包（V2），因此不把整包
 - 独立 Android 样例的 Debug、R8 Release、依赖回调、已有 SO、16 KB 静态对齐、
   DEX 包装、增量与缓存恢复、注解删除及缺少证书拒绝通过。
 
-本轮日志位于 `work/review-p12-*.log`；Gradle 发布检查与文件清单位于
+复验日志位于 `work/review-p12-*.log`；Gradle 发布检查与文件清单位于
 `dex2c/build/release-0.1.4-dxqk2rxx/`；设备结果位于
 `dex2c/core/build/device-fixtures/device-results.json`；Android 集成结果位于
 `work/review-dex2c-0.1.4-gradle/results.json`。Maven 插件不包含 Clang，p12 NDK 整包仍未发布。

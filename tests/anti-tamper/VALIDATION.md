@@ -35,6 +35,6 @@
 - SHA-256：`750547e4cb2845057676ae8e243ccc85ecb37a86a4db8afb9c95b8b07348634d`。
 - 导出保持 JNI/NativeGuard/native_init；CSE helper 未公开导出，固定校验失败字符串已移除。
 
-合入 dev 后使用缓存 LLVM 库再次重链接 LLVM 20/21，更新本机 LLVM 21，并在新的 native 构建目录重新编译。新产物通过完整 CSE 记录认证、源码与编译器来源核对、Debug APK 签名证书核对、SO 一致性及 ZIP/ELF 16 KiB 对齐检查。上文设备回归针对相同源码的上一轮构建，本轮随机化产物未重复执行设备回归。
+合入 dev 后使用缓存 LLVM 库再次重链接 LLVM 20/21，更新本机 LLVM 21，并在新的 native 构建目录重新编译。新产物通过完整 CSE 记录认证、源码与编译器来源核对、Debug APK 签名证书核对、SO 一致性及 ZIP/ELF 16 KiB 对齐检查。上文设备回归针对合入前的同源码构建；合入后的随机化产物未重复执行设备回归。
 
 未安装或重启真实宿主应用，未完成 LSPosed 宿主及 16 KiB 页设备验收，未发布 Release。裸 syscall 不抵抗直接修改响应指令或内核层拦截。

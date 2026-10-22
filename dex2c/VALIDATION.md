@@ -1,8 +1,8 @@
 # dex2c 实施与验收记录
 
-日期：2026-10-19。以下为 dex2c 0.1.4 的历史验收；p12 编译器已本地构建，NDK 整包尚未发布。
+日期：2026-10-19。p12 编译器已本地构建，NDK 整包尚未发布。
 
-2026-10-20：0.1.5 继承选择候选仅发布到本机 staging。core 17 项测试中 16 项执行通过，1 项 NDK 编译测试未执行；已设置 hostCompiler，包含混合 native/VMP 源码的 CheckJNI 差分。消费样例的实际编译和 Release 构建成功，但 APK 增长约 50%–70%，且公开证书仍足以恢复 CSE 记录，不能视作安全与体积验收通过。LLVM overlay/运行时未修改，未产生新 patchset。
+2026-10-20：0.1.5 继承选择候选仅发布到本机 staging。core 17 项测试中 16 项执行通过，1 项 NDK 编译测试未执行；已设置 hostCompiler，包含混合 native/VMP 源码的 CheckJNI 差分。消费样例的实际编译和 Release 构建成功，但 APK 增长约 50%–70%，且公开证书仍足以恢复 CSE 记录，安全与体积验收未通过。LLVM overlay/运行时未修改，未产生新 patchset。
 
 ## p16 / 0.1.9（2026-10-21，本机候选）
 
@@ -15,7 +15,7 @@ vm.h 由脚本重新生成，LLVM 20 只同步 CSE/SHA 头，未构建其工具�
 
 接入样例的初始化回调标记与 DexKit 扫描测得升级首次约 982 ms，缓存命中约
 522–552 ms，独立缓存未命中约 973–993 ms。样本小于 1 秒，500 ms 未达到；不含
-通用框架注入和模块构造，不能据此保证完整注入开销。兼容层主 SO 从当轮真实基线
+通用框架注入和模块构造，不代表完整注入开销。兼容层主 SO 从实测基线
 4,524,496 降至 4,329,560 bytes；兼容层 695,672 → 590,552。
 
 最终编译器通过 core/插件、ART/CheckJNI、错签名/篡改、调用帧、8 线程/递归/重入/global/TLS、
@@ -56,7 +56,7 @@ dex2c 对 raw/final IR 各建立一次索引并复用校验；生成 C++ 时删�
 三个接入模块的最终 native 回执（p13 → p14）：业务 VMP 函数与 CSE VMP 入口数量不变，
 单模块编译时间从 86/57/46 秒量级降至 25/16/16 秒量级，主 SO 体积减少 35%–46%。
 完整构建从 4m16s 降为 2m36s；这是单次样本，随机混淆和调度会影响结果。
-接入项目保留实时 BUILD_TIMESTAMP 和随机混淆，因此无修改构建仍会重跑，未宣称缓存命中。
+接入项目保留实时 BUILD_TIMESTAMP 和随机混淆，无修改构建仍会重跑，没有缓存命中。
 兼容层 SO 从 1,423,416 降为 726,376 bytes，并修复 NDK 原地更新后 Ninja 复用旧对象的依赖问题。
 
 core/插件检查、post/strict/opcode 裁剪回归、string-enc、四 ABI、CMake/ndk-build、
@@ -64,7 +64,7 @@ ART CheckJNI 三方差分、错签名/篡改拒绝、CSE 密码向量/并发/边
 最终三个 APK 签名、SO 回执哈希、兼容层来源、ZIP/ELF 16 KiB 静态对齐检查通过。
 构建和测试日志在 `build/p14/`。
 
-LLVM 20 本轮未改动或验证。未验收完整宿主启动及 16 KB 真机；p13 所述 SHA 内联 VM 语义问题
+LLVM 20 未改动，也未验证。未验收完整宿主启动及 16 KB 真机；p13 所述 SHA 内联 VM 语义问题
 仍由原生 noinline 边界避开，公开材料可离线恢复 CSE 的边界不变。
 
 ## p13 / 0.1.6（2026-10-21，本地验证，未远端发布）
@@ -88,7 +88,7 @@ LLVM 20 仅同步源码，未构建验证。
 ## p12 离线指令映射候选（本地验证，NDK 未发布）
 
 LLVM 21 增加与 payload key 独立的每方法指令映射，保持离线运行。MT / IDA 对照中，
-旧恢复器从 9/9 成功变为 0/9；9 个入口密钥及 971 个块标签仍可恢复，不能解释为不可还原。
+旧恢复器从 9/9 成功变为 0/9；9 个入口密钥及 971 个块标签仍可恢复，不等于不可还原。
 新编译的 55 方法 ART 差分、并发/重入、调用帧、工具链回归及受保护样例入口通过。
 候选 SO 比 9 方法基线增加 15,848 bytes。使用本地 0.1.4 staging；完整证据、
 摘要和边界见 [p12 离线加固记录](../docs/vmp-offline-p12.md)。
@@ -117,11 +117,10 @@ LLVM 21 增加与 payload key 独立的每方法指令映射，保持离线运�
   从恢复结果生成直接 LLVM CFG，以旧 IR 仅作为 JNI/分发链接环境构建审计 APK，真机设置链路通过；
   此链接验证属于白盒验证，不是独立 APK-only 重链接器。
   0.1.3 远程复建产物从 APK 和 IDA 入口表达式同样完整恢复全部字节码（入口定位用构建符号辅助），
-  167 条 CSE 记录仍可通过 APK 公开材料恢复并认证。二次混淆已生效，但不能据此宣称不可去虚拟化。
+  167 条 CSE 记录仍可通过 APK 公开材料恢复并认证。二次混淆已生效，不构成不可去虚拟化的结论。
 
 最终样例 APK SHA-256：`bf1cc76040ee4325999cea67a22645334967581339878fe60b0f8b0f19c3c18d`。
 最终样例 SO SHA-256：`de840d289bd58721371adbcb812e819e4aa8c77eedca9b8871dd00efb72d9e6d`。
-下方为历史版本的验收记录，“未做去虚拟化”等历史结论由本节更新。
 
 ## 0.1.2 DEX 特征修正与 MT / IDA 验证
 
@@ -181,7 +180,6 @@ SO SHA-256：`90ca07c07d8ff5d915231d481549bc0a0fdbe831edac73bded72aefc7bc6e4c3`�
 
 可读 C++ 只留在构建目录；JNI 交互、标准库诊断以及运行时解密后的明文仍可观察。
 证书/篡改失败会终止所在进程。未测全部宿主业务、API 26/16 KB 真机或 Linux CI。
-下方保留 0.1.0 和 p10 的首轮实施记录。
 
 ## 已实现
 
@@ -199,7 +197,7 @@ Windows / JDK 21 / Gradle 9.8.1 / AGP 9.4.1 / Kotlin 2.4.20 / NDK 30.0.16248370 
 
 设备：OnePlus 7（GM1901），ARM64，Android API 37，4 KB 页面，LSPosed 2.2.1（7927），LibXposed API 102。
 
-本轮重建的 Clang 为本仓库 `build/bin/clang.exe`。当前 NDK 安装内仍是旧 Clang，接入时应配置 `dex2c.clangExecutable` 指向上述文件，或先安装包含 p10 的工具链；旧版会被插件能力校验拒绝。
+重建的 Clang 位于本仓库 `build/bin/clang.exe`。当前 NDK 安装内仍是旧 Clang，接入时应配置 `dex2c.clangExecutable` 指向上述文件，或先安装包含 p10 的工具链；旧版会被插件能力校验拒绝。
 
 ## 已通过的验证
 
@@ -244,7 +242,7 @@ VMP 对长循环的开销明显，应按业务基准选择保护范围。
 - `check :gradle-plugin:validatePlugins publishAllPublicationsToStagingRepository` 通过，核心测试 8/8、0 跳过。核对了 POM 依赖、plugin marker、JDK 8/21 目标、JNI 资源和许可文件。
 - 独立 Android 消费项目分别从本地 Maven staging 和远程仓库解析 dex2c，无 includeBuild；Debug、R8 Release 均构建成功，Release 的一个方法通过 VMP 校验并打包 SO。远程消费验证先 clean 并禁用 build cache，日志记录了五个坐标的实际下载。
 - 远程目标为 `https://mirrors.xihan.website/repository/maven-releases/`；发布前五个坐标的 0.1.0 产物均不存在。
-- **远程发布成功**：五个坐标全部通过 Gradle Maven 发布；匿名下载 110 个文件，17 个版本产物及其校验文件与本地 staging 逐字节一致。SHA-256/SHA-512/SHA-1/MD5 和 Maven 版本 metadata 均核验通过。未覆盖已有 Release。
+- 远程发布成功：五个坐标全部通过 Gradle Maven 发布；匿名下载 110 个文件，17 个版本产物及其校验文件与本地 staging 逐字节一致。SHA-256/SHA-512/SHA-1/MD5 和 Maven 版本 metadata 均核验通过。未覆盖已有 Release。
 - 本地发布副本：`dex2c/build/maven-staging`；报告：`work/dex2c-maven-release.json`；日志：`work/dex2c-maven-staging.log`、`work/dex2c-maven-consumer-staging.log`、`work/dex2c-maven-publish.log`、`work/dex2c-maven-consumer-remote.log`。
 
 接入及完整命令见 [README.md](README.md)。关键证据（仓库内构建目录）：
@@ -257,8 +255,8 @@ VMP 对长循环的开销明显，应按业务基准选择保护范围。
 
 ## 明确边界
 
-- 尚未在 16 KB 页面设备和 API 26 设备运行；本轮实机为 API 37 / 4 KB。16 KB 仅完成静态对齐检查。
-- 远程 GitHub CI 尚未触发。本轮 dex2c 验收范围为 Windows / LLVM 21 / ARM64，未宣称 Linux、LLVM 20 或其他 Android ABI 支持。
+- 尚未在 16 KB 页面设备和 API 26 设备运行；已验证实机为 API 37 / 4 KB。16 KB 仅完成静态对齐检查。
+- 远程 GitHub CI 尚未触发。dex2c 验收范围为 Windows / LLVM 21 / ARM64，Linux、LLVM 20 或其他 Android ABI 未验证。
 - 验证使用独立可控宿主和 LibXposed 模块，未替换或验证某个生产宿主 APK 的全部业务。
 - 动态字符串反射目标需应用维护自己的 R8 规则。构造器、初始化代码、类结构、类型解析表和 JNI 交互仍可见；仅选中的实现进入 VMP。
 - dex2c 插件 0.1.0 已发布到 Maven；p10 NDK 尚未发布。本地开发 Clang 与样例 APK 已生成。

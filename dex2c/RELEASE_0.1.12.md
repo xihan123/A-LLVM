@@ -31,7 +31,7 @@ python scripts/publish_dex2c.py --check `
 ```
 
 每次检查产生独立 `dex2c/build/release-0.1.12-*/`，其中 `manifest.json`、`check.log`、
-`staging.log` 绑定该次 85 个 Maven 文件。上传后另生成 `published.json`；没有它不能声称远端已核验。
+`staging.log` 绑定该次 85 个 Maven 文件。上传后另生成 `published.json`，缺失即远端未完成核验。
 
 ## 本次验证
 
@@ -47,10 +47,10 @@ python scripts/publish_dex2c.py --check `
 
 ## 适用范围与未完成项
 
-当前面向 LLVM 21 / NDK r30 / arm64 / Android API 26+。LLVM 20 不支持 QSEG；本轮没有将其宣称为支持。
+当前面向 LLVM 21 / NDK r30 / arm64 / Android API 26+。LLVM 20 不支持 QSEG，不在本版支持范围内。
 接入样例已完成 OnePlus7 上的 LSPosed 主/子进程、验签及 QSEG 语义验证；该历史证据绑定当时的候选哈希，
-本轮版本与构建任务调整不等于重新执行最终 APK 的全部设备验收。
+本版构建任务调整后未重新执行最终 APK 的全部设备验收。
 
 API 26 与 16 KiB 页面的实机、完整启用/禁用初始化 P95 增量、独立 QSEG 性能门槛，以及新 p17
 Linux/Windows 聚合发布流程尚需完成；文件对齐通过不能替代 16 KiB 设备验证。插件默认值因此保持显式选择。
-完全离线保护可被分析和恢复，不承诺持有 APK 无法还原算法或运行时数据。
+完全离线保护可被分析和恢复，不承诺从 APK 无法还原算法或运行时数据。

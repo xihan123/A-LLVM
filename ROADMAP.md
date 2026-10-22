@@ -2,13 +2,13 @@
 
 `[x]` 已完成，`[~]` 已实现但未完成端到端验证，`[ ]` 未开始。
 
-状态核对：2026-10-15。本轮稳定性修复的环境、结果及未覆盖项见 [验证记录](./tests/VALIDATION.md)；历史 CI 成功不代表当前工作区修复已通过 CI。
+状态核对：2026-10-15。稳定性修复的环境、结果及未覆盖项见 [验证记录](./tests/VALIDATION.md)；历史 CI 成功不代表当前工作区修复已通过 CI。
 
 ## 阶段 0 — 骨架
 
 - [x] 仓库结构、`config/`（`channels.json` / `patchset.env`）
 - [x] 版本发现 `discover_ndk.py`（分通道、按 Host 出构建矩阵、按 tag 出聚合发布矩阵、资产完整性去重）
-- [x] 上游基线定位 `locate_llvm.py`（读 `clang_source_info.md` 的 Base revision，取不到即失败；不宣称包含 Android 下游补丁）
+- [x] 上游基线定位 `locate_llvm.py`（读 `clang_source_info.md` 的 Base revision，取不到即失败；不包含 Android 下游补丁）
 - [x] 元数据 `make_release_meta.py`（`Ndkp.*` + build/patch JSON + `LICENSES/`）
 - [x] 覆盖脚本 `apply_overlay.sh` / `overlay_ndk.sh`
 - [x] 工作流 `discover.yml` / `build.yml` / `patch-check.yml`
@@ -88,7 +88,7 @@
 
 ## 发版前必做
 
-以下完成项记录历史流水线；本轮 p1 仍需完成上述当前优先事项 1–3。
+以下完成项记录历史流水线；p1 仍需完成上述当前优先事项 1–3。
 
 - [x] 跑一次 `patch-check.yml`（`mode=build` / AArch64+ARM+X86），验证 overlay、四 ABI、构建系统与字符串测试全绿
 - [x] Linux `mode=build` 全量（四 ABI）端到端跑通一次

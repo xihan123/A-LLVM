@@ -79,7 +79,7 @@ VM 内层密文一般不能压缩，收益主要来自字符串合并与取消�
 固定驻留字节及驻留峰值、淘汰次数；统计范围仅为恢复资源映射，不是全部进程内存。
 
 编译器仅对原函数具有 nounwind 契约的 VM 生成主借用，在解释器返回后、Java 异常分支前释放。
-未知原生异常展开路径使用 `pinned-unproven-unwind`；不能将此声明为任意 C++ EH 的回收支持。
+未知原生异常展开路径使用 `pinned-unproven-unwind`，不构成任意 C++ EH 的回收支持。
 SelfCheck 临时借用成对释放；字符串复制在借用期间完成，交付给业务的副本保持原生命周期。
 段回执记录 `lease-v1/copy-v1/pinned-unproven-unwind/pinned-legacy`，保护回执记录 ABI、预算及
 逐 VM 策略；最终 APK 验证拒绝未知 ABI、缺失策略、分段与保护回执不一致的回收声明。
@@ -95,8 +95,7 @@ python tests/qseg/audit_apk.py --apk <apk> --protection <protection.json> `
 ## 验证边界
 
 离线 APK、公开证书和实现仍足以恢复内容。本设计增加跨文件认证、目录解析、分段恢复和
-VM 分析步骤，不提供 APK-only 保密保证。MT 对 360 文件仅确认加载器/载荷分离，不能据此
-认定还原了其企业版算法。
+VM 分析步骤，不提供 APK-only 保密保证。MT 对 360 文件仅确认加载器/载荷分离，未还原其企业版算法。
 
 `runtime-cache` 仅复用 variant 内的稳定 runtime 编译产物，键覆盖编译器内容、NDK 元数据、
 编译参数、证书、全部捆绑源码及头文件、sysroot 和 resource headers；复用前核对内容摘要。

@@ -9,7 +9,7 @@ Kotlin 2.4.20 / NDK `30.0.16248370` / 本仓库 LLVM 21。
 - Java 主机 CheckJNI 差分：字符串插件单独使用、与 dex2c 组合、两种加载入口顺序。
   覆盖 UTF-16/NUL/代理项、intern 身份、初始化器/构造器/接口、lambda、拼接与并发读取。
 - 独立运行时边界测试：模拟 OOM 后重试、并发首次解码一次、热缓存不再解码、ClassLoader 缓存隔离。
-  此项替换了 native 边界，不声称测试同一 SO 文件跨 ClassLoader 的重复加载。
+  此项替换了 native 边界，未测试同一 SO 文件跨 ClassLoader 的重复加载。
 - 实际 A-LLVM arm64 编译、逐记录 CSE 缓冲区与调用检查、两个 CSE VMP 入口、自校验和 post CFG。
 - AGP R8 Release：唯一 Java/Kotlin/native 测试明文不出现在 DEX/SO；两种插件应用顺序、
   dex2c 单独使用、Debug 未转换、零命中、缺证书失败、增量命中、配置缓存复用及 native 构建缓存恢复。
@@ -44,7 +44,7 @@ Kotlin 2.4.20 / NDK `30.0.16248370` / 本仓库 LLVM 21。
 | Java heap 分配增量（未扣除全部临时对象） | 64 / 96 KiB | 96 / 96 KiB | 96 / 96 KiB |
 | 测试进程 PSS | 44.89 / 45.06 MiB | 45.21 / 45.38 MiB | 46.09 / 46.27 MiB |
 
-这些数值不是 Android Activity 启动耗时，也不是跨设备保证。基准使用 D8，不与 R8 样例的
+这些数值不是 Android Activity 启动耗时，也不构成跨设备保证；基准使用 D8，不与 R8 样例的
 APK 大小混合比较。标准输出之后还需解密测试报告文本，未计入热读取指标。
 独立 minified 样例一轮构建的 APK 大小约为 19.5 KiB（原版）、151.8 KiB（字符串）、199.7 KiB（组合）；
 对应保护 SO 约 117.5 / 165.4 KiB。布局随机化会影响大小，构建耗时单次结果不作为稳定基准。

@@ -84,8 +84,8 @@ Android arm64 的 SHA-256 通过 getauxval(AT_HWCAP) 检查 SHA2，在独立 tar
 函数中执行硬件压缩；无扩展时使用原软件实现，非 Android/arm64 也保留软件路径。
 两条路径通过标准向量、0..257 字节/8 种地址偏移与大输入差分，格式和摘要不变。
 
-VMP 只能提高分析成本，不改变 SO 和公开证书包含全部本地解密材料的事实，不能宣称
-修复 APK-only 离线恢复。设备语义、差分及性能回归：
+VMP 只能提高分析成本；SO 和公开证书仍包含全部本地解密材料，APK-only 离线恢复缺口未修复。
+设备语义、差分及性能回归：
 
 ```bash
 python tests/cse-hardened/device_test.py --ndk "$NDK" --clang "$CLANG" \
@@ -98,7 +98,7 @@ python tests/cse-hardened/device_test.py --ndk "$NDK" --clang "$CLANG" \
 
 AAD 绑定模块标识、格式版本、绑定开关、记录序号、容量、数据块总长和记录数。96-bit nonce 为零高部与模块内唯一的 32-bit 序号。每个模块使用独立随机 seed，封装时为同一 ELF 的所有模块生成一个 256-bit build_nonce。每模块增加一条认证有效、无业务引用的假字符串记录，连同整个数据块保留到最终链接。
 
-编译期使用暂存密钥认证加密。封装工具先认证、验证全部记录，再使用最终机器码摘要派生密钥重新加密，清除头内的期望包名 SHA-256 与证书混合值。seed 分片仍供运行时派生，不能视为攻击者不可获取的秘密。
+编译期使用暂存密钥认证加密。封装工具先认证、验证全部记录，再使用最终机器码摘要派生密钥重新加密，清除头内的期望包名 SHA-256 与证书混合值。seed 分片仍供运行时派生，对攻击者并非秘密。
 
 代码摘要为 SHA-256(`NDKP-CODE-v1` 与按程序头顺序排列的每段相对虚拟地址、文件长度、段 SHA-256)。覆盖全部可执行 `PT_LOAD` 文件字节，包含非 `.text` 的代码段。为兼容 strip，唯一规范化例外为 ELF 头的 `e_shoff`、`e_shentsize`、`e_shnum`、`e_shstrndx`：计算前将这些字段归零。程序头和实际代码字节仍被绑定。拒绝可写/不可读/含非文件字节的可执行段、文本重定位及重叠映射布局。
 
@@ -147,7 +147,7 @@ python tests/cse-hardened/recheck_test.py --ndk "$NDK" --clang "$CLANG" --compil
 ```
 
 设备回归同时验证旧默认模式在初始化后的盲区、检查点前后的篡改、指针存活、并发和 strip。
-`--compile-only` 只验证编链、IR 和封装，不声称已执行篡改测试。
+`--compile-only` 只验证编链、IR 和封装，不含篡改测试。
 新注解使用额外的 hidden 入口 `ndkp_cse_recheck_module_v1`，需同步 p7 运行时并重新编译。
 CSE v1 格式、原解密 ABI 和默认明文生命周期保持不变。
 

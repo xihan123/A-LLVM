@@ -98,7 +98,7 @@ tests/              package-layout / string-enc / abi-smoke / build-system-smoke
 
 ## 当前状态
 
-阶段 0、1a、1b 已跑通，Linux/Windows 双 Host build 已于 2026-09-09 成功发布。1c、VMP 与扩展保护已实现；2026-10-15 修复了字符串生命周期/并发、VMP 线程隔离/递归、证书初始化循环与常量加密兼容性。Windows LLVM 21 及 Android arm64（含证书绑定完整 APK）回归通过，本轮 Linux/Windows CI 和 LLVM 20 验证仍待完成。见 [验证记录](./tests/VALIDATION.md) 与 [路线图](./ROADMAP.md)。
+阶段 0、1a、1b 已跑通，Linux/Windows 双 Host build 已于 2026-09-09 成功发布。1c、VMP 与扩展保护已实现；2026-10-15 修复了字符串生命周期/并发、VMP 线程隔离/递归、证书初始化循环与常量加密兼容性。Windows LLVM 21 及 Android arm64（含证书绑定完整 APK）回归通过，Linux/Windows CI 和 LLVM 20 验证仍待完成。见 [验证记录](./tests/VALIDATION.md) 与 [路线图](./ROADMAP.md)。
 
 ## 许可证
 

@@ -176,12 +176,18 @@ AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 
 | 功能 | 发布前置条件 |
 | --- | --- |
-| 字符串 per-key / 包名绑定（`-irobf-cse-perkey` / `-irobf-cse-bind`） | 已实现（ChaCha8 派生密钥 + `/proc/self/cmdline` 包名折入 pepper）；host 往返 + IR 校验 + **真机 arm64-v8a 与 armeabi-v7a**（perkey 正确、bind 包名 happy-path 正确、错包名 fail-closed 乱码）均通过。历史测量体积开销 perkey +3.1KB / bind +3.8KB；当前解码一次性缓存并以原子状态发布，明文保留静态存储期；多进程 `:suffix` 私有子进程经 `:` 截断还原基础包名，真机验证正确解密（错包名仍 fail-closed）。本轮并发/生命周期修复已通过 Windows 与 arm64 设备回归，当前 p1 仍待 CI |
+| 字符串 per-key / 包名绑定（`-irobf-cse-perkey` / `-irobf-cse-bind`） | 已实现（ChaCha8 派生密钥 + `/proc/self/cmdline` 包名折入 pepper）；真机 arm64-v8a 与 armeabi-v7a 验证通过（细节见下文「实现记录」） |
 | 反分析探针（`-irobf-*detect`/`bandump`/`*maps`） | 已实现（注入 `main`）；待误报测试 + `.so` 场景改注入 `.init_array` |
 | 代码完整性自校验（`-irobf-selfcheck`） | VMP 字节码内部校验：加载期以 volatile 读复算各 blob 的 FNV-1a64，失配时以裸 syscall 终止；运行期哈希累积值折入 VMP 入口密钥。p7 可加 `-irobf-selfcheck-entry`，在每次 VM 入口复验当前 blob 并折入实测哈希。入口用元数据标记定位，整数混淆后仍生效。FNV 不提供密码学认证，不覆盖解释器或其他机器码；本 SO 的代码复验另见 `NDKP_CSE_RECHECK`。可写数据和检查器本身仍可能被同进程攻击者改写。 |
-| VMP（`-irobf-vmp`） | 已实现且**真机验证真正经解释器执行**。**关键修复（2026-07）**：VMP 在 OptimizerLast 运行，晚于 inliner/IPSCCP，导致被保护函数在到达 VM 桩前被内联/常量折叠掉、VM 桩沦为死代码（此前"~1.0× 原生"实为函数根本没走 VM）。新增 `VMProtectPreparePass`（PipelineStartEP 早期给目标打 `NoInline`+`llvm.compiler.used`，后者令 IPSCCP 停止参数追踪→调用点不被折叠）修复此绕过。**并修复 translator 的循环/PHI 前向引用 bug**（`basicblock_map` 用 `.insert()` 被 operator[] 污染的 0 卡住→分支全跳 BB0 死循环；PHI 回边 incoming 值未分配槽 `packValue` 报错；PHI bb_id 未回填）——改 `basicblock_map[bb]=` 覆盖 + PHI 值提前分配槽 + `phi_bb_map` 回填。真机 arm64-v8a：直线 64-bit、循环(LCG/FNV)、递归(fib)、内存(alloca/load/store/gep)、switch、VM→native 调用、float/double 全部 == 原生；旧"compute 挂死"已修。**性能**：真正解释后 hot 循环 ~10000× 原生（hot(1000) 54ms vs 0.005ms）——故仅虚拟化小型/关键函数；向量指令 translator 拒绝→安全回退原生。体积 +~1.8MB 解释器/模块；待各 ABI 解释器扩展 |
+| VMP（`-irobf-vmp`） | 已实现，真机验证真正经解释器执行（关键修复与性能数据见下文「实现记录」） |
 | AArch64 后端混淆 | 独立补丁和机器码测试 |
 | macOS Host | runner、dmg 打包和签名处理 |
+
+### 实现记录
+
+字符串 per-key / 包名绑定：host 往返 + IR 校验 + 真机 arm64-v8a 与 armeabi-v7a（perkey 正确、bind 包名 happy-path 正确、错包名 fail-closed 乱码）均通过。历史测量体积开销 perkey +3.1KB / bind +3.8KB；当前解码一次性缓存并以原子状态发布，明文保留静态存储期。多进程 `:suffix` 私有子进程经 `:` 截断还原基础包名，真机验证正确解密（错包名仍 fail-closed）。并发/生命周期修复已通过 Windows 与 arm64 设备回归，当前 p1 仍待 CI。
+
+VMP（`-irobf-vmp`）：已实现且真机验证真正经解释器执行。关键修复（2026-07）：VMP 在 OptimizerLast 运行，晚于 inliner/IPSCCP，导致被保护函数在到达 VM 桩前被内联/常量折叠掉、VM 桩沦为死代码（此前"~1.0× 原生"实为函数根本没走 VM）。新增 `VMProtectPreparePass`（PipelineStartEP 早期给目标打 `NoInline`+`llvm.compiler.used`，后者令 IPSCCP 停止参数追踪→调用点不被折叠）修复此绕过。同时修复 translator 的循环/PHI 前向引用 bug（`basicblock_map` 用 `.insert()` 被 operator[] 污染的 0 卡住→分支全跳 BB0 死循环；PHI 回边 incoming 值未分配槽 `packValue` 报错；PHI bb_id 未回填），改 `basicblock_map[bb]=` 覆盖 + PHI 值提前分配槽 + `phi_bb_map` 回填。真机 arm64-v8a：直线 64-bit、循环(LCG/FNV)、递归(fib)、内存(alloca/load/store/gep)、switch、VM→native 调用、float/double 全部 == 原生；旧"compute 挂死"已修。性能：真正解释后 hot 循环 ~10000× 原生（hot(1000) 54ms vs 0.005ms）——故仅虚拟化小型/关键函数；向量指令 translator 拒绝→安全回退原生。体积 +~1.8MB 解释器/模块；待各 ABI 解释器扩展。
 
 函数级 SO 自加密只保留为实验项。开始实现前必须先验证：
 
