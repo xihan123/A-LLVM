@@ -41,12 +41,14 @@ class PublishTest(unittest.TestCase):
     def test_release_version_and_dependency_consistency(self):
         java = self.root / "gradle-plugin/src/main/java/io/github/xihan123/dex2c/gradle/Dex2cPlugin.java"
         sample = self.root / "samples/xposed/shared/build.gradle"
-        for file in (java, sample):
+        strings = self.root / "samples/strings/build.gradle"
+        for file in (java, sample, strings):
             file.parent.mkdir(parents=True)
         for version in ("0.1.2", "0.1.10-qseg2", "0.1.11-verify1", "1.2.3-rc.1"):
             with self.subTest(version=version):
                 java.write_text(f'"{publish.GROUP}:annotations:{version}" "{publish.GROUP}:runtime:{version}"')
                 sample.write_text(f"'{publish.GROUP}:annotations:{version}'")
+                strings.write_text(f"'{publish.GROUP}:annotations:{version}'")
                 (self.root / "build.gradle").write_text(f"version = '{version}'")
                 self.assertEqual(publish.release_version(self.root), version)
         for invalid in ("0.1.2-SNAPSHOT", "0.1.2-snapshot", "0.1.2-rc1-SNAPSHOT", "../0.1.2",
@@ -66,7 +68,7 @@ class PublishTest(unittest.TestCase):
         before = self.metadata("0.1.0", "0.1.1")
         with patch.object(publish, "read_metadata", return_value=before), patch.object(publish, "fetch", return_value=None) as fetch:
             self.assertEqual(publish.require_new_version(self.version), before)
-            self.assertEqual(fetch.call_count, 85)
+            self.assertEqual(fetch.call_count, 90)
 
     def test_existing_metadata_rejects_publish(self):
         with patch.object(publish, "read_metadata", return_value=self.metadata("0.1.2")), patch.object(publish, "fetch") as fetch:
@@ -83,7 +85,7 @@ class PublishTest(unittest.TestCase):
     def test_candidate_staging_and_overwrite_guards(self):
         self.version = "0.1.11-verify1"
         self.stage()
-        self.assertEqual(len(publish.staged_manifest(self.root, self.version)), 85)
+        self.assertEqual(len(publish.staged_manifest(self.root, self.version)), 90)
         with patch.object(publish, "read_metadata", return_value=self.metadata(self.version)), patch.object(publish, "fetch") as fetch:
             with self.assertRaisesRegex(ValueError, "already exists"):
                 publish.require_new_version(self.version)
@@ -104,7 +106,7 @@ class PublishTest(unittest.TestCase):
 
     def test_complete_stage_and_corrupt_checksum(self):
         self.stage()
-        self.assertEqual(len(publish.staged_manifest(self.root, self.version)), 85)
+        self.assertEqual(len(publish.staged_manifest(self.root, self.version)), 90)
         checksum = next(self.root.rglob("*.sha256"))
         checksum.write_text("bad")
         with self.assertRaisesRegex(ValueError, "Invalid staging checksum"):
@@ -121,7 +123,7 @@ class PublishTest(unittest.TestCase):
         before = self.metadata("0.1.0", "0.1.1")
         with patch.object(publish, "fetch", side_effect=lambda p: (self.root / p).read_bytes()), patch.object(publish, "read_metadata", return_value=self.metadata("0.1.0", "0.1.1", "0.1.2")):
             report = publish.verify_remote(self.root, self.version, before)
-            self.assertEqual(len(report["verified"]), 85)
+            self.assertEqual(len(report["verified"]), 90)
         with patch.object(publish, "fetch", return_value=b"wrong"):
             with self.assertRaisesRegex(ValueError, "differs from staging"):
                 publish.verify_remote(self.root, self.version)
@@ -149,7 +151,7 @@ class PublishTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "zero failed/skipped"):
             publish.check_test_results(self.root)
         file.write_text(f'<testsuite>{cases}</testsuite>')
-        self.assertEqual(publish.check_test_results(self.root), 3)
+        self.assertEqual(publish.check_test_results(self.root), len(publish.NATIVE_TESTS))
 
     def test_credentials_only_reach_publish_and_logs_are_redacted(self):
         credentials = dict(zip(publish.CREDENTIALS, ("test-user", "test-secret")))

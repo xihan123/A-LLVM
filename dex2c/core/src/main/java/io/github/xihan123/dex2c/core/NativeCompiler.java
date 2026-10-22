@@ -39,7 +39,11 @@ public final class NativeCompiler {
         List<String> symbols=Files.readAllLines(generated.resolve("symbols.txt")).stream().filter(s->!s.isBlank()).toList();
         List<String> nativeSymbols=Files.exists(generated.resolve("native-symbols.txt"))
                 ?Files.readAllLines(generated.resolve("native-symbols.txt")).stream().filter(s->!s.isBlank()).toList():List.of();
-        if(symbols.isEmpty() && nativeSymbols.isEmpty()) {
+        List<String> stringSymbols=Files.exists(generated.resolve("string-symbols.txt"))
+                ?Files.readAllLines(generated.resolve("string-symbols.txt")).stream().filter(s->!s.isBlank()).toList():List.of();
+        int stringCount=Files.exists(generated.resolve("string-count.txt"))?Integer.parseInt(Files.readString(generated.resolve("string-count.txt"))):0;
+        List<String> allNativeSymbols=new ArrayList<>(nativeSymbols);allNativeSymbols.addAll(stringSymbols);
+        if(symbols.isEmpty() && allNativeSymbols.isEmpty()) {
             Files.createDirectories(packaged.getParent());
             Files.writeString(output.resolve("protection.json"),"{\"schemaVersion\":1,\"protectedMethods\":0}\n");return;
         }
@@ -50,6 +54,7 @@ public final class NativeCompiler {
         }
         Path publicCert=output.resolve("signing-cert.der");Files.write(publicCert,certBytes);
         if(python==null)throw new IllegalArgumentException("dex2c: Python 3 is required to seal hardened CSE; set pythonExecutable");
+        if(ndk==null || !Files.isDirectory(ndk))throw new IllegalArgumentException("A-LLVM: install NDK r30 and set android.ndkVersion or android.ndkPath");
         Path runtime=Files.createDirectories(output.resolve("a_llvm"));
         for(String name:List.of("ndkp_apkcert.cpp","ndkp_cse_runtime.cpp","cse_crypto.h","cse_region.h","apkcert.h","apkcert_io.h","sha256.h","seal_cse.py","seal_qseg.py","qseg.h","ndkp_qseg_runtime.cpp")) {
             try(InputStream input=Objects.requireNonNull(NativeCompiler.class.getResourceAsStream("/a_llvm/"+name))) {
@@ -100,10 +105,11 @@ public final class NativeCompiler {
         if(!irHash.equals(hash(ir)))throw new IOException("dex2c: verified IR changed during object compilation");
         List<String> objects=new ArrayList<>();objects.add(object.toString());
         if(verifyApkSignature)objects.addAll(ApkVerifierBuild.compile(common,runtime,output,runtimeCache,runtimeKey));
-        if(!nativeSymbols.isEmpty()) {
+        if(!allNativeSymbols.isEmpty()) {
             Path nativeIr=output.resolve("native.ll"),nativeObject=output.resolve("native.o");
             run(command(segmentFlags(hardened,segmented,output.resolve("staging/native"),stages),"-Oz","-S","-emit-llvm",generated.resolve("native.cpp").toString(),"-o",nativeIr.toString()),output.resolve("native.log"));
-            verifyNativeIr(Files.readString(nativeIr),nativeSymbols);
+            verifyNativeIr(Files.readString(nativeIr),allNativeSymbols);
+            if(!stringSymbols.isEmpty())verifyStringIr(Files.readString(nativeIr),stringCount);
             String nativeIrHash=hash(nativeIr);
             run(command(common,"-Oz","-Xclang","-disable-llvm-passes","-c",nativeIr.toString(),"-o",nativeObject.toString()),output.resolve("native-object.log"));
             if(!nativeIrHash.equals(hash(nativeIr)))throw new IOException("dex2c: verified native IR changed during compilation");
@@ -184,6 +190,10 @@ public final class NativeCompiler {
         verifyBytecodesInLibrary(Files.readAllBytes(packaged),cseBytecodes);
         Files.writeString(output.resolve("protection.json"),"{\"schemaVersion\":"+(segmented?5:4)+",\"abi\":\"arm64-v8a\",\"protectedMethods\":"+(symbols.size()+nativeSymbols.size())
                 +",\"vmpMethods\":"+symbols.size()+",\"nativeMethods\":"+nativeSymbols.size()
+                +",\"protectedStrings\":"+stringCount
+                +",\"stringSymbols\":["+String.join(",",stringSymbols.stream().map(Transformer::json).toList())+"]"
+                +",\"stringSelectionSha256\":"+(stringCount==0?"null":Transformer.json(hash(generated.resolve("string-selection.json"))))
+                +",\"classesSha256\":"+Transformer.json(hash(generated.resolve("classes.jar")))
                 +",\"apkSignatureVerification\":"+verifyApkSignature
                 +",\"cseVmpMethods\":"+CSE_VMP_SYMBOLS.size()+",\"cseRuntimeIrSha256\":"+Transformer.json(cseIrHash)
                 +",\"cseVmpIndirectBranches\":{"+String.join(",",cseBranches.entrySet().stream().map(e->Transformer.json(e.getKey())+":"+e.getValue()).toList())+"}"
@@ -194,7 +204,7 @@ public final class NativeCompiler {
                 +",\"certificateSha256\":"+Transformer.json(hash(publicCert))+",\"compileMillis\":"+(System.nanoTime()-started)/1000000
                 +",\"irSha256\":"+Transformer.json(irHash)+",\"objectSha256\":"+Transformer.json(hash(object))
                 +",\"selectionSha256\":"+Transformer.json(hash(generated.resolve("selection.json")))
-                +",\"nativeIrSha256\":"+(nativeSymbols.isEmpty()?"null":Transformer.json(hash(output.resolve("native.ll"))))
+                +",\"nativeIrSha256\":"+(allNativeSymbols.isEmpty()?"null":Transformer.json(hash(output.resolve("native.ll"))))
                 +",\"librarySha256\":"+Transformer.json(hash(packaged))+",\"libraryBytes\":"+Files.size(packaged)
                 +",\"segmentedData\":"+segmented+",\"containerSha256\":"+(segmented?Transformer.json(hash(container)):"null")
                 +",\"qsegLifetimeAbi\":"+(segmented?1:0)+",\"idlePlaintextBudgetBytes\":"+(segmented?1048576:0)
@@ -251,6 +261,25 @@ public final class NativeCompiler {
         if(Pattern.compile("(?m)^@\\.str[^\\n]*\\bconstant\\b[^\\n]*c\"").matcher(ir).find())
             throw new IllegalStateException("dex2c: plaintext string survived native CSE");
         if(ir.contains("section \".ndkp.cse\""))verifyCseIr(ir);
+    }
+    static void verifyStringIr(String ir,int count) {
+        verifyCseIr(ir);
+        // Each generated UTF-16 record has a named global; CSE must remove its plaintext initializer.
+        if(Pattern.compile("(?m)^@[^\\n]*ndkp_string_[0-9]+[^\\n]*constant[^\\n]*\\[[0-9]+ x i16]").matcher(ir).find())
+            throw new IllegalStateException("strings: plaintext UTF-16 record survived CSE");
+        if(count<=0)throw new IllegalStateException("strings: invalid record count");
+        Set<Integer> records=new HashSet<>();
+        Set<String> decoded=new HashSet<>();
+        Matcher calls=Pattern.compile("call void @ndkp_decrypt_string_[0-9a-f]+\\(ptr @(dec[0-9a-f]+_[^ ,\\n]*ndkp_string_[0-9]+)[,)]").matcher(ir);
+        while(calls.find())decoded.add(calls.group(1));
+        Matcher buffers=Pattern.compile("(?m)^@(dec[0-9a-f]+_[^ \\n]*ndkp_string_([0-9]+)) = private global \\[[0-9]+ x i16] zeroinitializer").matcher(ir);
+        while(buffers.find()) {
+            int id=Integer.parseInt(buffers.group(2));
+            if(!records.add(id) || !decoded.contains(buffers.group(1)))
+                throw new IllegalStateException("strings: missing or duplicate authenticated decode for record "+id);
+        }
+        if(records.size()!=count || !records.containsAll(java.util.stream.IntStream.range(0,count).boxed().toList()))
+            throw new IllegalStateException("strings: CSE record coverage differs from string selection");
     }
     public static void verifyIr(String ir,List<String> symbols) {
         verifyIr(new IrIndex(ir),symbols);

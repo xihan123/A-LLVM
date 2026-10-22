@@ -1,5 +1,11 @@
 # dex2c：Java/Kotlin 方法保护
 
+候选 `0.1.13-strings1` 新增独立的 `io.github.xihan123.strings` 插件：将指定包内的 Java/Kotlin
+字符串抽取到 native，业务方法继续运行在 ART，可与 dex2c 共用一个 SO。
+接入与边界见 [字符串插件](STRINGS.md)，实测与待完成门槛见 [验证记录](STRINGS_VALIDATION.md)。
+两款插件的共同发布范围与状态见 [0.1.13-strings1 发布记录](RELEASE_0.1.13-strings1.md)。
+下文 `0.1.12` 的发布说明保留为已发布版本的记录。
+
 独立 Gradle 构建，插件 ID 为 `io.github.xihan123.dex2c`，当前发布版本 `0.1.12`，配套 A-LLVM `p17`。标注方法的实现转换为 JNI/C++，经 A-LLVM VMP、强化字符串加密、自校验和签名证书绑定后生成 SO；原方法保留为调用 native 的薄包装。Debug 默认保持原实现，Release 转换失败会终止构建。
 
 `segmentedData` 提供独立的 QSEG 分段容器，插件默认关闭，由接入方显式开启。
@@ -116,7 +122,7 @@ dependencies { compileOnly("io.github.xihan123.dex2c:annotations:0.1.12") }
 
 ## 发布插件
 
-发布包含 annotations、runtime、core、gradle-plugin，以及 `plugins {}` DSL 使用的 plugin marker；各 Java 库附带 sources JAR、POM 和 Gradle metadata。测试模块 kotlin-fixtures 不发布。
+发布包含 annotations、runtime、core、gradle-plugin，以及 dex2c、strings 两个 `plugins {}` DSL plugin marker；各 Java 库附带 sources JAR、POM 和 Gradle metadata。测试模块 kotlin-fixtures 不发布。
 
 使用仓库根目录的 `scripts/publish_dex2c.py`（Python 3.11+）。设置 JDK 21 的 `JAVA_HOME`，
 准备 Windows / NDK r30 / A-LLVM p17 工具链后运行：
@@ -129,12 +135,12 @@ python scripts/publish_dex2c.py --check --clang $clang --ndk $ndk
 ```
 
 `--check` 强制重跑主机 JNI 差分、ARM64 VMP 编译测试及插件验证；失败、跳过或缺少 JNI/VMP
-测试结果均拒绝发布。随后生成五个坐标和校验文件，检查完整性。每次使用独立的
+测试结果均拒绝发布。随后生成六个坐标和校验文件，检查完整性。每次使用独立的
 `dex2c/build/release-<版本>-<随机目录>/maven`，日志及 SHA-256 清单保留在其父目录。
 此步骤不上传，也不替代下文的设备和 LSPosed 回归；编译器或运行时变更仍需先完成真机验收。
 
 正式发布前，将 `build.gradle` 中版本递增，并同步 `Dex2cPlugin.java` 的 annotations/runtime
-依赖、`samples/xposed/shared/build.gradle` 以及文档示例。脚本校验代码依赖版本一致，接受
+依赖、`samples/xposed/shared/build.gradle`、`samples/strings/build.gradle` 以及文档示例。脚本校验代码依赖版本一致，接受
 `major.minor.patch` 和带候选后缀的版本（如 `0.1.11-verify1`、`0.1.10-qseg2`、`1.2.3-rc.1`），
 不接受 SNAPSHOT、构建元数据后缀或覆写已发布版本。候选版本仍使用独立 Maven 坐标，
 通过发布检查不代表已完成全部设备验收。通过当前进程环境变量提供凭据，不要写入源码或命令行：

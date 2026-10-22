@@ -121,7 +121,7 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report):
     report.unlink(missing_ok=True)
     receipt_file, selection_file = native / 'protection.json', generated / 'selection.json'
     receipt = json.loads(receipt_file.read_text())
-    if not receipt['protectedMethods']:
+    if not receipt['protectedMethods'] and not receipt.get('protectedStrings', 0):
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(json.dumps({'schemaVersion': 1, 'protectedMethods': 0}) + '\n'); return
     selection_bytes = selection_file.read_bytes(); selection = json.loads(selection_bytes)
@@ -133,6 +133,18 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report):
     require(all(m['protection'] in ('vmp', 'native-cse') for m in methods), 'unknown protection policy')
     require({m['symbol'] for m in methods if m['protection'] == 'vmp'} == set(receipt['symbols']), 'VMP manifest differs')
     require({m['symbol'] for m in methods if m['protection'] == 'native-cse'} == set(receipt['nativeSymbols']), 'native manifest differs')
+    strings = selection.get('strings', {})
+    string_count = strings.get('uniqueStrings', 0)
+    require(string_count == receipt.get('protectedStrings', 0), 'string count differs')
+    if string_count:
+        require(digest((generated / 'string-selection.json').read_bytes()) == receipt['stringSelectionSha256'], 'string selection receipt changed')
+        require(json.loads((generated / 'string-selection.json').read_text()) == strings, 'string manifests differ')
+        require(receipt.get('stringSymbols') == [strings['symbol']], 'string dispatcher differs')
+        require(strings['occurrences'] == len(strings['sites']) and
+                {s['index'] for s in strings['sites']} == set(range(string_count)), 'string index coverage differs')
+        require(receipt.get('cseHardened') and receipt.get('certificateBound') and receipt.get('selfCheckEntry') and
+                receipt.get('vmpPost') and receipt.get('cseVmpMethods') == 2, 'string protection chain incomplete')
+        require(digest((generated / 'classes.jar').read_bytes()) == receipt['classesSha256'], 'transformed classes changed')
     library_path = 'lib/arm64-v8a/lib' + selection['library'] + '.so'
     asset_path = 'assets/' + selection['library'] + '.qseg'
     libraries, containers, outputs = 0, 0, []
@@ -174,7 +186,7 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report):
         check_lifetimes(receipt, segments)
     verify_wrappers(apks, selection)
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps({'schemaVersion': 1, 'protectedMethods': len(methods), 'apkSignatureVerification': receipt.get('apkSignatureVerification', False),
+    report.write_text(json.dumps({'schemaVersion': 1, 'protectedMethods': len(methods), 'protectedStrings': string_count, 'apkSignatureVerification': receipt.get('apkSignatureVerification', False),
                                   'protectionSha256': digest(receipt_file.read_bytes()), 'apks': outputs}, indent=2) + '\n')
 
 

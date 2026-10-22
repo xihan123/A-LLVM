@@ -1,0 +1,49 @@
+plugins {
+    id 'com.android.application' version '9.4.1'
+    id 'io.github.xihan123.strings' apply false
+    id 'io.github.xihan123.dex2c' apply false
+}
+
+def mode = providers.gradleProperty('protection.mode').getOrElse('strings')
+if (!(mode in ['baseline', 'strings', 'combined', 'dex2c'])) throw new GradleException('Unknown protection.mode')
+def reverse = providers.gradleProperty('protection.order').getOrElse('strings-first') == 'dex2c-first'
+def ids = reverse ? ['io.github.xihan123.dex2c', 'io.github.xihan123.strings'] : ['io.github.xihan123.strings', 'io.github.xihan123.dex2c']
+ids.each { id ->
+    if (mode == 'combined' || (mode == 'strings' && id.endsWith('.strings')) || (mode == 'dex2c' && id.endsWith('.dex2c'))) apply plugin: id
+}
+
+android {
+    namespace = 'io.github.xihan123.strings.sample'
+    compileSdk = 37
+    ndkVersion = '30.0.16248370'
+    defaultConfig {
+        applicationId = 'io.github.xihan123.strings.sample'
+        minSdk = 26; targetSdk = 37; versionCode = 1; versionName = '0.1'
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    compileOptions { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }
+    buildTypes {
+        release {
+            minifyEnabled = true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig = signingConfigs.debug
+        }
+    }
+    packaging { jniLibs { useLegacyPackaging = false } }
+}
+dependencies { compileOnly 'io.github.xihan123.dex2c:annotations:0.1.13-strings1' }
+
+if (mode in ['strings', 'combined']) {
+    stringProtection {
+        includePackages.set([providers.gradleProperty('strings.include').getOrElse('io.github.xihan123.strings.sample')] as Set)
+        if (providers.gradleProperty('protection.certificate').isPresent()) certificateFile = file(providers.gradleProperty('protection.certificate').get())
+        if (providers.gradleProperty('protection.clang').isPresent()) clangExecutable = file(providers.gradleProperty('protection.clang').get())
+        verifyApkSignature = providers.gradleProperty('protection.verifyApkSignature').map { it.toBoolean() }.getOrElse(false)
+    }
+}
+if (mode in ['dex2c', 'combined']) {
+    dex2c {
+        if (providers.gradleProperty('protection.certificate').isPresent()) certificateFile = file(providers.gradleProperty('protection.certificate').get())
+        if (providers.gradleProperty('protection.clang').isPresent()) clangExecutable = file(providers.gradleProperty('protection.clang').get())
+    }
+}

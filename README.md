@@ -21,6 +21,7 @@
 - 支持字符串加密、控制流平坦化、间接跳转/调用和常量加密；
 - 支持函数级虚拟化（VMP）与反分析检测注入（反调试/Root/模拟器/反转储/maps 隐藏）；
 - 支持 Java/Kotlin `@dex2c` 方法/类注解，将实现转换为 JNI 并强制 VMP，支持 LibXposed 102 回调（[接入与验证](./dex2c/README.md)）；
+- 候选独立字符串插件将指定包内的 Java/Kotlin 字符串抽取到 native，复用 CSE、VMP、自校验和证书绑定，热读取走 Java 缓存（[方案与接入](./dex2c/STRINGS.md)）；
 - 支持代码完整性自校验（`-irobf-selfcheck`）与 APK 签名证书绑定（`-irobf-cert-bind`：把签名证书折进字符串/VMP 密钥，换签名或重打包即解密失败）；
 - 保留官方 NDK 的 sysroot、libc++、compiler-rt 和构建脚本；
 - 为 Linux 和 Windows Host 生成独立 NDK 包；

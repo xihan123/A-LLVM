@@ -171,6 +171,34 @@ def main():
         assert offset>=0 and library.find(bytecode,offset+1)<0
         changed=bytearray(library);changed[offset]^=1
         negatives.append(signed_apk("tampered-vm",changed,args.fixtures / "test.jks"))
+    receipt=json.loads((args.fixtures / "native/protection.json").read_text())
+    if receipt.get('protectedStrings', 0) and segments is None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
+        import seal_cse as cse
+        elf=cse.Elf(library)
+        for label, delta in (('tampered-cse-tag', 16), ('tampered-cse-ciphertext', 32)):
+            changed=bytearray(library)
+            for pos, _ in elf.payloads():
+                changed[pos+cse.HEADER+delta] ^= 1
+            negatives.append(signed_apk(label,changed,args.fixtures / 'test.jks'))
+        changed=bytearray(library)
+        _, size, offset=elf.executable[-1]
+        changed[offset+size-1] ^= 1
+        negatives.append(signed_apk('tampered-code',changed,args.fixtures / 'test.jks'))
+        ir=(args.fixtures / 'native/cse-runtime.ll').read_text()
+        encoded=re.search(r'^@gv_code_seg_\S+ = .*? c"([^"\n]+)"',ir,re.M).group(1)
+        bytecode=bytes((92 if escape=='\\' else int(escape,16)) if escape else ord(char)
+                       for escape,char in re.findall(r'\\([A-Fa-f0-9]{2}|\\)|([^\\])',encoded))
+        offset=library.find(bytecode)
+        assert offset>=0 and library.find(bytecode,offset+1)<0
+        changed=bytearray(library);changed[offset]^=1
+        negatives.append(signed_apk('tampered-cse-vm',changed,args.fixtures / 'test.jks'))
+        # A separately sealed build has fresh build_nonce/key material, even with identical code/certificate.
+        alternate=cse.process((args.fixtures / 'native/linked.so').read_bytes())
+        changed=bytearray(library)
+        for pos, total in elf.payloads():
+            changed[pos+cse.HEADER:pos+total]=alternate[pos+cse.HEADER:pos+total]
+        negatives.append(signed_apk('cross-build-cse-records',changed,args.fixtures / 'test.jks'))
     for file in negatives:
         target=remote+"/"+file.name;run([*device,"push",file,target]);pushed.append(target)
         result=subprocess.run([str(v) for v in [*device,"shell","env",f"CLASSPATH={target}","app_process",

@@ -31,7 +31,7 @@ final class DynamicCalls {
             } else throw Selector.error(key,"unsupported invokedynamic bootstrap "+indy.bsm.getOwner());
         }
     }
-    private static InsnList concat(MethodNode method,InvokeDynamicInsnNode indy,MethodKey key) {
+    static InsnList concat(MethodNode method,InvokeDynamicInsnNode indy,MethodKey key) {
         Type[] arguments=Type.getArgumentTypes(indy.desc);int[] locals=new int[arguments.length];
         for(int i=0;i<arguments.length;i++){locals[i]=method.maxLocals;method.maxLocals+=arguments[i].getSize();}
         InsnList code=new InsnList();

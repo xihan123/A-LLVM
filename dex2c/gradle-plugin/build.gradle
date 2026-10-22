@@ -12,5 +12,11 @@ gradlePlugin {
             displayName = 'A-LLVM dex2c'
             description = 'Protect annotated Java/Kotlin methods with JNI and A-LLVM VMP.'
         }
+        strings {
+            id = 'io.github.xihan123.strings'
+            implementationClass = 'io.github.xihan123.dex2c.gradle.StringsPlugin'
+            displayName = 'A-LLVM string protection'
+            description = 'Extract Java/Kotlin strings to authenticated A-LLVM native storage.'
+        }
     }
 }

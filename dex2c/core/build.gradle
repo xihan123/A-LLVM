@@ -62,3 +62,14 @@ tasks.register('prepareDeviceFixtures', JavaExec) {
             providers.gradleProperty('dex2c.verifyApkSignature').getOrElse('false'),
             providers.gradleProperty('dex2c.nativeOnly').getOrElse('false')
 }
+
+tasks.register('prepareStringDeviceFixtures', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'io.github.xihan123.dex2c.core.StringDeviceFixtures'
+    args providers.gradleProperty('strings.fixtureDirectory').getOrElse(layout.buildDirectory.dir('string-device-fixtures').get().asFile.absolutePath),
+            providers.gradleProperty('dex2c.ndk').getOrElse(''),
+            providers.gradleProperty('dex2c.hostCompiler').getOrElse(''),
+            providers.gradleProperty('strings.combined').getOrElse('false'),
+            providers.gradleProperty('strings.verifyApkSignature').getOrElse('false')
+}

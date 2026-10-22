@@ -21,11 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DEX2C = ROOT / "dex2c"
 REPOSITORY = "https://mirrors.xihan.website/repository/maven-releases/"
 GROUP = "io.github.xihan123.dex2c"
-ARTIFACTS = ("annotations", "runtime", "core", "gradle-plugin", GROUP + ".gradle.plugin")
+ARTIFACTS = ("annotations", "runtime", "core", "gradle-plugin", GROUP + ".gradle.plugin", "io.github.xihan123.strings.gradle.plugin")
 CREDENTIALS = ("ORG_GRADLE_PROJECT_xihanUsername", "ORG_GRADLE_PROJECT_xihanPassword")
 CHECKSUMS = ("md5", "sha1", "sha256", "sha512")
 NATIVE_TESTS = {"nativeAndJvmSemanticsMatchWithCheckJni", "kotlinNativeMatchesJvm",
-                "generatedKotlinCompilesToVerifiedArm64Vmp"}
+                "generatedKotlinCompilesToVerifiedArm64Vmp", "stringsNativeMatchesJvm", "stringsCompileToVerifiedArm64"}
 
 
 def release_version(root=DEX2C):
@@ -41,6 +41,7 @@ def release_version(root=DEX2C):
     for file, expected in (
         (root / "gradle-plugin/src/main/java/io/github/xihan123/dex2c/gradle/Dex2cPlugin.java", 2),
         (root / "samples/xposed/shared/build.gradle", 1),
+        (root / "samples/strings/build.gradle", 1),
     ):
         dependencies = re.findall(re.escape(GROUP) + r":(?:annotations|runtime):([^\"'\s]+)", file.read_text("utf-8"))
         if dependencies != [version] * expected:
@@ -49,7 +50,7 @@ def release_version(root=DEX2C):
 
 
 def artifact_path(artifact):
-    return GROUP.replace(".", "/") + "/" + artifact
+    return ("io.github.xihan123.strings" if artifact == "io.github.xihan123.strings.gradle.plugin" else GROUP).replace(".", "/") + "/" + artifact
 
 
 def version_files(version):
@@ -81,7 +82,7 @@ def metadata_versions(data, artifact):
     if data is None:
         return set(), None
     doc = ET.fromstring(data)
-    if doc.findtext("groupId") != GROUP or doc.findtext("artifactId") != artifact:
+    if doc.findtext("groupId") != ("io.github.xihan123.strings" if artifact == "io.github.xihan123.strings.gradle.plugin" else GROUP) or doc.findtext("artifactId") != artifact:
         raise ValueError(f"Unexpected Maven metadata identity: {artifact}")
     versions = {item.text for item in doc.findall("versioning/versions/version")}
     if not versions or None in versions:
@@ -198,7 +199,7 @@ def release_credentials():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group(required=True)
-    modes.add_argument("--check", action="store_true", help="Run host JNI/VMP tests and stage all five publications; no upload")
+    modes.add_argument("--check", action="store_true", help="Run host JNI/VMP tests and stage all six publications; no upload")
     modes.add_argument("--publish", action="store_true", help="Check, stage, publish a NEW release and verify remote bytes")
     modes.add_argument("--verify-only", action="store_true", help="Compare existing staging with Maven; no build/upload")
     parser.add_argument("--clang", type=Path, help="A-LLVM LLVM 21 clang.exe with strict/post support (check/publish)")

@@ -10,7 +10,12 @@ import java.nio.file.Path;
 @CacheableTask
 public abstract class NativeTask extends DefaultTask {
     @InputDirectory @PathSensitive(PathSensitivity.RELATIVE) public abstract DirectoryProperty getGeneratedDirectory();
-    @InputDirectory @PathSensitive(PathSensitivity.RELATIVE) public abstract DirectoryProperty getNdkDirectory();
+    @Internal public abstract DirectoryProperty getNdkDirectory();
+    /** Read selection at input snapshot time, after the transform; never freeze it in configuration cache. */
+    @InputFiles @PathSensitive(PathSensitivity.RELATIVE) public java.util.List<java.io.File> getNdkInputs() {
+        return ProtectionCoordinator.hasProtection(getGeneratedDirectory().get()) && getNdkDirectory().isPresent()
+                ?java.util.List.of(getNdkDirectory().get().getAsFile()):java.util.List.of();
+    }
     @InputFile @Optional @PathSensitive(PathSensitivity.NONE) public abstract RegularFileProperty getClangExecutable();
     @InputFile @Optional @PathSensitive(PathSensitivity.NONE) public abstract RegularFileProperty getCertificateFile();
     @InputFile @Optional @PathSensitive(PathSensitivity.NONE) public abstract RegularFileProperty getPythonExecutable();
@@ -24,7 +29,7 @@ public abstract class NativeTask extends DefaultTask {
     @TaskAction public void compile() throws Exception {
         Path compiler=getClangExecutable().isPresent()?getClangExecutable().get().getAsFile().toPath():null;
         new NativeCompiler().compile(getGeneratedDirectory().get().getAsFile().toPath(),getOutputDirectory().get().getAsFile().toPath(),
-                getNdkDirectory().get().getAsFile().toPath(),compiler,getLibraryName().get(),getMinSdk().get(),
+                getNdkDirectory().isPresent()?getNdkDirectory().get().getAsFile().toPath():null,compiler,getLibraryName().get(),getMinSdk().get(),
                 getCertificateFile().isPresent()?getCertificateFile().get().getAsFile().toPath():null,
                 getPythonExecutable().isPresent()?getPythonExecutable().get().getAsFile().toPath():null,getSegmentedData().get(),getVerifyApkSignature().get());
         getLogger().lifecycle("dex2c: verified native library; {}",getOutputDirectory().file("protection.json").get().getAsFile());

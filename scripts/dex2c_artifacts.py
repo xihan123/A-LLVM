@@ -85,6 +85,46 @@ class Dex:
         assert cursor == count
         return calls
 
+    def calls(self, code):
+        """Walk instruction boundaries, including switch/array payloads, in a regular method."""
+        count = self.words(code + 12)[0]
+        units = struct.unpack_from('<' + 'H' * count, self.data, code + 16)
+        widths = {0: 1, **{n: (1, 2, 3)[(n - 1) % 3] for n in range(1, 10)},
+                  **{n: 1 for n in range(10, 19)}, 0x13: 2, 0x14: 3, 0x15: 2, 0x16: 2, 0x17: 3,
+                  0x18: 5, 0x19: 2, 0x1a: 2, 0x1b: 3, 0x1c: 2, 0x1d: 1, 0x1e: 1,
+                  0x1f: 2, 0x20: 2, 0x21: 1, 0x22: 2, 0x23: 2, 0x24: 3, 0x25: 3, 0x26: 3,
+                  0x27: 1, 0x28: 1, 0x29: 2, 0x2a: 3, 0x2b: 3, 0x2c: 3,
+                  **{n: 2 for n in range(0x2d, 0x3e)}, **{n: 2 for n in range(0x44, 0x6e)},
+                  **{n: 3 for n in (*range(0x6e, 0x73), *range(0x74, 0x79))},
+                  **{n: 1 for n in range(0x7b, 0x90)}, **{n: 2 for n in range(0x90, 0xb0)},
+                  **{n: 1 for n in range(0xb0, 0xd0)}, **{n: 2 for n in range(0xd0, 0xe3)},
+                  0xfa: 4, 0xfb: 4, 0xfc: 3, 0xfd: 3, 0xfe: 2, 0xff: 2}
+        cursor, calls = 0, []
+        while cursor < count:
+            opcode = units[cursor] & 255
+            if opcode == 0 and units[cursor] != 0:
+                payload = units[cursor]
+                assert cursor + 2 <= count
+                if payload == 0x100:
+                    width = 4 + units[cursor + 1] * 2
+                elif payload == 0x200:
+                    width = 2 + units[cursor + 1] * 4
+                elif payload == 0x300:
+                    assert cursor + 4 <= count
+                    size = units[cursor + 2] | units[cursor + 3] << 16
+                    width = 4 + (units[cursor + 1] * size + 1) // 2
+                else:
+                    raise AssertionError('unknown DEX payload')
+            else:
+                assert opcode in widths, f'unsupported DEX opcode {opcode:#x}'
+                width = widths[opcode]
+                if opcode in (*range(0x6e, 0x73), *range(0x74, 0x79), 0xfa, 0xfb):
+                    assert cursor + width <= count
+                    calls.append(self.methods[units[cursor + 1]])
+            cursor += width
+            assert cursor <= count, 'truncated DEX instruction/payload'
+        return calls
+
 
 def verify_wrappers(apk, selection):
     if not __debug__:
@@ -103,3 +143,15 @@ def verify_wrappers(apk, selection):
         assert calls[1] == item["bridge"], calls
         native = next(d.bodies[item["bridge"]] for d in dexes if item["bridge"] in d.bodies)
         assert native[0] & 0x100 and native[1] == 0
+    strings = selection.get('strings', {})
+    if strings.get('uniqueStrings', 0):
+        owner = strings['runtime']
+        decoder = owner + '.' + strings['decoder'] + '(I)Ljava/lang/String;'
+        for name, native_method in ((strings['getter'], False), (strings['decoder'], True)):
+            key = owner + '.' + name + '(I)Ljava/lang/String;'
+            matches = [(dex, dex.bodies[key]) for dex in dexes if key in dex.bodies]
+            assert len(matches) == 1, 'missing or duplicate string runtime: ' + key
+            dex, (access, code) = matches[0]
+            assert bool(access & 0x100) == native_method and bool(code) != native_method, key
+            if not native_method:
+                assert decoder in dex.calls(code), 'string getter no longer calls authenticated native decoder'

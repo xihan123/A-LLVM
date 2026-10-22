@@ -18,6 +18,11 @@ public final class Transformer {
     }
 
     public Result transform(List<Path> inputs,Path output,String library,Set<String> inheritedMethods) throws IOException {
+        return transform(inputs,output,library,inheritedMethods,true,Set.of(),Set.of());
+    }
+
+    public Result transform(List<Path> inputs,Path output,String library,Set<String> inheritedMethods,
+                            boolean convertMethods,Set<String> stringIncludes,Set<String> stringExcludes) throws IOException {
         if(!library.matches("[A-Za-z][A-Za-z0-9_]*"))throw new IllegalArgumentException("dex2c: invalid library name");
         SortedMap<String,ClassNode> classes=new TreeMap<>();Map<String,byte[]> original=new TreeMap<>();
         for(Path input:inputs) {
@@ -30,7 +35,9 @@ public final class Transformer {
                     try(InputStream stream=jar.getInputStream(entry)){add(stream.readAllBytes(),classes,original);}
             }
         }
-        Selector selector=new Selector(classes);selector.run(inheritedMethods);
+        Selector selector=new Selector(classes);
+        if(convertMethods)selector.run(inheritedMethods);
+        StringProtection strings=new StringProtection(library,stringIncludes,stringExcludes);
         RuntimeLayout runtime=new RuntimeLayout(library,selector.selected.isEmpty()?"Runtime":selector.selected.firstKey().owner());
         Set<String> changed=new HashSet<>(),keep=new TreeSet<>(),ids=new HashSet<>();
         Map<String,Set<String>> resolverTypes=new TreeMap<>();
@@ -68,6 +75,10 @@ public final class Transformer {
             keep.add("-keep,includedescriptorclasses class "+bridgeOwner.name.replace('/','.')+" { native <methods>; }");
             changed.add(owner.name);
         }
+        strings.extract(classes,changed,selector.selected.keySet());
+        strings.install(classes,changed,keep);
+        nativeCpp.append(strings.source());
+        registration.append(strings.registration());
         registration.append("static void register_class(JNIEnv* env,jclass,jclass owner) {\n")
                 .append("jclass cls=env->FindClass(\"java/lang/Class\"); if(!cls)return;\n")
                 .append("jmethodID getName=env->GetMethodID(cls,\"getName\",\"()Ljava/lang/String;\"); env->DeleteLocalRef(cls); if(!getName)return;\n")
@@ -85,7 +96,11 @@ public final class Transformer {
         int typeIndex=0;for(var entry:typeIndices.entrySet())entry.setValue(typeIndex++);
         if(!selector.selected.isEmpty()) {
             runtime.install(classes,changed,keep);
-            runtime.appendRegistration(registration);
+            runtime.appendRegistration(registration,!strings.strings.isEmpty());
+        } else if(!strings.strings.isEmpty()) {
+            registration.append("extern \"C\" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm,void*) {\n")
+                .append("JNIEnv* env=nullptr;if(vm->GetEnv((void**)&env,JNI_VERSION_1_6)!=JNI_OK)return JNI_ERR;\n")
+                .append("return register_strings(env)==0?JNI_VERSION_1_6:JNI_ERR;\n}\n");
         }
         keep.add("-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod");
         if(selector.selected.keySet().stream().anyMatch(key -> Selector.annotation(classes.get(key.owner()).visibleAnnotations,"Lkotlin/Metadata;")!=null))
@@ -98,7 +113,7 @@ public final class Transformer {
             owner.methods.add(typeResolver(owner.name,entry.getValue(),typeIndices).methods.getFirst());
             keep.add("-keepclassmembers class "+owner.name.replace('/','.')+" { java.lang.Class "+resolver+"(int); }");
         }
-        for(ClassNode owner:classes.values()) {
+        if(convertMethods)for(ClassNode owner:classes.values()) {
             boolean stripped=stripAnnotation(owner.invisibleAnnotations)|stripAnnotation(owner.visibleAnnotations);
             for(MethodNode method:owner.methods)stripped|=stripAnnotation(method.invisibleAnnotations)|stripAnnotation(method.visibleAnnotations);
             if(stripped)changed.add(owner.name);
@@ -121,6 +136,9 @@ public final class Transformer {
             var symbols=selector.selected.keySet().stream().filter(k->(selector.policies.get(k)==Selector.Policy.NATIVE_TREE)==nativeOnly).map(MethodKey::symbol).toList();
             Files.writeString(output.resolve(nativeOnly?"native-symbols.txt":"symbols.txt"),String.join("\n",symbols)+(symbols.isEmpty()?"":"\n"));
         }
+        Files.writeString(output.resolve("string-symbols.txt"),strings.strings.isEmpty()?"":strings.symbol+"\n");
+        Files.writeString(output.resolve("string-count.txt"),Integer.toString(strings.strings.size()));
+        Files.writeString(output.resolve("string-selection.json"),strings.report()+"\n");
         StringBuilder json=new StringBuilder("{\"schemaVersion\":3,\"bytecodeVerified\":true,\"library\":").append(json(library))
                 .append(",\"registrationCall\":").append(json(runtime.ensure())).append(",\"methods\":[");
         boolean first=true;
@@ -141,7 +159,7 @@ public final class Transformer {
             if(!first)json.append(',');first=false;
             json.append("{\"method\":").append(json(entry.getKey().toString())).append(",\"reason\":").append(json(entry.getValue())).append('}');
         }
-        Files.writeString(report,json.append("]}\n"));
+        Files.writeString(report,json.append("],\"strings\":").append(strings.report()).append("}\n"));
         for(String resource:List.of("dex2c_runtime.h","dex2c_runtime.cpp")) {
             try(InputStream in=Objects.requireNonNull(Transformer.class.getResourceAsStream("/native/"+resource))) {
                 String text=new String(in.readAllBytes(),StandardCharsets.UTF_8)
