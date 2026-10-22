@@ -8,8 +8,9 @@
 #include <thread>
 #include <vector>
 #include <atomic>
+#include "../../runtime/qseg.h"
 int main(int argc, char** argv) {
-  assert(argc == 5);
+  assert(argc == 5 || argc == 7);
   void* library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
   if (!library) { std::fprintf(stderr, "%s\n", dlerror()); return 2; }
   Dl_info info{}; assert(dladdr(dlsym(library, "JNI_OnLoad"), &info));
@@ -32,6 +33,19 @@ int main(int argc, char** argv) {
   }
   std::fclose(maps); assert(readonly);
   if (!std::strcmp(argv[4], "write")) *const_cast<volatile uint8_t*>(results[0]) ^= 1;
+  if (argc == 7) {
+    auto release = reinterpret_cast<void (*)(const uint8_t*)>(base + std::strtoull(argv[5], nullptr, 16));
+    auto stats = reinterpret_cast<void (*)(ndkp_qseg_cache_stats_v1*)>(base + std::strtoull(argv[6], nullptr, 16));
+    ndkp_qseg_cache_stats_v1 before{}, after{}; stats(&before);
+    assert(before.active_bytes && !before.pinned_bytes);
+    for (unsigned i = 0; i < 9; ++i) release(ref);
+    stats(&after);
+    assert(!after.active_bytes && !after.pinned_bytes && after.idle_bytes <= (1u << 20));
+    std::printf("active=%llu idle=%llu pinned=%llu peak=%llu evictions=%llu\n",
+        (unsigned long long)after.active_bytes, (unsigned long long)after.idle_bytes,
+        (unsigned long long)after.pinned_bytes, (unsigned long long)after.peak_resident_bytes,
+        (unsigned long long)after.evictions);
+  }
   std::puts("cache=stable concurrent=ok readonly=ok");
   return 0;
 }

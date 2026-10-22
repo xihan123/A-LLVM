@@ -232,8 +232,9 @@ bool SelfCheck::runOnModule(Module &M) {
         if (!Current)
           report_fatal_error("selfcheck-entry cannot identify VMP entry bytecode");
         Value *Hash = IB.CreateCall(CheckOne, {
-            segmentVMData(IB, Current->GV), ConstantInt::get(Int64Ty, Current->Len),
+            segmentVMData(IB, Current->GV, true), ConstantInt::get(Int64Ty, Current->Len),
             ConstantInt::get(Int64Ty, Current->Expected)});
+        releaseVMData(IB, Current->GV);
         Biased = IB.CreateXor(Biased, IB.CreateXor(
             Hash, ConstantInt::get(Int64Ty, Current->Expected)));
       }

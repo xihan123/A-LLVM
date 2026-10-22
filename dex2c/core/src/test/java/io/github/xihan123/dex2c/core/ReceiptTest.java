@@ -85,4 +85,20 @@ class ReceiptTest {
         assertDoesNotThrow(()->NativeCompiler.verifyBytecodesInLibrary(new byte[]{1,97,0,92,34,2},code));
         assertThrows(IllegalStateException.class,()->NativeCompiler.verifyBytecodesInLibrary(new byte[]{1,97,0,93,34,2},code));
     }
+
+    @Test void segmentedLeaseRequiresPairedCallsAndLifetimeReceipt() {
+        String symbol="d2c_0123456789abcdef01234567";
+        String ir="@gv_code_seg_"+symbol+" = internal constant i8 0, !ndkp.qseg !2\n"
+                +"@ref = private constant [24 x i8] c\"abcdefghijklmnopqrstuvwx\", section \".text.ndkp.qseg.refs\"\n"
+                +"define i32 @"+symbol+"() !ndkp.vmp.protected !1 !ndkp.qseg.lifetime !3 {\n"
+                +" %p = call ptr @ndkp_qseg_acquire_v1(ptr @ref)\n call void @vm_test()\n"
+                +" call void @ndkp_qseg_release_v1(ptr @ref)\n ret i32 0\n}\n"
+                +"define void @vm_test() {\n ret void\n}\n"
+                +"!1 = !{ptr @gv_code_seg_"+symbol+", ptr @vm_test}\n!2 = !{ptr @ref}\n!3 = !{!\"lease-v1\"}\n";
+        assertDoesNotThrow(()->NativeCompiler.verifyIr(ir,List.of(symbol)));
+        for(String broken:List.of(ir.replace(" call void @ndkp_qseg_release_v1(ptr @ref)\n", ""),
+                ir.replace("!ndkp.qseg.lifetime !3", ""), ir.replace("lease-v1", "unknown"),
+                ir.replace("@ndkp_qseg_acquire_v1", "@ndkp_qseg_get")))
+            assertThrows(IllegalStateException.class,()->NativeCompiler.verifyIr(broken,List.of(symbol)));
+    }
 }

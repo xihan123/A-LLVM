@@ -21,6 +21,32 @@ def require(ok, message):
         raise ValueError(message)
 
 
+def check_lifetimes(receipt, segments):
+    """旧回执只支持固定驻留；新 ABI 的回收声明必须与所有分段一致。"""
+    abi = receipt.get('qsegLifetimeAbi', 0)
+    require(type(abi) is int and abi in (0, 1), 'unsupported QSEG lifetime ABI')
+    if abi == 0:
+        require(not receipt.get('vmLifetimePolicies') and not receipt.get('idlePlaintextBudgetBytes') and
+                all(row.get('lifetime', 'pinned-legacy') == 'pinned-legacy'
+                    for row in segments['segments'] if row['kind'] == 1), 'legacy receipt claims reclamation')
+        return
+    policies = receipt.get('vmLifetimePolicies')
+    require(receipt.get('idlePlaintextBudgetBytes') == 1048576 and isinstance(policies, dict) and
+            set(policies) == set(receipt['symbols']), 'QSEG lifetime policy coverage differs')
+    modes = ('lease-v1', 'pinned-unproven-unwind', 'pinned-legacy')
+    observed = {}
+    for row in segments['segments']:
+        mode = row.get('lifetime')
+        require((row['kind'] == 2 and mode == 'copy-v1') or
+                (row['kind'] == 1 and mode in modes), 'unsupported segment lifetime policy')
+        if row['kind'] == 1:
+            name = row['name']
+            require(name not in observed or observed[name] == mode, 'inconsistent chunk lifetime policy')
+            observed[name] = mode
+    require(all(observed.get(name) == mode for name, mode in policies.items()),
+            'segment lifetime policy differs from protection receipt')
+
+
 class Cursor:
     def __init__(self, data):
         self.data, self.offset = data, 0
@@ -145,6 +171,7 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report):
         segments = json.loads((native / 'segments.json').read_text())
         require(segments.get('schemaVersion') == 1 and segments.get('containerSha256') == receipt['containerSha256'] and
                 segments.get('containerBytes') == receipt['containerBytes'], 'segment receipt identity differs')
+        check_lifetimes(receipt, segments)
     verify_wrappers(apks, selection)
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps({'schemaVersion': 1, 'protectedMethods': len(methods), 'apkSignatureVerification': receipt.get('apkSignatureVerification', False),

@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #include <zlib.h>
 #include <link.h>
+#include <limits>
 
 namespace {
 using namespace ndkp_cse;
@@ -21,7 +22,14 @@ constexpr size_t EntrySize = 64, MaxSize = 1u << 28;
 using ID = std::array<uint8_t, 16>;
 [[noreturn]] void fail() { for (;;) Raw::call(__NR_exit_group, 127); }
 struct Chunk { uint32_t ordinal, offset, stored, plain, codec; std::array<uint8_t, 64> entry; };
-struct Resource { uint32_t kind = 0, size = 0; std::vector<Chunk> chunks; const uint8_t* data = nullptr; };
+struct Resource {
+  uint32_t kind = 0, size = 0;
+  std::vector<Chunk> chunks;
+  const uint8_t* data = nullptr;
+  size_t mapped = 0;
+  uint64_t references = 0, lastUsed = 0;
+  bool pinned = false;
+};
 struct State {
   std::mutex mutex;
   bool ready = false;
@@ -31,8 +39,53 @@ struct State {
   uint8_t code[32]{}, inputs[48]{};
   std::vector<std::pair<uintptr_t, uintptr_t>> executable;
   std::map<ID, Resource> resources;
+  ndkp_qseg_cache_stats_v1 cache{};
+  uint64_t clock = 0;
 };
 State& state() { static State value; return value; }
+constexpr size_t IdleBudget = 1u << 20;
+size_t mappingSize(size_t size) {
+  static const long page = sysconf(_SC_PAGESIZE);
+  if (page <= 0 || (page & (page - 1))) fail();
+  return (size + size_t(page) - 1) & ~(size_t(page) - 1);
+}
+uint64_t tick(State& s) {
+  if (s.clock == std::numeric_limits<uint64_t>::max()) fail();
+  return ++s.clock;
+}
+void trim(State& s) {
+  while (s.cache.idle_bytes > IdleBudget) {
+    Resource* oldest = nullptr;
+    for (auto& item : s.resources) {
+      Resource& r = item.second;
+      if (r.data && !r.pinned && !r.references && (!oldest || r.lastUsed < oldest->lastUsed)) oldest = &r;
+    }
+    if (!oldest) fail();
+    Resource& r = *oldest;
+    void* data = const_cast<uint8_t*>(r.data);
+    if (mprotect(data, r.mapped, PROT_READ | PROT_WRITE)) fail();
+    wipe(static_cast<uint8_t*>(data), r.mapped);
+    if (munmap(data, r.mapped)) fail();
+    s.cache.idle_bytes -= r.mapped;
+    ++s.cache.evictions;
+    r.data = nullptr; r.mapped = 0;
+  }
+}
+void acquire(State& s, Resource& r) {
+  if (!r.data || r.references == std::numeric_limits<uint64_t>::max()) fail();
+  if (!r.references && !r.pinned) {
+    s.cache.idle_bytes -= r.mapped; s.cache.active_bytes += r.mapped;
+  }
+  ++r.references;
+}
+void release(State& s, Resource& r) {
+  if (!r.data || !r.references) fail();
+  if (!--r.references && !r.pinned) {
+    s.cache.active_bytes -= r.mapped; s.cache.idle_bytes += r.mapped;
+    r.lastUsed = tick(s);
+  }
+  trim(s);
+}
 void* allocate(size_t size) {
   void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (p == MAP_FAILED) fail();
@@ -209,20 +262,49 @@ const uint8_t* restore(State& s, Resource& r, const ID& id) {
     } else { if (c.stored != c.plain) fail(); std::memcpy(out + cursor, cipher.data(), c.plain); }
     wipe(cipher.data(), cipher.size()); cursor += c.plain;
   }
-  if (cursor != r.size) fail(); publish(out, r.size); r.data = out; return out;
+  if (cursor != r.size) fail();
+  publish(out, r.size); r.data = out; r.mapped = mappingSize(r.size);
+  r.lastUsed = tick(s); s.cache.idle_bytes += r.mapped;
+  const uint64_t resident = s.cache.active_bytes + s.cache.idle_bytes + s.cache.pinned_bytes;
+  if (resident > s.cache.peak_resident_bytes) s.cache.peak_resident_bytes = resident;
+  return out;
 }
 }
 extern "C" const uint8_t* ndkp_qseg_get(const uint8_t* ref) {
   State& s = state(); std::lock_guard<std::mutex> guard(s.mutex); initialize(s);
   Resource& r = resource(s, ref); ID id; std::memcpy(id.data(), ref, 16);
-  return restore(s, r, id);
+  const uint8_t* data = restore(s, r, id);
+  // 旧裸指针可能已逃逸，即使同时存在 v1 借用也必须永久固定该映射。
+  if (!r.pinned) {
+    if (r.references) s.cache.active_bytes -= r.mapped; else s.cache.idle_bytes -= r.mapped;
+    s.cache.pinned_bytes += r.mapped; r.pinned = true;
+  }
+  trim(s); return data;
+}
+extern "C" const uint8_t* ndkp_qseg_acquire_v1(const uint8_t* ref) {
+  State& s = state(); std::lock_guard<std::mutex> guard(s.mutex); initialize(s);
+  Resource& r = resource(s, ref); ID id; std::memcpy(id.data(), ref, 16);
+  const uint8_t* data = restore(s, r, id);
+  acquire(s, r); trim(s); return data;
+}
+extern "C" void ndkp_qseg_release_v1(const uint8_t* ref) {
+  State& s = state(); std::lock_guard<std::mutex> guard(s.mutex); initialize(s);
+  release(s, resource(s, ref));
+}
+extern "C" void ndkp_qseg_stats_v1(ndkp_qseg_cache_stats_v1* out) {
+  if (!out) fail();
+  State& s = state(); std::lock_guard<std::mutex> guard(s.mutex); initialize(s);
+  *out = s.cache;
 }
 extern "C" void ndkp_qseg_copy(uint8_t* out, const uint8_t* ref, uint32_t offset, uint32_t length, uint32_t encoding) {
-  const uint8_t* data = ndkp_qseg_get(ref);
-  const uint32_t size = load32(ref + 16);
-  if (!out || load32(ref + 20) != 2 || (encoding != 1 && encoding != 2) || length % encoding ||
-      offset > size || length > size - offset) fail();
+  State& s = state(); std::lock_guard<std::mutex> guard(s.mutex); initialize(s);
+  Resource& r = resource(s, ref);
+  if (!out || r.kind != 2 || (encoding != 1 && encoding != 2) || length % encoding ||
+      offset > r.size || length > r.size - offset) fail();
+  ID id; std::memcpy(id.data(), ref, 16);
+  const uint8_t* data = restore(s, r, id); acquire(s, r);
   std::memcpy(out, data + offset, length);
+  release(s, r);
 }
 extern "C" void ndkp_qseg_verify() {
   State& s = state(); std::lock_guard<std::mutex> guard(s.mutex); initialize(s);

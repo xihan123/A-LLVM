@@ -95,8 +95,9 @@ def locate_image(data):
     return elf, found[0]
 
 
-def pack(data, resources):
+def pack(data, resources, lifetimes=None):
     identities = set()
+    lifetimes = lifetimes or {}
     if not resources:
         raise ValueError("empty segmented image")
     for identity, kind, raw, _ in resources:
@@ -138,7 +139,10 @@ def pack(data, resources):
         directory += meta[:48] + mac
         body += cipher
         name, resource_hash = sources[identity, kind]
-        receipt.append({"id": identity.hex(), "kind": kind, "chunk": chunk, "bytes": len(plain),
+        lifetime = lifetimes.get(identity.hex(), 'copy-v1' if kind == 2 else 'pinned-legacy')
+        if lifetime not in ('copy-v1', 'lease-v1', 'pinned-legacy', 'pinned-unproven-unwind') or (kind == 1 and lifetime == 'copy-v1') or (kind == 2 and lifetime != 'copy-v1'):
+            raise ValueError('invalid resource lifetime policy')
+        receipt.append({"id": identity.hex(), "kind": kind, "chunk": chunk, "bytes": len(plain), "lifetime": lifetime,
                         "name": name, "resourceSha256": resource_hash,
                         "storedBytes": len(stored), "codec": codec, "sha256": hashlib.sha256(plain).hexdigest()})
         cursor += len(stored)
@@ -225,7 +229,10 @@ def main():
             if resources and restored != {(i, k): b for i, k, b, _ in resources}:
                 raise ValueError("staged/final payload mismatch")
         else:
-            output, container, receipt = pack(args.input.read_bytes(), resources)
+            lifetimes = {item['id']: item.get('lifetime', 'copy-v1' if item['kind'] == 2 else 'pinned-legacy')
+                         for directory in args.staging
+                         for item in json.loads((directory / 'manifest.json').read_text(encoding='utf-8'))}
+            output, container, receipt = pack(args.input.read_bytes(), resources, lifetimes)
             # Verify before publishing either candidate output.
             unpack(output, container, cert)
             args.container.parent.mkdir(parents=True, exist_ok=True)

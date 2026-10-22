@@ -41,15 +41,35 @@ GlobalVariable *llvm::stageSegment(Module &M, StringRef Name, uint32_t Kind,
       MDString::get(M.getContext(), StringRef(reinterpret_cast<const char *>(Bytes.data()), Bytes.size()))}));
   return GV;
 }
-Value *llvm::segmentVMData(IRBuilder<> &B, GlobalVariable *Code) {
+Value *llvm::segmentVMData(IRBuilder<> &B, GlobalVariable *Code, bool Lease) {
   auto *MD = Code->getMetadata("ndkp.qseg");
   if (!MD) return Code;
   auto *Ref = mdconst::extract<Constant>(MD->getOperand(0));
   Module &M = *Code->getParent();
-  auto Get = M.getOrInsertFunction("ndkp_qseg_get",
+  auto Get = M.getOrInsertFunction(Lease ? "ndkp_qseg_acquire_v1" : "ndkp_qseg_get",
       FunctionType::get(B.getPtrTy(), {B.getPtrTy()}, false));
   cast<Function>(Get.getCallee())->setVisibility(GlobalValue::HiddenVisibility);
+  cast<Function>(Get.getCallee())->addFnAttr(Attribute::NoUnwind);
   return B.CreateCall(Get, {Ref});
+}
+void llvm::releaseVMData(IRBuilder<> &B, GlobalVariable *Code) {
+  auto *MD = Code->getMetadata("ndkp.qseg");
+  if (!MD) return;
+  auto *Ref = mdconst::extract<Constant>(MD->getOperand(0));
+  auto Release = Code->getParent()->getOrInsertFunction("ndkp_qseg_release_v1",
+      FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false));
+  cast<Function>(Release.getCallee())->setVisibility(GlobalValue::HiddenVisibility);
+  cast<Function>(Release.getCallee())->addFnAttr(Attribute::NoUnwind);
+  B.CreateCall(Release, {Ref});
+}
+void llvm::setSegmentLifetime(Function &F, GlobalVariable *Code, bool Lease) {
+  auto *MD = Code->getMetadata("ndkp.qseg");
+  if (!MD) return;
+  auto *Ref = mdconst::extract<GlobalVariable>(MD->getOperand(0));
+  auto *Lifetime = MDNode::get(F.getContext(), MDString::get(F.getContext(),
+      Lease ? "lease-v1" : "pinned-unproven-unwind"));
+  F.setMetadata("ndkp.qseg.lifetime", Lifetime);
+  Ref->setMetadata("ndkp.qseg.lifetime", Lifetime);
 }
 void llvm::finishSegmentedData(Module &M) {
   if (!Enabled) return;
@@ -78,7 +98,10 @@ void llvm::finishSegmentedData(Module &M) {
         VMStream << Bytes; VMStream.close();
         if (VMStream.has_error()) report_fatal_error("cannot finish VM receipt staging");
       }
-      Items.push_back(json::Object{{"id", ID}, {"name", Name},
+      StringRef Lifetime = uint8_t(Desc[20]) == 2 ? "copy-v1" : "pinned-legacy";
+      if (auto *Policy = Ref->getMetadata("ndkp.qseg.lifetime"))
+        Lifetime = cast<MDString>(Policy->getOperand(0))->getString();
+      Items.push_back(json::Object{{"id", ID}, {"name", Name}, {"lifetime", Lifetime},
           {"kind", unsigned(uint8_t(Desc[20]))}, {"bytes", int64_t(Bytes.size())}});
     }
     M.eraseNamedMetadata(Stages);

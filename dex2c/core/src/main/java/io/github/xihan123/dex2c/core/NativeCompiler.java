@@ -197,6 +197,9 @@ public final class NativeCompiler {
                 +",\"nativeIrSha256\":"+(nativeSymbols.isEmpty()?"null":Transformer.json(hash(output.resolve("native.ll"))))
                 +",\"librarySha256\":"+Transformer.json(hash(packaged))+",\"libraryBytes\":"+Files.size(packaged)
                 +",\"segmentedData\":"+segmented+",\"containerSha256\":"+(segmented?Transformer.json(hash(container)):"null")
+                +",\"qsegLifetimeAbi\":"+(segmented?1:0)+",\"idlePlaintextBudgetBytes\":"+(segmented?1048576:0)
+                +",\"vmLifetimePolicies\":{"+(segmented?String.join(",",symbols.stream().map(symbol->
+                    Transformer.json(symbol)+":"+Transformer.json(segmentLifetime(index,symbol))).toList()):"")+"}"
                 +",\"containerBytes\":"+(segmented?Files.size(container):0)+",\"segmentsReceiptSha256\":"+(segmented?Transformer.json(hash(output.resolve("segments.json"))):"null")
                 +",\"bytecodeVerifiedInLibrary\":"+!segmented+",\"bytecodeVerifiedInContainer\":"+segmented+",\"methodBytecodeBytes\":{"
                 +String.join(",",bytecodes.entrySet().stream().map(e->Transformer.json(e.getKey())+":"+e.getValue().length).toList())+"}"
@@ -262,10 +265,12 @@ public final class NativeCompiler {
                     || ir.functions.containsKey(symbol+"_original"))
                 throw new IllegalStateException("dex2c: original implementation survived VMP for "+symbol);
             if(!(Pattern.compile("\\[[1-9][0-9]* x i8] c\"").matcher(ir.globals.getOrDefault(receipt.code(),"")).find()
-                    || (ir.globals.getOrDefault(receipt.code(),"").contains("!ndkp.qseg") && function.body().contains("@ndkp_qseg_get(")))
+                    || (ir.globals.getOrDefault(receipt.code(),"").contains("!ndkp.qseg") &&
+                        (function.body().contains("@ndkp_qseg_get(") || function.body().contains("@ndkp_qseg_acquire_v1("))))
                     || !ir.functions.containsKey(receipt.interpreter())
                     || !Pattern.compile("\\bcall\\b[^\\n]*@"+Pattern.quote(receipt.interpreter())+"\\(").matcher(function.body()).find())
                 throw new IllegalStateException("dex2c: missing bytecode or interpreter call for "+symbol);
+            if(ir.globals.getOrDefault(receipt.code(),"").contains("!ndkp.qseg"))verifySegmentLifetime(ir,symbol);
         }
     }
     public static void verifyHardenedIr(String ir,List<String> symbols) {
@@ -383,9 +388,38 @@ public final class NativeCompiler {
         if(!bytes.find() || !global.contains(".text.ndkp.qseg.refs"))throw new IllegalStateException("invalid segmented descriptor");
         return bytes.group(1);
     }
+    private static String segmentLifetime(IrIndex index,String symbol) {
+        IrFunction function=index.functions.get(symbol);
+        Matcher marker=Pattern.compile("!ndkp\\.qseg\\.lifetime !(\\d+)").matcher(function.header());
+        if(!marker.find())return "pinned-legacy";
+        String node=index.metadata.getOrDefault(marker.group(1),"");
+        Matcher mode=Pattern.compile("!\\{!\"([^\"]+)\"}").matcher(node);
+        if(!mode.matches())throw new IllegalStateException("dex2c: invalid segmented lifetime receipt for "+symbol);
+        return mode.group(1);
+    }
+    private static void verifySegmentLifetime(IrIndex index,String symbol) {
+        IrFunction function=index.functions.get(symbol);
+        String mode=segmentLifetime(index,symbol);
+        if(mode.equals("pinned-legacy")) {
+            if(!function.body().contains("@ndkp_qseg_get("))
+                throw new IllegalStateException("dex2c: missing segmented lifetime receipt for "+symbol);
+            return; // 旧编译器固定驻留接口保留兼容，不能宣称可回收。
+        }
+        long acquired=Pattern.compile("@ndkp_qseg_acquire_v1\\(").matcher(function.body()).results().count();
+        long released=Pattern.compile("@ndkp_qseg_release_v1\\(").matcher(function.body()).results().count();
+        boolean pinned=function.body().contains("@ndkp_qseg_get(");
+        if(acquired!=released || (mode.equals("lease-v1") ? pinned || acquired==0 :
+                !mode.equals("pinned-unproven-unwind") || !pinned))
+            throw new IllegalStateException("dex2c: invalid segmented lifetime calls for "+symbol);
+    }
     private static void verifySegmentedIrPair(IrIndex raw,IrIndex optimized,List<String> symbols) {
-        for(String symbol:symbols)if(!segmentDescriptor(raw,symbol).equals(segmentDescriptor(optimized,symbol)))
-            throw new IllegalStateException("segmented VM descriptor changed during optimization: "+symbol);
+        for(String symbol:symbols) {
+            if(!segmentDescriptor(raw,symbol).equals(segmentDescriptor(optimized,symbol)))
+                throw new IllegalStateException("segmented VM descriptor changed during optimization: "+symbol);
+            if(!segmentLifetime(raw,symbol).equals(segmentLifetime(optimized,symbol)))
+                throw new IllegalStateException("segmented VM lifetime changed during optimization: "+symbol);
+            verifySegmentLifetime(raw,symbol); verifySegmentLifetime(optimized,symbol);
+        }
     }
     private static List<String> command(List<String> prefix,String... arguments) {List<String> result=new ArrayList<>(prefix);result.addAll(List.of(arguments));return result;}
     static String runtimeFingerprint(Path runtime,Path compiler,Path ndk,Path resource,Path certificate) throws Exception {

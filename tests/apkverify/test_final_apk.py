@@ -141,6 +141,21 @@ class FinalApkTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.check(ARGS.fixtures / 'protected.apk', ARGS.fixtures / 'protected.apk')
 
+    def test_self_consistent_lifetime_mismatch_is_rejected(self):
+        receipt = self.native / 'protection.json'
+        data = json.loads(receipt.read_text())
+        if data.get('qsegLifetimeAbi') != 1:
+            self.skipTest('requires lifetime v1 fixture')
+        path = self.native / 'segments.json'
+        segments = json.loads(path.read_text())
+        row = next(row for row in segments['segments'] if row['kind'] == 1)
+        row['lifetime'] = 'pinned-legacy' if row['lifetime'] == 'lease-v1' else 'lease-v1'
+        path.write_text(json.dumps(segments))
+        data['segmentsReceiptSha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+        receipt.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, 'lifetime policy'):
+            self.check()
+
     def test_independent_agp_outputs(self):
         result = subprocess.run([sys.executable, str(ROOT / 'scripts/verify_dex2c_apk.py'),
             '--native', str(self.native), '--generated', str(self.generated), '--java', str(ARGS.java),

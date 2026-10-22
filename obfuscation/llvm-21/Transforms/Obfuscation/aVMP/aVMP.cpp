@@ -3679,6 +3679,9 @@ class GOVMModifier {
 
 void GOVMModifier::run() {
 
+    // 仅原函数声明不会展开 C++ 异常时借用；其余保留固定驻留，避免未知出口泄漏引用。
+    const bool qsegLease = F->doesNotThrow();
+
     if (isIRObfuscationDebugEnabled()) {
         errs() << "[GOVMModifier] Starting run() for function: " << F->getName() << "\n";
     }
@@ -3875,7 +3878,8 @@ void GOVMModifier::run() {
 
     Value * data_seg_ptr2int = irbuilder.CreatePtrToInt(dataFrame, Type::getInt64Ty(Mod->getContext()));
     irbuilder.CreateStore(data_seg_ptr2int, data_seg_addr);
-    Value * code_seg_ptr2int = irbuilder.CreatePtrToInt(segmentVMData(irbuilder, gv_code_seg), Type::getInt64Ty(Mod->getContext()));
+    setSegmentLifetime(*F, gv_code_seg, qsegLease);
+    Value * code_seg_ptr2int = irbuilder.CreatePtrToInt(segmentVMData(irbuilder, gv_code_seg, qsegLease), Type::getInt64Ty(Mod->getContext()));
     irbuilder.CreateStore(code_seg_ptr2int, code_seg_addr);
     irbuilder.CreateStore(irbuilder.CreatePtrToInt(gv_code_seg, Type::getInt64Ty(Mod->getContext())), dispatch_code_seg_addr);
 
@@ -3897,6 +3901,9 @@ void GOVMModifier::run() {
         errs() << "[GOVMModifier]   Creating call to vm_interpreter...\n";
     }
     irbuilder.CreateCall(govm_interpreter);
+
+    // 在正常返回和 VM 记录的异常传播分支之前归还；递归各层分别持有引用。
+    if (qsegLease) releaseVMData(irbuilder, gv_code_seg);
 
     BasicBlock *normalReturnBB = BasicBlock::Create(this->Mod->getContext(), "vm_normal_return", F);
     BasicBlock *resumeExceptionBB = BasicBlock::Create(this->Mod->getContext(), "vm_resume_exception", F);

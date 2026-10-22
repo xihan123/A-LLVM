@@ -24,6 +24,8 @@ def main():
     base = args.ndk / "toolchains/llvm/prebuilt/windows-x86_64"
     nm = subprocess.check_output([str(base/"bin/llvm-nm.exe"), "--defined-only", str(args.native/"linked.so")], text=True)
     symbols = {line.split()[-1]: line.split()[0] for line in nm.splitlines() if len(line.split()) >= 3}
+    protection = json.loads((args.native/'protection.json').read_text(encoding='utf-8'))
+    leased = protection.get('qsegLifetimeAbi') == 1
     receipt = json.loads((args.native/"segments.json").read_text(encoding="utf-8"))
     sizes = {}
     for entry in receipt["segments"]:
@@ -51,11 +53,13 @@ def main():
         run("shell", "chmod", "755", remote+"/probe").check_returncode()
         results = []
         for mode in ("read", "write"):
+            accessor = 'ndkp_qseg_acquire_v1' if leased else 'ndkp_qseg_get'
+            extra = [symbols['ndkp_qseg_release_v1'], symbols['ndkp_qseg_stats_v1']] if leased else []
             result = run("shell", remote+"/probe", remote+"/protected.apk!/lib/arm64-v8a/"+library,
-                         symbols["ndkp_qseg_get"], hex(address), mode)
+                         symbols[accessor], hex(address), mode, *extra)
             assert (result.returncode == 0 if mode == "read" else result.returncode == 139), result
             results.append({"mode": mode, "exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
-        report = {"resourceBytes": sizes[identity], "crossChunk": sizes[identity] > 65536, "results": results}
+        report = {"resourceBytes": sizes[identity], "crossChunk": sizes[identity] > 65536, 'lifetimeAbi': int(leased), "results": results}
         (args.output/"results.json").write_text(json.dumps(report, indent=2)+"\n")
         print(json.dumps(report))
     finally:
