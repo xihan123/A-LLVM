@@ -1,7 +1,7 @@
 # p18-candidate1 / dex2c 0.1.13-hardening1
 
 当前为本地候选，不覆盖 p17 或 0.1.12，不向远端发布。
-对应 消费项目 的 `docs/security/TOP_TIER_HARDENING_PLAN.md`。
+与接入项目的分阶段验收实施记录对应，细节在接入项目侧维护。
 
 ## 阶段3：认证与产物绑定
 
@@ -36,16 +36,16 @@ idle=32768、pinned=0，只读写入退出139。真实签名探针未覆盖跨64
 
 三份相同业务类/证书的fixture中，55个VM的资源标识、密文摘要、函数密钥摘要和分派顺序均有三向差异，
 Java/Kotlin实机语义相同；验证脚本 `tests/qseg/build_diversity.py`。
-样例应用、样例应用、样例应用最终签名APK已通过DEX包装、SO/QSEG/签名/回执一致性及认证恢复审计；
+三个接入模块的最终签名APK已通过DEX包装、SO/QSEG/签名/回执一致性及认证恢复审计；
 指定关键入口及继承Hook覆盖门禁通过。三个宿主各三次启动冒烟通过，测试后恢复原模块。
 
 冻结源码46ed166与稳定p17编译器重新构建基线fixture：30组热路径交替配对比值中位数0.986412，
 bootstrap95%区间[0.961741,1.013423]，通过<=1.03；只涵盖该预热VM工作负载。
-样例应用独立Trace诊断APK，计入install/lateInit并合并嵌套：命中/未命中各30次，
+接入模块独立Trace诊断APK，计入install/lateInit并合并嵌套：命中/未命中各30次，
 未命中P95=1027.9ms未通过1秒门禁；命中P95=618.2ms、中位数595.9ms，未达500ms争取目标。
 默认无Trace源码与候选产物已恢复，不能据诊断数据声称默认产物已通过。
 
 API26 / 真实16KiB / 完整业务回归 / 真实启用停用的完整启动差值仍未验证。
 包管理器禁用探测仍存在注入事件，其am start差值作废。
-当前只保留候选，不发布正式版本。完整证据、逐产物哈希与剩余门禁见消费项目的
-`docs/security/evidence/top-tier-step6.json` 和 `top-tier-release-gate.json`。
+当前只保留候选，不发布正式版本。完整证据、逐产物哈希与剩余门禁在接入项目侧记录
+（`docs/security/evidence/top-tier-step6.json` 和 `top-tier-release-gate.json`），不在本仓库保留。
