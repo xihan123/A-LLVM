@@ -34,11 +34,7 @@ public abstract class VerifyApkTask extends DefaultTask {
         if (!getPythonExecutable().isPresent()) throw new IllegalStateException("dex2c: Python 3 is required for final APK verification");
         List<String> apks = apkPaths();
         Path temp = getTemporaryDir().toPath();
-        for (String file : List.of("verify_dex2c_apk.py", "dex2c_artifacts.py")) {
-            try (var input = Objects.requireNonNull(getClass().getResourceAsStream("/a_llvm/" + file))) {
-                Files.copy(input, temp.resolve(file), StandardCopyOption.REPLACE_EXISTING);
-            }
-        }
+        prepareVerifierScripts(temp);
         List<String> command = new ArrayList<>(List.of(getPythonExecutable().get().getAsFile().toString(),
                 temp.resolve("verify_dex2c_apk.py").toString(), "--native", getNativeDirectory().get().getAsFile().toString(),
                 "--generated", getGeneratedDirectory().get().getAsFile().toString(), "--java", getJavaExecutable().get().getAsFile().toString(),
@@ -50,6 +46,15 @@ public abstract class VerifyApkTask extends DefaultTask {
         if (!process.waitFor(10, TimeUnit.MINUTES)) { process.destroyForcibly(); throw new IllegalStateException("dex2c: APK verification timed out"); }
         if (process.exitValue() != 0) throw new IllegalStateException("dex2c: final APK verification failed\n" + Files.readString(log));
         getLogger().lifecycle("dex2c: final APK verification; {}", getReport().get().getAsFile());
+    }
+
+    void prepareVerifierScripts(Path temp) throws Exception {
+        Files.createDirectories(temp);
+        for (String file : List.of("verify_dex2c_apk.py", "dex2c_artifacts.py", "seal_qseg.py", "seal_cse.py")) {
+            try (var input = Objects.requireNonNull(getClass().getResourceAsStream("/a_llvm/" + file))) {
+                Files.copy(input, temp.resolve(file), StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
     }
 
     List<String> apkPaths() {

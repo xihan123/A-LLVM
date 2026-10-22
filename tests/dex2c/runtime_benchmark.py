@@ -113,7 +113,11 @@ def main():
     result['p95Millis'] = {m: sorted(r[m] for r in rows)[math.ceil(len(rows) * .95) - 1] for m in ('baseline', 'candidate')}
     result['p95RegressionPercent'] = (result['p95Millis']['candidate'] / result['p95Millis']['baseline'] - 1) * 100
     result['warmP95GatePassed'] = result['p95RegressionPercent'] <= 5
+    result['pairedRatioLimit'] = 1.03
+    result['pairedRatioGatePassed'] = result['pairedRatioCI95'][1] <= result['pairedRatioLimit']
     (args.output/"results.json").write_text(json.dumps(result, indent=2)+"\n")
+    if not result['pairedRatioGatePassed']:
+        raise SystemExit('hot-path paired ratio 95% upper bound exceeds 1.03; candidate only')
 
 
 if __name__ == "__main__":

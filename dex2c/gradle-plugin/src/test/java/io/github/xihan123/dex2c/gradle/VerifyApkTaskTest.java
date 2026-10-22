@@ -4,6 +4,7 @@ import org.gradle.testfixtures.ProjectBuilder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -31,5 +32,12 @@ class VerifyApkTaskTest {
 
     @Test void missingOutputsAreRejected() {
         assertThrows(IllegalStateException.class, task()::apkPaths);
+    }
+
+    @Test void verifierShipsItsTransitivePythonDependencies() throws Exception {
+        var scripts = directory.resolve("scripts");
+        task().prepareVerifierScripts(scripts);
+        for (String file : List.of("verify_dex2c_apk.py", "dex2c_artifacts.py", "seal_qseg.py", "seal_cse.py"))
+            assertTrue(Files.size(scripts.resolve(file)) > 0, file);
     }
 }
