@@ -35,7 +35,9 @@ def inspect(directory):
     return {'path': str(directory.resolve()), 'businessClassSha256': business,
             'certificateSha256': receipt['certificateSha256'], 'containerSha256': receipt['containerSha256'],
             'librarySha256': receipt['librarySha256'], 'semantics': semantics,
-            'resources': resources, 'functionKeyDigests': keys, 'dispatchOrderDigests': dispatch}
+            'resources': resources, 'resourceIds': {name: value[0] for name, value in resources.items()},
+            'resourceCiphertextDigests': {name: value[1] for name, value in resources.items()},
+            'functionKeyDigests': keys, 'dispatchOrderDigests': dispatch}
 
 
 def main():
@@ -48,7 +50,7 @@ def main():
     for key in ('businessClassSha256', 'certificateSha256', 'semantics'):
         assert all(row[key] == builds[0][key] for row in builds), f'input/semantics differ: {key}'
     counts = {}
-    for field in ('resources', 'functionKeyDigests', 'dispatchOrderDigests'):
+    for field in ('resourceIds', 'resourceCiphertextDigests', 'functionKeyDigests', 'dispatchOrderDigests'):
         assert all(set(row[field]) == set(builds[0][field]) for row in builds), f'coverage differs: {field}'
         counts[field] = sum(len({str(row[field][name]) for row in builds}) == 3 for name in builds[0][field])
         assert counts[field] > 0, f'no three-way diversity: {field}'
