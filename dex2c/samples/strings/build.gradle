@@ -31,7 +31,7 @@ android {
     }
     packaging { jniLibs { useLegacyPackaging = false } }
 }
-dependencies { compileOnly 'io.github.xihan123.dex2c:annotations:0.1.13-strings1' }
+dependencies { compileOnly 'io.github.xihan123.dex2c:annotations:0.1.13' }
 
 if (mode in ['strings', 'combined']) {
     stringProtection {
