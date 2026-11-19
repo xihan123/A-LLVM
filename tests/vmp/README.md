@@ -100,10 +100,24 @@ Windows x86_64 上完成 Clang 构建；设备为 arm64、API 37、4 KiB 页。
 LLVM 21 p12 的离线指令映射回归：
 
 ```bash
-python tests/vmp/opcode_diversity.py --clang "$CLANG" --ndk "$NDK"
+python tests/vmp/opcode_diversity.py --clang "$CLANG" --ndk "$NDK" --output <新的证据目录>
 ```
 
-验证每方法映射与 payload key 独立，并保留无开关不变换。运行语义还需执行上面的
+同一输入独立编译三次，`first` / `second` 每方法每次必须恰有一条 variant 与对应唯一
+dispatch clone。28 项 semantic→ordinal 在转成 dict 前拒重复键和值，强制为 1..28
+双射，再按 semantic 1..28 规范化为整数 tuple；CSV 换序或前导零不算新映射。
+每个方法的三份 tuple 必须全不同，六份方法/构建映射也不重复。每一方法的全部 28 项
+都必须让 legacy key-only decoder 失败，任一项仍可解码即拒绝；保留独立 no-flag 编译
+不含 VMP 变换的检查。可选 `--output` 必须为全新目录，保留输入源码、三个 protected
+IR、no-flag IR、每次编译的原始 stdout/stderr；全部通过才写 `results.json`。省略此参数
+继续使用临时目录。失败保留已产生的证据，不复用旧成功报告。纯主机解析反例无需候选编译器：
+
+```bash
+python -B -m unittest discover -s tests/vmp -p 'test_opcode_diversity.py'
+```
+
+这些检查验证本次样本的逐方法差异与旧 key-only 恢复器失败，不证明不可恢复或随机性强度。
+运行语义还需执行上面的
 设备回归；旧恢复器失败不等于无法恢复，见 [离线加固记录](../../docs/vmp-offline-p12.md)。
 
 ```bash

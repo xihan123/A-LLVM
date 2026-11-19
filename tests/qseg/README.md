@@ -6,6 +6,47 @@
 python -B -m unittest discover -s tests/qseg -p 'test_*.py'
 ```
 
+三次独立标准 Java/Kotlin fixture 构建的逐目标差异门禁：
+
+```powershell
+python -B tests/qseg/build_diversity.py --expected-contract <冻结的expected-contract.json> `
+  --fixtures <build-1> --fixtures <build-2> --fixtures <build-3> --output <新的diversity.json>
+```
+
+先从独立审核的预期 selection 冻结完整 `protection=vmp` 方法名单，再与固定原始
+Java/Kotlin 输入对齐；不得从本次三构建的观测交集、收据计数或成功状态反推分母。
+`--expected-contract` 为 JSON：`schemaVersion: 1`、`methods: [{method, symbol}, ...]`、
+`inputClasses: {baseline: {class名称: SHA256, ...}, common: {class名称: SHA256, ...}}`。
+`method` 使用 MethodKey 完整 owner/name、方法名和 descriptor，`symbol` 必须为
+`d2c_ + SHA256(method的UTF-8字节)[:24]`。名单、class maps 均非空且不许重复。
+冻结时记录名单来源文件、规范方法名单与 contract 的摘要；旧名单仅提供预期名称，
+不提供本次通过证据。可导入 `class_manifest(paths)` 生成各 class 的完整字节摘要。
+
+脚本跟随每份 `inputs.json` 的路径，支持同字节冻结 JAR；比较全部 baseline/common
+`.class`，包括 Java/Kotlin 入口和依赖，不只比较 `sample/Logic.class`。若 Gradle 路径
+会被后续构建重写，应在每次构建后先复制该份 baseline/protected/common JAR、核对原始
+与副本摘要并保留原 inputs 及快照清单，再将该份 inputs 路径指向副本，之后才开始下一次
+构建。拒 ZIP 重复 entry 和同一 classpath 的重复 class；protected 完整 class 集须与
+本次 generated/classes.jar 相同，后者字节摘要须匹配保护收据。
+
+每份构建的 selection、唯一 receipt symbols、kind1 资源分组、唯一解释器 clone 都须
+完整覆盖独立名单；chunks 必须从 0 连续、无重复/冲突、大小及总量与方法收据一致。
+固定 `sample.Run` 与 `kfixture.FixtureKt`，baseline/protected 各有且仅有一条结果，
+同入口两模式输出相同，跨构建语义相同，且使用相同证书。
+
+每个预期方法的 `resourceIds`、`resourceContentSha256`、`functionKeySha256`、
+`dispatchCompareConstantSequenceSha256` 四项都必须各有三个不同值；任一方法任一项
+不满足即失败。`resourceContentSha256` 是 QSEG 封装前的 VM 资源内容摘要，**不是外层
+QSEG 密文摘要**。分派摘要仅沿 LLVM 21 raw IR 中 salt-masked compare 的实际 false-edge
+chain 逐块提取常量序列，直到确认真实 fault/unreachable default，核对 load/trunc/xor/
+icmp/branch 的 SSA 关联、无条件入口边、分组连通与目标；缺 salt 的首/中/尾块均拒绝。
+忽略链外 xor，不能称为 semantic handler 顺序。函数 key 按整数规范化后计算摘要。
+SO/容器整体摘要三份不同只作额外检查，不能替代逐方法检查。
+
+成功报告绑定完整预期名单、contract 摘要及各构建观测；输出文件必须全新，失败不写
+成功报告。此测试消费同次构建已完成的签名 APK 认证、收据审计与设备语义证据，不代替
+`verify_dex2c_apk.py`、`audit_apk.py` 或设备测试，也不关闭嵌套/EH/OOM 等独立运行时门禁。
+
 `audit_apk.py` 对最终签名 APK 核对收据、逐段认证恢复摘要、全部 SO 的 ELF/ZIP
 16 KiB 对齐和容器 STORED 属性，使用方式见 `runtime/QSEG.md`。
 
