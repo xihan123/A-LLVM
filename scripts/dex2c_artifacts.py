@@ -78,6 +78,13 @@ class Dex:
         cursor, calls = 0, []
         while cursor < count:
             opcode = instructions[cursor] & 255
+            if synchronized and opcode == 0x1e and count - cursor == 6:
+                # R8 can put move-exception after the unlock/throw block and jump back to it.
+                unlock, ret, unwind, rethrow, caught, jump = instructions[cursor:]
+                if (0x0e <= (ret & 0xff) <= 0x11 and unwind == unlock
+                        and (caught & 0xff) == 0x0d and rethrow == ((caught & 0xff00) | 0x27)
+                        and jump == 0xfd28):  # goto -3, back to unwind
+                    return calls
             assert opcode in lengths, f"non-wrapper DEX opcode {opcode:#x}"
             if opcode in (0x71, 0x77):
                 calls.append(self.methods[instructions[cursor + 1]])
