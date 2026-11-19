@@ -10,4 +10,6 @@ import java.lang.annotation.Target;
 @Target({ElementType.TYPE, ElementType.METHOD})
 public @interface dex2c {
     ProtectionMode mode() default ProtectionMode.VMP;
+    /** Recheck this SO's RX mapping at an explicitly chosen, low-frequency method entry. Method-only; not inherited by helpers. */
+    boolean integrityRecheck() default false;
 }

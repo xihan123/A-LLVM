@@ -11,12 +11,14 @@ public final class DeviceFixtures {
     public static void main(String[] args) throws Exception {
         Path out=Path.of(args[0]).toAbsolutePath();Files.createDirectories(out);
         boolean nativeOnly=args.length>5&&Boolean.parseBoolean(args[5]);
+        boolean recheck=args.length>6&&Boolean.parseBoolean(args[6]);
+        if(nativeOnly&&recheck)throw new IllegalArgumentException("choose native-only or mixed integrity-recheck fixture");
         Path source=out.resolve("Run.java"),classes=Files.createDirectories(out.resolve("classes"));
-        try(InputStream in=DeviceFixtures.class.getResourceAsStream(nativeOnly?"/fixtures/native/Run.java":"/fixtures/Run.java")){Files.copy(Objects.requireNonNull(in),source,StandardCopyOption.REPLACE_EXISTING);}
+        try(InputStream in=DeviceFixtures.class.getResourceAsStream(recheck?"/fixtures/recheck/Run.java":nativeOnly?"/fixtures/native/Run.java":"/fixtures/Run.java")){Files.copy(Objects.requireNonNull(in),source,StandardCopyOption.REPLACE_EXISTING);}
         int result=ToolProvider.getSystemJavaCompiler().run(null,null,null,"-g","-classpath",System.getProperty("java.class.path"),"-d",classes.toString(),source.toString());
         if(result!=0)throw new IllegalStateException("fixture compilation failed");
         Path kotlin=location(kfixture.Fixture.class);
-        Path generated=out.resolve("generated");new Transformer().transform(nativeOnly?List.of(classes):List.of(classes,kotlin),generated,"dex2c_semantics");
+        Path generated=out.resolve("generated");new Transformer().transform(nativeOnly||recheck?List.of(classes):List.of(classes,kotlin),generated,"dex2c_semantics");
         new NativeCompiler().compile(generated,out.resolve("native"),Path.of(args[1]),Path.of(args[2]),"dex2c_semantics",26,
                 TestSigning.certificate(out),TestSigning.python(),args.length>3&&Boolean.parseBoolean(args[3]),
                 args.length>4&&Boolean.parseBoolean(args[4]));
@@ -27,7 +29,7 @@ public final class DeviceFixtures {
             }
         }
         var common=List.of(location(io.github.xihan123.dex2c.runtime.Dex2cRuntime.class),location(kotlin.Unit.class));
-        Files.writeString(out.resolve("inputs.json"),"{\"mains\":"+(nativeOnly?"[\"sample.Run\"]":"[\"sample.Run\",\"kfixture.FixtureKt\"]")+",\"baseline\":["+Transformer.json(javaJar.toString())+(nativeOnly?"":","+Transformer.json(kotlin.toString()))
+        Files.writeString(out.resolve("inputs.json"),"{\"mains\":"+(nativeOnly||recheck?"[\"sample.Run\"]":"[\"sample.Run\",\"kfixture.FixtureKt\"]")+",\"baseline\":["+Transformer.json(javaJar.toString())+(nativeOnly||recheck?"":","+Transformer.json(kotlin.toString()))
                 +"],\"protected\":["+Transformer.json(generated.resolve("classes.jar").toString())+"],\"common\":["
                 +String.join(",",common.stream().map(p->Transformer.json(p.toString())).toList())+"]}\n");
         System.out.println("dex2c device fixtures: "+out);

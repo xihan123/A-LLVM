@@ -43,6 +43,12 @@ public final class NativeCompiler {
                 ?Files.readAllLines(generated.resolve("string-symbols.txt")).stream().filter(s->!s.isBlank()).toList():List.of();
         int stringCount=Files.exists(generated.resolve("string-count.txt"))?Integer.parseInt(Files.readString(generated.resolve("string-count.txt"))):0;
         List<String> allNativeSymbols=new ArrayList<>(nativeSymbols);allNativeSymbols.addAll(stringSymbols);
+        List<String> rechecks=Files.exists(generated.resolve("recheck-symbols.txt"))
+                ?Files.readAllLines(generated.resolve("recheck-symbols.txt")).stream().filter(s->!s.isBlank()).toList():List.of();
+        Set<String> selected=new HashSet<>(symbols);selected.addAll(nativeSymbols);
+        if(new HashSet<>(rechecks).size()!=rechecks.size() || !selected.containsAll(rechecks))
+            throw new IllegalStateException("dex2c: invalid integrity recheck manifest");
+        List<String> recheckEntries=new ArrayList<>();Map<String,String> recheckIrHashes=new TreeMap<>();
         if(symbols.isEmpty() && allNativeSymbols.isEmpty()) {
             Files.createDirectories(packaged.getParent());
             Files.writeString(output.resolve("protection.json"),"{\"schemaVersion\":1,\"protectedMethods\":0}\n");return;
@@ -90,6 +96,8 @@ public final class NativeCompiler {
                 "-S","-emit-llvm",generated.resolve("protected.cpp").toString(),"-o",rawIr.toString()),output.resolve("vmp.log"));
         IrIndex rawIndex=new IrIndex(Files.readString(rawIr));
         if(!symbols.isEmpty())verifyHardenedIr(rawIndex,symbols);
+        List<String> vmpRechecks=rechecks.stream().filter(symbols::contains).toList();
+        for(String symbol:vmpRechecks)verifyRecheckIr(rawIndex,symbol,segmented);
         // The post pass runs after size optimization; no optimizer may run after verification.
         run(command(symbols.isEmpty()?common:command(common,"-mllvm","-irobf-vmp-post"),"-Oz","-S","-emit-llvm",rawIr.toString(),"-o",ir.toString()),output.resolve("optimize.log"));
         IrIndex index=new IrIndex(Files.readString(ir));
@@ -101,6 +109,8 @@ public final class NativeCompiler {
         for(String symbol:symbols)if(!Arrays.equals(bytecodes.get(symbol),originalBytecodes.get(symbol)))
             throw new IllegalStateException("dex2c: VM bytecode changed during size optimization: "+symbol);
         String irHash=hash(ir);
+        for(String symbol:vmpRechecks)recheckEntries.add(recheckEntry(symbol,"protected",verifyRecheckIr(index,symbol,segmented)));
+        if(!vmpRechecks.isEmpty())recheckIrHashes.put("protected",irHash);
         run(command(common,"-Oz","-Xclang","-disable-llvm-passes","-c",ir.toString(),"-o",object.toString()),output.resolve("object.log"));
         if(!irHash.equals(hash(ir)))throw new IOException("dex2c: verified IR changed during object compilation");
         List<String> objects=new ArrayList<>();objects.add(object.toString());
@@ -111,6 +121,11 @@ public final class NativeCompiler {
             verifyNativeIr(Files.readString(nativeIr),allNativeSymbols);
             if(!stringSymbols.isEmpty())verifyStringIr(Files.readString(nativeIr),stringCount);
             String nativeIrHash=hash(nativeIr);
+            IrIndex nativeIndex=new IrIndex(Files.readString(nativeIr));
+            for(String symbol:rechecks.stream().filter(nativeSymbols::contains).toList()) {
+                recheckEntries.add(recheckEntry(symbol,"native",verifyRecheckIr(nativeIndex,symbol,segmented)));
+                recheckIrHashes.put("native",nativeIrHash);
+            }
             run(command(common,"-Oz","-Xclang","-disable-llvm-passes","-c",nativeIr.toString(),"-o",nativeObject.toString()),output.resolve("native-object.log"));
             if(!nativeIrHash.equals(hash(nativeIr)))throw new IOException("dex2c: verified native IR changed during compilation");
             objects.add(nativeObject.toString());
@@ -122,7 +137,13 @@ public final class NativeCompiler {
             List<String> helperFlags=source.equals("registration")?command(hardened,"-mllvm","-irobf-fla"):hardened;
             run(command(segmentFlags(helperFlags,segmented,output.resolve("staging/"+source),stages),"-Oz","-S","-emit-llvm",generated.resolve(source+".cpp").toString(),"-o",helperIr.toString()),output.resolve(source+".log"));
             verifyCseIr(Files.readString(helperIr));
+            String helperIrHash=hash(helperIr);
+            if(source.equals("registration")&&!rechecks.isEmpty()) {
+                recheckEntries.add(recheckEntry("JNI_OnLoad",source,verifyRecheckIr(new IrIndex(Files.readString(helperIr)),"JNI_OnLoad",segmented)));
+                recheckIrHashes.put(source,helperIrHash);
+            }
             run(command(common,"-Oz","-Xclang","-disable-llvm-passes","-c",helperIr.toString(),"-o",target.toString()),output.resolve(source+"-object.log"));
+            if(!helperIrHash.equals(hash(helperIr)))throw new IOException("dex2c: verified helper IR changed during compilation");
             objects.add(target.toString());
         }
         Path certObject=output.resolve("ndkp_apkcert.o");
@@ -188,7 +209,7 @@ public final class NativeCompiler {
             verifyBytecodesInLibrary(Files.readAllBytes(packaged),bytecodes);
         }
         verifyBytecodesInLibrary(Files.readAllBytes(packaged),cseBytecodes);
-        Files.writeString(output.resolve("protection.json"),"{\"schemaVersion\":"+(segmented?5:4)+",\"abi\":\"arm64-v8a\",\"protectedMethods\":"+(symbols.size()+nativeSymbols.size())
+        Files.writeString(output.resolve("protection.json"),"{\"schemaVersion\":"+(segmented?7:6)+",\"abi\":\"arm64-v8a\",\"protectedMethods\":"+(symbols.size()+nativeSymbols.size())
                 +",\"vmpMethods\":"+symbols.size()+",\"nativeMethods\":"+nativeSymbols.size()
                 +",\"protectedStrings\":"+stringCount
                 +",\"stringSymbols\":["+String.join(",",stringSymbols.stream().map(Transformer::json).toList())+"]"
@@ -208,6 +229,10 @@ public final class NativeCompiler {
                 +",\"certificateSha256\":"+Transformer.json(hash(publicCert))+",\"compileMillis\":"+(System.nanoTime()-started)/1000000
                 +",\"irSha256\":"+Transformer.json(irHash)+",\"objectSha256\":"+Transformer.json(hash(object))
                 +",\"selectionSha256\":"+Transformer.json(hash(generated.resolve("selection.json")))
+                +",\"integrityRecheck\":"+(rechecks.isEmpty()?"null":"{\"schemaVersion\":1,\"runtime\":"
+                    +Transformer.json(segmented?"ndkp_qseg_recheck":"ndkp_cse_recheck_module_v1")
+                    +",\"entries\":["+String.join(",",recheckEntries)+"],\"irSha256\":{"+String.join(",",recheckIrHashes.entrySet().stream()
+                        .map(e->Transformer.json(e.getKey())+":"+Transformer.json(e.getValue())).toList())+"}}")
                 +",\"nativeIrSha256\":"+(allNativeSymbols.isEmpty()?"null":Transformer.json(hash(output.resolve("native.ll"))))
                 +",\"librarySha256\":"+Transformer.json(hash(packaged))+",\"libraryBytes\":"+Files.size(packaged)
                 +",\"segmentedData\":"+segmented+",\"containerSha256\":"+(segmented?Transformer.json(hash(container)):"null")
@@ -221,6 +246,72 @@ public final class NativeCompiler {
     }
     private record IrFunction(String header,String body) {}
     private record VmReceipt(String code,String interpreter) {}
+    private static String recheckEntry(String symbol,String unit,String guard) {
+        return "{\"symbol\":"+Transformer.json(symbol)+",\"translationUnit\":"+Transformer.json(unit)+",\"guard\":"+Transformer.json(guard)+"}";
+    }
+    static String verifyRecheckIr(String ir,String symbol,boolean segmented) {
+        return verifyRecheckIr(new IrIndex(ir),symbol,segmented);
+    }
+    private static String directIrCall(String line) {
+        Matcher direct=Pattern.compile("^\\s*(?:%[^=\\n]+?=\\s*)?(?:(?:musttail|notail|tail)\\s+)?(?:call|invoke)\\b[^%@\"\\n]*@([A-Za-z0-9_.$]+)\\(").matcher(line);
+        return direct.find()?direct.group(1):null;
+    }
+    private static String verifyRecheckIr(IrIndex ir,String symbol,boolean segmented) {
+        IrFunction function=ir.functions.get(symbol);
+        String body=function==null?"":function.body();
+        Matcher calls=Pattern.compile("(?m)^\\s*(?:%[^=\\n]+?=\\s*)?(?:(?:musttail|notail|tail)\\s+)?(?:call|invoke|callbr)\\b[^\\n]*").matcher(body);
+        String target=null;int offset=-1;
+        while(calls.find()) {
+            String callee=directIrCall(calls.group());
+            if(callee!=null&&(callee.startsWith("llvm.dbg.")||callee.startsWith("llvm.lifetime.")))continue;
+            target=callee;offset=calls.start();break;
+        }
+        Matcher terminator=Pattern.compile("(?m)^\\s*(?:br|switch|ret|resume|unreachable|indirectbr)\\b").matcher(body);
+        if(target==null || terminator.find()&&terminator.start()<offset || ir.text.contains("!ndkp.cse.recheck.prepare"))
+            throw new IllegalStateException("dex2c: missing entry integrity recheck for "+symbol);
+        String runtime=segmented?"ndkp_qseg_recheck":"ndkp_cse_recheck_module_v1";
+        // The v2 helper may be inlined by the verified size-optimization stage.
+        if(segmented&&target.equals(runtime))return target;
+        String guard=segmented?"ndkp_cse_module_recheck_v2":"ndkp_cse_module_recheck";
+        IrFunction helper=ir.functions.get(target);
+        if(!target.matches(Pattern.quote(guard)+"(?:\\.[0-9]+)?") || helper==null
+                || helper.body().lines().noneMatch(line->runtime.equals(directIrCall(line)))
+                || (!segmented && helper.body().lines().filter(line->line.contains("load volatile ")).count()!=5)
+                || !checkedGuardReturns(helper.body(),runtime))
+            throw new IllegalStateException("dex2c: invalid integrity recheck guard for "+symbol);
+        return target;
+    }
+    private static boolean checkedGuardReturns(String body,String runtime) {
+        Map<String,List<String>> blocks=new LinkedHashMap<>();String name="";
+        blocks.put(name,new ArrayList<>());
+        for(String raw:body.split("\n")) {
+            String line=raw.strip();if(line.isEmpty()||line.startsWith(";"))continue;
+            Matcher label=Pattern.compile("^([A-Za-z0-9_.$-]+):(?:\\s*;.*)?$").matcher(line);
+            if(label.matches()) {
+                name=label.group(1);if(blocks.putIfAbsent(name,new ArrayList<>())!=null)return false;
+            } else blocks.get(name).add(line);
+        }
+        if(blocks.get("").isEmpty())blocks.remove("");
+        if(blocks.isEmpty())return false;
+        record State(String block,boolean checked) {}
+        Deque<State> pending=new ArrayDeque<>();Set<State> seen=new HashSet<>();boolean reached=false;
+        pending.add(new State(blocks.keySet().iterator().next(),false));
+        while(!pending.isEmpty()) {
+            State state=pending.remove();if(!seen.add(state))continue;
+            List<String> lines=blocks.get(state.block());if(lines==null||lines.isEmpty())return false;
+            boolean checked=state.checked();
+            for(String line:lines)if(runtime.equals(directIrCall(line))) {checked=true;reached=true;}
+            String end=lines.getLast();
+            if(end.startsWith("ret ")) {if(!checked)return false;}
+            else if(!end.equals("unreachable")) {
+                if(!end.startsWith("br "))return false;
+                Matcher edge=Pattern.compile("\\blabel %([A-Za-z0-9_.$-]+)").matcher(end);int count=0;
+                while(edge.find()){pending.add(new State(edge.group(1),checked));count++;}
+                if(count<1||count>2)return false;
+            }
+        }
+        return reached;
+    }
     /** Index definitions once; per-method full-module regex searches dominate large VM IR. */
     private static final class IrIndex {
         final String text;

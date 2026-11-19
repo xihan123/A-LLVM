@@ -1,5 +1,9 @@
 # dex2c：Java/Kotlin 方法保护
 
+当前源码为 **`0.1.15-dev`，未发布**；使用本地 composite build / staging，不能据此假定远端 Maven 已可下载。
+本轮新增默认关闭、仅显式方法生效的 `@dex2c(integrityRecheck = true)`，接线、冻结要求和边界见
+[低频完整性复验](INTEGRITY_RECHECK.md)。工具链仍为 p19 开发态；以下 `0.1.14` 发布记录属于历史基线。
+
 正式版本号 `0.1.14` 同步发布 `io.github.xihan123.dex2c` 和独立的 `io.github.xihan123.strings` 插件：字符串插件将指定包内的 Java/Kotlin
 字符串抽取到 native，业务方法继续运行在 ART，可与 dex2c 共用一个 SO。
 接入与边界见 [字符串插件](STRINGS.md)，实测与待完成门槛见 [验证记录](STRINGS_VALIDATION.md)。

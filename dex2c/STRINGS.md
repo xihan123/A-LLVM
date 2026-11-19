@@ -1,5 +1,8 @@
 # Java/Kotlin 字符串 native 保护
 
+当前共享插件源码版本为 `0.1.15-dev`，未发布；下文 `0.1.14` 是既有发布基线。
+低频方法复验由 dex2c 方法注解显式开启，不会由 strings-only 选择自动启用，见 [复验说明](INTEGRITY_RECHECK.md)。
+
 正式版本号 `0.1.14`，插件 ID `io.github.xihan123.strings`。复用 dex2c 的 Gradle 构建、
 A-LLVM 编译器验证、CSE 封装和最终 APK 验证；当前上传状态见 [发布记录](RELEASE_0.1.14.md)。
 

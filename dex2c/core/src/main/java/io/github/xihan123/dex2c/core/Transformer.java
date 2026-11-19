@@ -63,7 +63,7 @@ public final class Transformer {
             }
             DynamicCalls.lower(owner,method,key);
             (selector.policies.get(key)==Selector.Policy.NATIVE_TREE?nativeCpp:cpp)
-                    .append(new CppEmitter(key,method,keep,resolverTypes.computeIfAbsent(bridgeOwner.name,n->new TreeSet<>())).emit());
+                    .append(new CppEmitter(key,method,keep,resolverTypes.computeIfAbsent(bridgeOwner.name,n->new TreeSet<>())).emit(selector.rechecks.contains(key)));
             registration.append("extern \"C\" ").append(ctype(Type.getReturnType(method.desc))).append(' ').append(key.symbol())
                     .append('(').append(CppEmitter.parameters(key,method)).append(");\n");
             String descriptor=(method.access&ACC_STATIC)!=0?method.desc:"(L"+owner.name+";"+method.desc.substring(1);
@@ -96,7 +96,7 @@ public final class Transformer {
         int typeIndex=0;for(var entry:typeIndices.entrySet())entry.setValue(typeIndex++);
         if(!selector.selected.isEmpty()) {
             runtime.install(classes,changed,keep);
-            runtime.appendRegistration(registration,!strings.strings.isEmpty());
+            runtime.appendRegistration(registration,!strings.strings.isEmpty(),!selector.rechecks.isEmpty());
         } else if(!strings.strings.isEmpty()) {
             registration.append("extern \"C\" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm,void*) {\n")
                 .append("JNIEnv* env=nullptr;if(vm->GetEnv((void**)&env,JNI_VERSION_1_6)!=JNI_OK)return JNI_ERR;\n")
@@ -138,8 +138,10 @@ public final class Transformer {
         }
         Files.writeString(output.resolve("string-symbols.txt"),strings.strings.isEmpty()?"":strings.symbol+"\n");
         Files.writeString(output.resolve("string-count.txt"),Integer.toString(strings.strings.size()));
+        Files.writeString(output.resolve("recheck-symbols.txt"),String.join("\n",selector.rechecks.stream().map(MethodKey::symbol).toList())+(selector.rechecks.isEmpty()?"":"\n"));
         Files.writeString(output.resolve("string-selection.json"),strings.report()+"\n");
-        StringBuilder json=new StringBuilder("{\"schemaVersion\":3,\"bytecodeVerified\":true,\"library\":").append(json(library))
+        StringBuilder json=new StringBuilder("{\"schemaVersion\":4,\"bytecodeVerified\":true,\"library\":").append(json(library))
+                .append(",\"registrationIntegrityRecheck\":").append(!selector.rechecks.isEmpty())
                 .append(",\"registrationCall\":").append(json(runtime.ensure())).append(",\"methods\":[");
         boolean first=true;
         for(var entry:selector.selected.entrySet()) {
@@ -147,6 +149,7 @@ public final class Transformer {
             json.append("{\"method\":").append(json(entry.getKey().toString())).append(",\"symbol\":").append(json(entry.getKey().symbol()))
                     .append(",\"reason\":").append(json(entry.getValue()))
                     .append(",\"protection\":").append(json(selector.policies.get(entry.getKey())==Selector.Policy.NATIVE_TREE?"native-cse":"vmp"))
+                    .append(",\"integrityRecheck\":").append(selector.rechecks.contains(entry.getKey()))
                     .append(",\"bridge\":").append(json(bridges.get(entry.getKey()).toString())).append('}');
         }
         json.append("],\"inherited\":{");first=true;

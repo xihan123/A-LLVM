@@ -53,9 +53,9 @@ final class RuntimeLayout {
                 +"env->ReleaseStringUTFChars(name,text);return result;\n}\n";
     }
 
-    void appendRegistration(StringBuilder out,boolean strings) {
+    void appendRegistration(StringBuilder out,boolean strings,boolean integrityRecheck) {
         out.append("jint d2c_type_index(JNIEnv*,jclass,jstring);\n")
-            .append("extern \"C\" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm,void*) {\n")
+            .append("extern \"C\" JNIEXPORT ").append(integrityRecheck?"D2C_RECHECK ":"").append("jint JNICALL JNI_OnLoad(JavaVM* vm,void*) {\n")
             .append("JNIEnv* env=nullptr;if(vm->GetEnv((void**)&env,JNI_VERSION_1_6)!=JNI_OK)return JNI_ERR;\n")
             .append(strings?"if(register_strings(env)!=0)return JNI_ERR;\n":"")
             .append("jclass cls=env->FindClass(").append(NativeText.quote(owner)).append(");if(!cls)return JNI_ERR;\n")

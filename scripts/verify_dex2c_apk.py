@@ -53,6 +53,10 @@ def check_requirements(selection, requirements):
     require(isinstance(requirements, dict) and requirements.get('schemaVersion') == 1 and
             isinstance(requirements.get('methods'), list) and requirements['methods'], 'invalid critical method requirements')
     selected = {row['method']: row for row in selection['methods']}
+    if 'registrationIntegrityRecheck' in requirements:
+        require(type(requirements['registrationIntegrityRecheck']) is bool and
+                selection.get('registrationIntegrityRecheck', False) is requirements['registrationIntegrityRecheck'],
+                'critical registration integrity recheck differs')
     observed, rows = set(), []
     for row in requirements['methods']:
         require(isinstance(row, dict) and isinstance(row.get('method'), str) and row['method'] and
@@ -64,12 +68,136 @@ def check_requirements(selection, requirements):
         actual = selected.get(row['method'])
         require(actual is not None and actual.get('protection') == row['protection'],
                 'critical method protection differs: ' + row['method'])
+        if 'integrityRecheck' in row:
+            require(type(row['integrityRecheck']) is bool and
+                    actual.get('integrityRecheck', False) is row['integrityRecheck'],
+                    'critical method integrity recheck differs: ' + row['method'])
         if row.get('entry') is not None:
             require(selection.get('inherited', {}).get(row['entry']) == row['method'],
                     'critical inherited target differs: ' + row['entry'])
         rows.append({**row, 'symbol': actual['symbol'], 'bridge': actual['bridge'],
                      'validationStatus': 'passed', 'scope': 'signed-apk-static'})
     return rows
+
+
+def direct_ir_call(line):
+    direct = re.match(r'^\s*(?:%[^=\n]+?=\s*)?(?:(?:musttail|notail|tail)\s+)?(?:call|invoke)\b[^%@"\n]*@([A-Za-z0-9_.$]+)\(', line)
+    return direct[1] if direct else None
+
+
+def checked_guard_returns(body, runtime):
+    blocks, name = {'': []}, ''
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(';'):
+            continue
+        label = re.fullmatch(r'([A-Za-z0-9_.$-]+):(?:\s*;.*)?', line)
+        if label:
+            name = label[1]
+            if name in blocks:
+                return False
+            blocks[name] = []
+        else:
+            blocks[name].append(line)
+    if not blocks['']:
+        del blocks['']
+    if not blocks:
+        return False
+    pending, seen, reached = [(next(iter(blocks)), False)], set(), False
+    while pending:
+        name, checked = pending.pop()
+        if (name, checked) in seen:
+            continue
+        seen.add((name, checked))
+        lines = blocks.get(name)
+        if not lines:
+            return False
+        if any(direct_ir_call(line) == runtime for line in lines):
+            checked = reached = True
+        end = lines[-1]
+        if end.startswith('ret '):
+            if not checked:
+                return False
+        elif end != 'unreachable':
+            edges = re.findall(r'\blabel %([A-Za-z0-9_.$-]+)', end)
+            if not end.startswith('br ') or not 1 <= len(edges) <= 2:
+                return False
+            pending.extend((edge, checked) for edge in edges)
+    return reached
+
+
+def recheck_ir_guard(ir, symbol, segmented):
+    """Verify an entry call, not an annotation or an unrelated declaration."""
+    functions = {}
+    for match in re.finditer(r'^define [^\n]*@([A-Za-z0-9_.$]+)\([^\n]* \{\n', ir, re.M):
+        end = ir.find('\n}', match.end())
+        require(end >= 0 and match[1] not in functions, 'invalid integrity recheck IR definition')
+        functions[match[1]] = ir[match.end():end]
+    body = functions.get(symbol, '')
+    target, offset = None, -1
+    for call in re.finditer(r'^\s*(?:%[^=\n]+?=\s*)?(?:(?:musttail|notail|tail)\s+)?(?:call|invoke|callbr)\b[^\n]*', body, re.M):
+        callee = direct_ir_call(call[0])
+        if callee is not None and callee.startswith(('llvm.dbg.', 'llvm.lifetime.')):
+            continue
+        target, offset = callee, call.start()
+        break
+    terminator = re.search(r'^\s*(?:br|switch|ret|resume|unreachable|indirectbr)\b', body, re.M)
+    require(target is not None and (terminator is None or offset < terminator.start()) and
+            '!ndkp.cse.recheck.prepare' not in ir, 'missing entry integrity recheck: ' + symbol)
+    runtime = 'ndkp_qseg_recheck' if segmented else 'ndkp_cse_recheck_module_v1'
+    if segmented and target == runtime:
+        return target
+    guard = 'ndkp_cse_module_recheck_v2' if segmented else 'ndkp_cse_module_recheck'
+    helper = functions.get(target, '')
+    require(re.fullmatch(re.escape(guard) + r'(?:\.[0-9]+)?', target) and
+            any(direct_ir_call(line) == runtime for line in helper.splitlines()) and
+            (segmented or sum('load volatile ' in line for line in helper.splitlines()) == 5) and
+            checked_guard_returns(helper, runtime),
+            'invalid integrity recheck guard: ' + symbol)
+    return target
+
+
+def check_integrity_recheck(receipt, selection, native):
+    expected = {}
+    for row in selection['methods']:
+        enabled = row.get('integrityRecheck', False)
+        require(type(enabled) is bool, 'invalid selected integrity recheck')
+        if enabled:
+            expected[row['symbol']] = 'protected' if row['protection'] == 'vmp' else 'native'
+    registration = selection.get('registrationIntegrityRecheck', False)
+    require(type(registration) is bool and registration is bool(expected), 'registration integrity recheck selection differs')
+    recheck = receipt.get('integrityRecheck')
+    if not expected:
+        require(recheck is None, 'unexpected integrity recheck receipt')
+        return None
+    expected['JNI_OnLoad'] = 'registration'
+    segmented = receipt['segmentedData']
+    runtime = 'ndkp_qseg_recheck' if segmented else 'ndkp_cse_recheck_module_v1'
+    require(isinstance(recheck, dict) and recheck.get('schemaVersion') == 1 and recheck.get('runtime') == runtime and
+            isinstance(recheck.get('entries'), list) and isinstance(recheck.get('irSha256'), dict),
+            'missing integrity recheck receipt')
+    entries, hashes = recheck['entries'], recheck['irSha256']
+    require(all(isinstance(row, dict) and isinstance(row.get('symbol'), str) and
+                isinstance(row.get('translationUnit'), str) and isinstance(row.get('guard'), str) for row in entries),
+            'invalid integrity recheck entry')
+    require(len(entries) == len(expected) and {row['symbol']: row['translationUnit'] for row in entries} == expected,
+            'integrity recheck entry coverage differs')
+    require(set(hashes) == set(expected.values()) and all(isinstance(h, str) and re.fullmatch('[0-9a-f]{64}', h)
+            for h in hashes.values()), 'integrity recheck IR coverage differs')
+    modules = {}
+    for unit, wanted in hashes.items():
+        path = native / (unit + '.ll')
+        require(path.is_file(), 'missing integrity recheck IR: ' + unit)
+        data = path.read_bytes()
+        require(digest(data) == wanted, 'integrity recheck IR changed: ' + unit)
+        if unit in ('protected', 'native'):
+            require(wanted == receipt.get('irSha256' if unit == 'protected' else 'nativeIrSha256'),
+                    'integrity recheck compiled IR differs: ' + unit)
+        modules[unit] = data.decode('utf-8')
+    for row in entries:
+        require(recheck_ir_guard(modules[row['translationUnit']], row['symbol'], segmented) == row['guard'],
+                'integrity recheck guard receipt differs: ' + row['symbol'])
+    return {**recheck, 'validationStatus': 'passed', 'scope': 'compiler-ir-and-signed-apk-static'}
 
 
 def capability(enabled, status, scope):
@@ -81,6 +209,7 @@ def capabilities(receipt, critical):
     for name, enabled in (('vmp', receipt.get('vmpMethods', 0) > 0),
                           ('nativeCse', receipt.get('nativeMethods', 0) > 0 or receipt.get('protectedStrings', 0) > 0),
                           ('segmentedData', receipt.get('segmentedData') is True),
+                           ('integrityRecheck', receipt.get('integrityRecheck') is not None),
                           ('apkSignatureVerification', receipt.get('apkSignatureVerification') is True)):
         result[name] = capability(enabled, 'unverified' if enabled else 'not-applicable', 'device-runtime')
     result['criticalMethodCoverage'] = capability(None if critical is None else True,
@@ -127,7 +256,7 @@ def check_segment_coverage(receipt, segments):
 
 
 def check_diagnostics(names):
-    diagnostics = {'selection.json', 'string-selection.json', 'symbols.txt', 'native-symbols.txt', 'string-symbols.txt',
+    diagnostics = {'selection.json', 'string-selection.json', 'symbols.txt', 'native-symbols.txt', 'string-symbols.txt', 'recheck-symbols.txt',
                    'protected.cpp', 'native.cpp', 'registration.cpp', 'protected.ll', 'protected.raw.ll', 'native.ll',
                    'registration.ll', 'dex2c_runtime.ll', 'cse-runtime.ll', 'cse-runtime.raw.ll'}
     for name in names:
@@ -233,6 +362,7 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report, requiremen
     require({m['symbol'] for m in methods if m['protection'] == 'vmp'} == set(receipt['symbols']), 'VMP manifest differs')
     require({m['symbol'] for m in methods if m['protection'] == 'native-cse'} == set(receipt['nativeSymbols']), 'native manifest differs')
     check_method_receipt(receipt, selection)
+    recheck = check_integrity_recheck(receipt, selection, native)
     configuration = receipt.get('configuration')
     if configuration is not None:
         require(isinstance(configuration, dict) and type(configuration.get('minSdk')) is int and
@@ -324,6 +454,7 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report, requiremen
     report.write_text(json.dumps({'schemaVersion': 1, 'protectedMethods': len(methods), 'protectedStrings': string_count, 'apkSignatureVerification': receipt.get('apkSignatureVerification', False),
         'validationStatus': 'passed', 'scope': 'signed-apk-static', 'capabilities': capabilities(receipt, critical),
         'criticalMethods': critical, 'requirementsSha256': None if requirements_bytes is None else digest(requirements_bytes),
+        'integrityRecheckWiring': recheck,
         'evidence': evidence, 'protectionSha256': digest(receipt_bytes), 'apks': outputs}, indent=2) + '\n')
 
 

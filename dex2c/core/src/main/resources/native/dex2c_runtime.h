@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <math.h>
 
+#define D2C_RECHECK __attribute__((annotate("ndkp.cse_recheck"), noinline))
+
 #if defined(D2C_VMP)
 #define D2C_PROTECTED __attribute__((annotate("ndkp.vmp"), noinline, used))
 #else

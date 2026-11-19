@@ -26,9 +26,12 @@ final class CppEmitter {
     }
 
     String emit() {
+        return emit(false);
+    }
+    String emit(boolean integrityRecheck) {
         Type result = Type.getReturnType(method.desc);
         keepMember(key.owner(),key.name(),method.desc,false);
-        line("extern \"C\" D2C_PROTECTED " + ctype(result) + " " + key.symbol() + "(" + parameters(key, method) + ") {");
+        line("extern \"C\" D2C_PROTECTED " + (integrityRecheck ? "D2C_RECHECK " : "") + ctype(result) + " " + key.symbol() + "(" + parameters(key, method) + ") {");
         line("d2c_frame* f = d2c_open(env, owner, " + (scratch + 8) + ");");
         line("if (!f) " + defaultReturn(result));
         int local = 0;

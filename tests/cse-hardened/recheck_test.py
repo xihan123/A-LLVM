@@ -25,7 +25,9 @@ def main():
     ext = ".exe" if os.name == "nt" else ""
     base = args.ndk.resolve() / "toolchains/llvm/prebuilt" / host
     clang = args.clang.resolve() if args.clang else base / f"bin/clang{ext}"
-    resource = max((base / "lib/clang").iterdir(), key=lambda p: int(p.name))
+    resource = Path(run(clang, "--print-resource-dir").stdout.strip())
+    if not resource.is_absolute() or not (resource / "include").is_dir():
+        raise RuntimeError(f"Clang reported an invalid resource directory: {resource}")
     common = ["--target=aarch64-linux-android29", f"--sysroot={base / 'sysroot'}",
               "-resource-dir", resource, f"-B{base / 'bin'}", "-std=c++17", "-fPIC",
               "-I", ROOT / "include"]

@@ -33,6 +33,10 @@ class FinalApkTest(unittest.TestCase):
             (self.generated / classes.name).write_bytes(classes.read_bytes())
         if (ARGS.fixtures / 'native/segments.json').exists():
             (self.native / 'segments.json').write_bytes((ARGS.fixtures / 'native/segments.json').read_bytes())
+        receipt = json.loads((self.native / 'protection.json').read_bytes())
+        for unit in (receipt.get('integrityRecheck') or {}).get('irSha256', {}):
+            name = unit + '.ll'
+            (self.native / name).write_bytes((ARGS.fixtures / 'native' / name).read_bytes())
 
     def check(self, *apks):
         verify(list(apks) or [ARGS.fixtures / 'protected.apk'], self.native, self.generated,
@@ -86,6 +90,61 @@ class FinalApkTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'critical method protection differs'):
             verify([ARGS.fixtures / 'protected.apk'], self.native, self.generated, ARGS.java, ARGS.apksigner, 26, self.report, path)
         self.assertFalse(self.report.exists())
+
+    def test_frozen_integrity_recheck_requires_methods_and_registration(self):
+        receipt = json.loads((self.native / 'protection.json').read_bytes())
+        if not receipt.get('integrityRecheck'):
+            self.skipTest('requires generated integrity-recheck fixture')
+        requirement = {'schemaVersion': 1, 'registrationIntegrityRecheck': True, 'methods': [
+            {'method': 'sample/Run.initialize(Ljava/lang/String;)Ljava/lang/String;', 'protection': 'vmp', 'integrityRecheck': True},
+            {'method': 'sample/Run.commit(Ljava/lang/String;)Ljava/lang/String;', 'protection': 'native-cse', 'integrityRecheck': True}]}
+        path = self.out / 'recheck-critical.json'
+        path.write_text(json.dumps(requirement))
+        def check():
+            verify([ARGS.fixtures / 'protected.apk'], self.native, self.generated,
+                   ARGS.java, ARGS.apksigner, 26, self.report, path)
+        check()
+        result = json.loads(self.report.read_bytes())
+        self.assertEqual(result['integrityRecheckWiring']['validationStatus'], 'passed')
+        self.assertEqual(result['integrityRecheckWiring']['scope'], 'compiler-ir-and-signed-apk-static')
+        self.assertEqual(len(result['integrityRecheckWiring']['entries']), 3)
+        self.assertEqual(len(result['criticalMethods']), 2)
+        self.assertTrue(all(row['integrityRecheck'] is True for row in result['criticalMethods']))
+        self.assertEqual(result['capabilities']['integrityRecheck']['validationStatus'], 'unverified')
+        requirement['methods'][0]['integrityRecheck'] = False
+        path.write_text(json.dumps(requirement))
+        with self.assertRaisesRegex(ValueError, 'critical method integrity recheck differs'):
+            check()
+        self.assertFalse(self.report.exists())
+        requirement['methods'][0]['integrityRecheck'] = True
+        requirement['registrationIntegrityRecheck'] = False
+        path.write_text(json.dumps(requirement))
+        with self.assertRaisesRegex(ValueError, 'critical registration integrity recheck differs'):
+            check()
+
+    def test_integrity_recheck_missing_or_wrong_ir_receipt_is_rejected(self):
+        path = self.native / 'protection.json'
+        receipt = json.loads(path.read_bytes())
+        if not receipt.get('integrityRecheck'):
+            self.skipTest('requires generated integrity-recheck fixture')
+        for unit in receipt['integrityRecheck']['irSha256']:
+            ir = self.native / (unit + '.ll')
+            original = ir.read_bytes()
+            ir.unlink()
+            with self.subTest(unit=unit), self.assertRaisesRegex(ValueError, 'missing integrity recheck IR'):
+                self.check()
+            self.assertFalse(self.report.exists())
+            ir.write_bytes(original)
+        for unit, digest in list(receipt['integrityRecheck']['irSha256'].items()):
+            receipt['integrityRecheck']['irSha256'][unit] = '0' * 64
+            path.write_text(json.dumps(receipt))
+            with self.subTest(unit=unit), self.assertRaisesRegex(ValueError, 'integrity recheck IR changed'):
+                self.check()
+            receipt['integrityRecheck']['irSha256'][unit] = digest
+        receipt['integrityRecheck']['entries'][0]['guard'] = 'wrong_guard'
+        path.write_text(json.dumps(receipt))
+        with self.assertRaisesRegex(ValueError, 'integrity recheck guard receipt differs'):
+            self.check()
 
     def test_legacy_toolchain_identity_is_explicitly_missing(self):
         path = self.native / 'protection.json'

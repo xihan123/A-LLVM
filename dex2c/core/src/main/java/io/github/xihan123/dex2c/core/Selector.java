@@ -13,6 +13,7 @@ final class Selector {
     enum Policy { NATIVE_TREE, VMP_ENTRY, VMP_TREE }
     final SortedMap<MethodKey, Policy> policies = new TreeMap<>();
     final SortedMap<String, MethodKey> inherited = new TreeMap<>();
+    final SortedSet<MethodKey> rechecks = new TreeSet<>();
     private final Map<MethodKey, Integer> priority = new HashMap<>();
     private final Map<String, Set<String>> inline = new HashMap<>();
 
@@ -23,6 +24,8 @@ final class Selector {
     void run(Set<String> inheritedMethods) {
         for (ClassNode owner : classes.values()) {
             boolean all = marked(owner.visibleAnnotations, owner.invisibleAnnotations);
+            if (all && integrityRecheck(selection(owner.visibleAnnotations, owner.invisibleAnnotations)))
+                throw new IllegalArgumentException("dex2c: integrityRecheck is method-only: " + owner.name);
             for (MethodNode method : owner.methods) {
                 boolean explicit = marked(method.visibleAnnotations, method.invisibleAnnotations);
                 if (all || explicit) {
@@ -30,6 +33,8 @@ final class Selector {
                             : selection(owner.visibleAnnotations, owner.invisibleAnnotations);
                     add(owner, method, explicit ? "method annotation" : "class annotation", explicit,
                             mode(annotation), explicit ? 4 : 2);
+                    if (explicit && integrityRecheck(annotation))
+                        rechecks.add(new MethodKey(owner.name, method.name, method.desc));
                 }
             }
         }
@@ -195,6 +200,17 @@ final class Selector {
             };
         }
         return Policy.VMP_TREE;
+    }
+    private static boolean integrityRecheck(AnnotationNode node) {
+        if (node.values != null && node.values.size() % 2 != 0)
+            throw new IllegalArgumentException("dex2c: malformed protection annotation");
+        if (node.values != null) for (int i = 0; i < node.values.size(); i += 2) {
+            if (!node.values.get(i).equals("integrityRecheck")) continue;
+            if (!(node.values.get(i + 1) instanceof Boolean value))
+                throw new IllegalArgumentException("dex2c: invalid integrityRecheck value");
+            return value;
+        }
+        return false;
     }
     static IllegalArgumentException error(MethodKey key, String message) {
         return new IllegalArgumentException("dex2c: " + key + ": " + message);
