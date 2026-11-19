@@ -115,6 +115,7 @@ final class ProtectionCoordinator {
                 task.getApkSigner().set(components.getSdkComponents().getSdkDirectory().zip(buildTools,
                         (sdk,version)->sdk.file("build-tools/"+version+"/lib/apksigner.jar")));
                 task.getMinSdk().set(variant.getMinSdk().getApiLevel());
+                if(methods)task.getRequirementsFile().set(dex.getCoverageRequirementsFile());
                 task.getReport().set(project.getLayout().getBuildDirectory().file("reports/dex2c/"+name+"/apk-verification.json"));
             });
             String assembleName="assemble"+Character.toUpperCase(name.charAt(0))+name.substring(1);

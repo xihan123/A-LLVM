@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import platform
 import re
 import struct
 import subprocess
@@ -19,6 +20,73 @@ def digest(data):
 def require(ok, message):
     if not ok:
         raise ValueError(message)
+
+
+def check_method_receipt(receipt, selection):
+    """A total count cannot prove that a declared VM method reached the VM compiler."""
+    methods = selection['methods']
+    vm = {m['symbol'] for m in methods if m['protection'] == 'vmp'}
+    native = {m['symbol'] for m in methods if m['protection'] == 'native-cse'}
+    for field, expected in (('vmpMethods', len(vm)), ('nativeMethods', len(native))):
+        require(type(receipt.get(field)) is int and receipt[field] == expected, field + ' count differs')
+    require(len(receipt['symbols']) == len(vm) and len(receipt['nativeSymbols']) == len(native),
+            'duplicate receipt symbol')
+    for field in ('cseHardened', 'certificateBound'):
+        require(receipt.get(field) is True, 'missing protection receipt: ' + field)
+    bytecodes = receipt.get('methodBytecodeBytes', {})
+    require(isinstance(bytecodes, dict) and set(bytecodes) == vm and
+            all(type(n) is int and n > 0 for n in bytecodes.values()), 'per-method VMP bytecode coverage differs')
+    if vm:
+        for field in ('vmpStrict', 'vmpPost', 'selfCheckEntry'):
+            require(receipt.get(field) is True, 'missing VMP receipt: ' + field)
+        branches = receipt.get('nativeIndirectBranches', {})
+        require(isinstance(branches, dict) and vm <= branches.keys() and
+                all(type(n) is int and n >= 0 for n in branches.values()), 'per-method VMP post coverage differs')
+    require(type(receipt.get('segmentedData')) is bool, 'invalid segmented-data mode')
+    segmented = receipt['segmentedData']
+    require(receipt.get('bytecodeVerifiedInContainer') is segmented and
+            receipt.get('bytecodeVerifiedInLibrary') is (not segmented), 'VMP bytecode location differs')
+
+
+def check_requirements(selection, requirements):
+    """Match a frozen, explicit denominator; never derive requirements from selection counts."""
+    require(isinstance(requirements, dict) and requirements.get('schemaVersion') == 1 and
+            isinstance(requirements.get('methods'), list) and requirements['methods'], 'invalid critical method requirements')
+    selected = {row['method']: row for row in selection['methods']}
+    observed, rows = set(), []
+    for row in requirements['methods']:
+        require(isinstance(row, dict) and isinstance(row.get('method'), str) and row['method'] and
+                row.get('protection') in ('vmp', 'native-cse'), 'invalid critical method requirement')
+        key = (row['method'], row.get('entry'))
+        require(row.get('entry') is None or isinstance(row['entry'], str) and row['entry'],
+                'invalid inherited critical entry')
+        require(key not in observed, 'duplicate critical method requirement'); observed.add(key)
+        actual = selected.get(row['method'])
+        require(actual is not None and actual.get('protection') == row['protection'],
+                'critical method protection differs: ' + row['method'])
+        if row.get('entry') is not None:
+            require(selection.get('inherited', {}).get(row['entry']) == row['method'],
+                    'critical inherited target differs: ' + row['entry'])
+        rows.append({**row, 'symbol': actual['symbol'], 'bridge': actual['bridge'],
+                     'validationStatus': 'passed', 'scope': 'signed-apk-static'})
+    return rows
+
+
+def capability(enabled, status, scope):
+    return {'implemented': True, 'enabledInArtifact': enabled, 'validationStatus': status, 'scope': scope}
+
+
+def capabilities(receipt, critical):
+    result = {'finalApk': capability(True, 'passed', 'signed-apk-static')}
+    for name, enabled in (('vmp', receipt.get('vmpMethods', 0) > 0),
+                          ('nativeCse', receipt.get('nativeMethods', 0) > 0 or receipt.get('protectedStrings', 0) > 0),
+                          ('segmentedData', receipt.get('segmentedData') is True),
+                          ('apkSignatureVerification', receipt.get('apkSignatureVerification') is True)):
+        result[name] = capability(enabled, 'unverified' if enabled else 'not-applicable', 'device-runtime')
+    result['criticalMethodCoverage'] = capability(None if critical is None else True,
+                                                  'unverified' if critical is None else 'passed', 'signed-apk-static')
+    result['buildProvenance'] = capability(None, 'unverified', 'compiler-and-plugin-origin')
+    return result
 
 
 def check_lifetimes(receipt, segments):
@@ -45,6 +113,26 @@ def check_lifetimes(receipt, segments):
             observed[name] = mode
     require(all(observed.get(name) == mode for name, mode in policies.items()),
             'segment lifetime policy differs from protection receipt')
+
+
+def check_segment_coverage(receipt, segments):
+    sizes = {}
+    for row in segments['segments']:
+        if row['kind'] == 1:
+            require(type(row.get('bytes')) is int and row['bytes'] > 0 and
+                    re.fullmatch('[0-9a-f]{64}', row.get('resourceSha256', '')) and
+                    re.fullmatch('[0-9a-f]{64}', row.get('sha256', '')), 'invalid VM segment identity')
+            sizes[row['name']] = sizes.get(row['name'], 0) + row['bytes']
+    require(sizes == receipt['methodBytecodeBytes'], 'per-method segment bytecode coverage differs')
+
+
+def check_diagnostics(names):
+    diagnostics = {'selection.json', 'string-selection.json', 'symbols.txt', 'native-symbols.txt', 'string-symbols.txt',
+                   'protected.cpp', 'native.cpp', 'registration.cpp', 'protected.ll', 'protected.raw.ll', 'native.ll',
+                   'registration.ll', 'dex2c_runtime.ll', 'cse-runtime.ll', 'cse-runtime.raw.ll'}
+    for name in names:
+        require(name.replace('\\', '/').rsplit('/', 1)[-1].lower() not in diagnostics,
+                'packaged build diagnostic: ' + name)
 
 
 class Cursor:
@@ -117,7 +205,7 @@ def check_runtime_format(data, min_sdk):
                 require(kind == 0x7109871A and attr.u32() == 3 and attr.end() and 0xF05368C0 in blocks, 'signature scheme stripped')
 
 
-def verify(apks, native, generated, java, apksigner, min_sdk, report):
+def verify(apks, native, generated, java, apksigner, min_sdk, report, requirements=None):
     report.unlink(missing_ok=True)
     receipt_file, selection_file = native / 'protection.json', generated / 'selection.json'
     receipt_bytes = receipt_file.read_bytes()
@@ -127,18 +215,40 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report):
     methods = selection['methods']
     strings = selection.get('strings', {})
     string_count = strings.get('uniqueStrings', 0)
+    requirements_bytes = None if requirements is None else requirements.read_bytes()
+    critical = None if requirements_bytes is None else check_requirements(selection, json.loads(requirements_bytes))
     if not receipt['protectedMethods'] and not receipt.get('protectedStrings', 0):
         require(not methods and string_count == 0, 'zero protection receipt differs from selection')
         report.parent.mkdir(parents=True, exist_ok=True)
-        report.write_text(json.dumps({'schemaVersion': 1, 'protectedMethods': 0}) + '\n'); return
+        report.write_text(json.dumps({'schemaVersion': 1, 'protectedMethods': 0,
+            'validationStatus': 'not-applicable', 'scope': 'no-protection',
+            'protectionSha256': digest(receipt_bytes), 'selectionSha256': digest(selection_bytes),
+            'apks': [{'file': apk.name, 'sha256': digest(apk.read_bytes()), 'bytes': apk.stat().st_size} for apk in apks]}) + '\n'); return
     require(digest(selection_bytes) == receipt['selectionSha256'], 'selection receipt changed')
     require(len(methods) == receipt['protectedMethods'], 'method count differs')
     require(len({m['method'] for m in methods}) == len(methods) and
-            len({m['symbol'] for m in methods}) == len(methods), 'duplicate selected method or symbol')
+            len({m['symbol'] for m in methods}) == len(methods) and
+            len({m['bridge'] for m in methods}) == len(methods), 'duplicate selected method, symbol or bridge')
     require(all(m['protection'] in ('vmp', 'native-cse') for m in methods), 'unknown protection policy')
     require({m['symbol'] for m in methods if m['protection'] == 'vmp'} == set(receipt['symbols']), 'VMP manifest differs')
     require({m['symbol'] for m in methods if m['protection'] == 'native-cse'} == set(receipt['nativeSymbols']), 'native manifest differs')
+    check_method_receipt(receipt, selection)
+    configuration = receipt.get('configuration')
+    if configuration is not None:
+        require(isinstance(configuration, dict) and type(configuration.get('minSdk')) is int and
+                configuration.get('minSdk') == min_sdk and configuration.get('library') == selection['library'] and
+                configuration.get('segmentedData') is receipt.get('segmentedData') and
+                configuration.get('apkSignatureVerification') is receipt.get('apkSignatureVerification'), 'build configuration differs')
+    identity = receipt.get('compilerIdentity')
+    if identity is not None:
+        require(isinstance(identity, dict) and all(isinstance(identity.get(field), str) and
+                re.fullmatch('[0-9a-f]{64}', identity[field]) for field in
+                ('compilerSha256', 'ndkPropertiesSha256', 'linkerSha256', 'stripSha256', 'runtimeFingerprint')) and
+                isinstance(identity.get('version'), str) and identity['version'], 'invalid compiler identity')
     require(string_count == receipt.get('protectedStrings', 0), 'string count differs')
+    classes = generated / 'classes.jar'
+    if receipt.get('classesSha256') is not None:
+        require(digest(classes.read_bytes()) == receipt['classesSha256'], 'transformed classes changed')
     if string_count:
         string_selection = (generated / 'string-selection.json').read_bytes()
         require(digest(string_selection) == receipt['stringSelectionSha256'], 'string selection receipt changed')
@@ -148,39 +258,47 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report):
                 {s['index'] for s in strings['sites']} == set(range(string_count)), 'string index coverage differs')
         require(receipt.get('cseHardened') and receipt.get('certificateBound') and receipt.get('selfCheckEntry') and
                 receipt.get('vmpPost') and receipt.get('cseVmpMethods') == 2, 'string protection chain incomplete')
-        require(digest((generated / 'classes.jar').read_bytes()) == receipt['classesSha256'], 'transformed classes changed')
     library_path = 'lib/arm64-v8a/lib' + selection['library'] + '.so'
     asset_path = 'assets/' + selection['library'] + '.qseg'
     libraries, containers, outputs = 0, 0, []
     for apk in apks:
+        data = apk.read_bytes()
         result = subprocess.run([str(java), '-jar', str(apksigner), 'verify', '--verbose', '--print-certs',
                                  '--min-sdk-version', str(min_sdk), str(apk)], capture_output=True, text=True, encoding='utf-8', errors='replace')
         require(result.returncode == 0, 'apksigner rejected ' + apk.name + ': ' + result.stdout + result.stderr)
+        require(apk.read_bytes() == data, 'APK changed during signature verification: ' + apk.name)
         certificates = sorted(set(value.lower() for value in re.findall(
             r'^(?:Signer #\d+|V[0-9.]+ Signer(?: #\d+)?):? certificate SHA-256 digest: ([0-9a-fA-F]{64})$', result.stdout, re.M)))
         signer_counts = re.findall(r'^Number of signers: (\d+)\s*$', result.stdout, re.M)
         require(signer_counts == ['1'] and len(certificates) == 1 and certificates[0] == receipt['certificateSha256'], 'APK certificate differs from compiled identity')
-        data = apk.read_bytes()
         if receipt.get('apkSignatureVerification'):
             check_runtime_format(data, min_sdk)
         with zipfile.ZipFile(apk) as z:
             names = z.namelist(); require(len(names) == len(set(names)), 'duplicate ZIP entry')
+            check_diagnostics(names)
             for entry in z.infolist():
                 if entry.filename.startswith('lib/') and entry.filename.endswith('.so'):
                     binary = z.read(entry)
                     require(entry.filename.startswith('lib/arm64-v8a/') and len(binary) >= 20 and
                             binary[:7] == b'\x7fELF\x02\x01\x01' and struct.unpack_from('<H', binary, 18)[0] == 183,
                             'unsupported SO ABI: ' + entry.filename)
+            artifacts = []
             if library_path in names:
-                require(digest(z.read(library_path)) == receipt['librarySha256'], 'packaged SO differs')
+                binary = z.read(library_path)
+                require(digest(binary) == receipt['librarySha256'], 'packaged SO differs')
+                require(len(binary) == receipt['libraryBytes'], 'packaged SO size differs')
+                artifacts.append({'entry': library_path, 'sha256': digest(binary), 'bytes': len(binary)})
                 libraries += 1
             if asset_path in names:
                 require(receipt['segmentedData'] and digest(z.read(asset_path)) == receipt['containerSha256'], 'packaged QSEG differs')
+                require(z.getinfo(asset_path).file_size == receipt['containerBytes'], 'packaged QSEG size differs')
                 require(z.getinfo(asset_path).compress_type == zipfile.ZIP_STORED, 'QSEG must be STORED')
                 zip_entry_range(data, z.getinfo(asset_path), z.start_dir)
+                artifacts.append({'entry': asset_path, 'sha256': receipt['containerSha256'], 'bytes': z.getinfo(asset_path).file_size})
                 require(library_path in names, 'QSEG must share its SO APK'); containers += 1
             require(all(not name.endswith('.qseg') or name == asset_path for name in names), 'unexpected QSEG container')
-        outputs.append({'file': apk.name, 'sha256': digest(data), 'bytes': len(data), 'certificateSha256': certificates[0].lower()})
+        outputs.append({'file': apk.name, 'sha256': digest(data), 'bytes': len(data), 'certificateSha256': certificates[0].lower(),
+                        'artifacts': artifacts})
     require(libraries >= 1 and containers == (libraries if receipt['segmentedData'] else 0), 'missing SO or container')
     if receipt['segmentedData']:
         segment_bytes = (native / 'segments.json').read_bytes()
@@ -189,10 +307,24 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report):
         require(segments.get('schemaVersion') == 1 and segments.get('containerSha256') == receipt['containerSha256'] and
                 segments.get('containerBytes') == receipt['containerBytes'], 'segment receipt identity differs')
         check_lifetimes(receipt, segments)
-    verify_wrappers(apks, selection)
+        check_segment_coverage(receipt, segments)
+    verify_wrappers(apks, selection, critical or ())
+    evidence = {'selectionSha256': digest(selection_bytes), 'classesSha256': receipt.get('classesSha256'),
+                'librarySha256': receipt['librarySha256'], 'containerSha256': receipt.get('containerSha256'),
+                'segmentsReceiptSha256': receipt.get('segmentsReceiptSha256'),
+                'compilerIdentity': receipt.get('compilerIdentity'), 'configuration': configuration,
+                'missing': [name for name, value in (('compilerIdentity', identity), ('configuration', configuration),
+                            ('criticalMethodRequirements', requirements_bytes), ('pluginArtifactProvenance', None),
+                            ('deviceRuntimeValidation', None)) if value is None],
+                'verifierSha256': {name: digest(Path(__file__).with_name(name).read_bytes()) for name in
+                                   ('verify_dex2c_apk.py', 'dex2c_artifacts.py', 'seal_qseg.py', 'seal_cse.py')},
+                'apksignerSha256': digest(apksigner.read_bytes()), 'javaSha256': digest(java.read_bytes()),
+                'environment': {'python': platform.python_version(), 'host': platform.platform(), 'minSdk': min_sdk}}
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps({'schemaVersion': 1, 'protectedMethods': len(methods), 'protectedStrings': string_count, 'apkSignatureVerification': receipt.get('apkSignatureVerification', False),
-                                  'protectionSha256': digest(receipt_bytes), 'apks': outputs}, indent=2) + '\n')
+        'validationStatus': 'passed', 'scope': 'signed-apk-static', 'capabilities': capabilities(receipt, critical),
+        'criticalMethods': critical, 'requirementsSha256': None if requirements_bytes is None else digest(requirements_bytes),
+        'evidence': evidence, 'protectionSha256': digest(receipt_bytes), 'apks': outputs}, indent=2) + '\n')
 
 
 if __name__ == '__main__':
@@ -204,6 +336,7 @@ if __name__ == '__main__':
     parser.add_argument('--apksigner', type=Path, required=True)
     parser.add_argument('--min-sdk', type=int, required=True)
     parser.add_argument('--report', type=Path, required=True)
+    parser.add_argument('--requirements', type=Path, help='frozen schema 1 method/protection requirements, with optional inherited entry')
     parser.add_argument('--independent-apks', action='store_true', help='AGP APK outputs are alternative installable APKs, not a split install set')
     args = parser.parse_args()
     if args.independent_apks and len(args.apk) > 1:
@@ -212,9 +345,9 @@ if __name__ == '__main__':
         with tempfile.TemporaryDirectory(prefix='dex2c-apk-') as directory:
             result = Path(directory) / 'verified.json'
             for apk in args.apk:
-                verify([apk], args.native, args.generated, args.java, args.apksigner, args.min_sdk, result)
+                verify([apk], args.native, args.generated, args.java, args.apksigner, args.min_sdk, result, args.requirements)
                 outputs.append(json.loads(result.read_text()))
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps({'schemaVersion': 1, 'outputs': outputs}, indent=2) + '\n')
     else:
-        verify(args.apk, args.native, args.generated, args.java, args.apksigner, args.min_sdk, args.report)
+        verify(args.apk, args.native, args.generated, args.java, args.apksigner, args.min_sdk, args.report, args.requirements)

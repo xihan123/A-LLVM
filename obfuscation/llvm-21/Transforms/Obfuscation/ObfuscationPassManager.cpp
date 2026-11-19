@@ -159,6 +159,40 @@ EnableFakeMaps("irobf-fakemaps", cl::init(false), cl::NotHidden,
                cl::desc("Enable IR Fake /proc maps Injection."),
                cl::ZeroOrMore);
 
+static cl::opt<bool> StrictMainEntry(
+    "irobf-main-entry-strict", cl::init(false), cl::NotHidden,
+    cl::desc("Fail if requested main-only detections have no defined main in "
+             "this translation unit; does not enable any detection."));
+
+static bool checkMainOnlyOptions(Module &M) {
+  Function *Main = M.getFunction("main");
+  if (Main && !Main->isDeclaration())
+    return true;
+  const struct {
+    bool Enabled;
+    const char *Flag;
+  } Options[] = {{EnableIdaDetect, "-irobf-idadetect"},
+                 {EnableTimeDetect, "-irobf-timedetect"},
+                 {EnableRootDetect, "-irobf-rootdetect"},
+                 {EnableVmProtectDetect, "-irobf-vmdetect"},
+                 {EnableBanDump, "-irobf-bandump"},
+                 {EnableHideMaps, "-irobf-hidemaps"},
+                 {EnableFakeMaps, "-irobf-fakemaps"}};
+  bool Requested = false;
+  for (const auto &Option : Options) {
+    if (!Option.Enabled)
+      continue;
+    Requested = true;
+    errs() << "[A-LLVM] warning: " << M.getModuleIdentifier() << ": " << Option.Flag
+           << " skipped: no defined main in this translation unit (TU scope)\n";
+  }
+  if (Requested && StrictMainEntry)
+    report_fatal_error(Twine("-irobf-main-entry-strict: ") + M.getModuleIdentifier() +
+                       ": requested main-only detections have no defined main "
+                       "in this translation unit (TU scope)");
+  return false;
+}
+
 // 代码完整性自校验：对 VMP（-irobf-vmp）产出的每函数字节码 blob（gv_code_seg_<fn>）
 // 注入加载期哈希校验，检测到篡改即终止。只在有被虚拟化函数时生效，否则 no-op。
 static cl::opt<bool>
@@ -477,6 +511,7 @@ struct ObfuscationPassManager : public ModulePass {
   }
 
   bool runOnModule(Module &M) override {
+    const bool HasMain = checkMainOnlyOptions(M);
     validateSegmentedData(M);
     if (isSegmentedDataEnabled() && (!EnableStrHardened || !EnableCertBind))
       report_fatal_error("segmented-data requires hardened CSE and certificate binding");
@@ -484,9 +519,10 @@ struct ObfuscationPassManager : public ModulePass {
                   EnableIRFlattening || EnableIRStringEncryption ||
                   EnableStrPerKey || EnableStrBind || EnableStrHardened || EnableStrHardened ||
                   EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
-                  EnableVMProtect || StrictVMProtect || PostVMProtect || EnableIdaDetect || EnableTimeDetect ||
-                  EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
-                  EnableHideMaps || EnableFakeMaps || EnableSelfCheck || EnableSelfCheckEntry ||
+                  EnableVMProtect || StrictVMProtect || PostVMProtect ||
+                  (HasMain && (EnableIdaDetect || EnableTimeDetect || EnableRootDetect ||
+                               EnableVmProtectDetect || EnableBanDump || EnableHideMaps || EnableFakeMaps)) ||
+                  EnableSelfCheck || EnableSelfCheckEntry ||
                   EnableCertBind;
     if (hasObf)
       EnableIRObfuscation = true;
@@ -566,19 +602,19 @@ struct ObfuscationPassManager : public ModulePass {
     if (PostVMProtect || EnableIndirectBr || Options->indBrOpt()->isEnabled())
       add(llvm::createIndirectBranchPass(Options.get()));
 
-    if (EnableIdaDetect)
+    if (HasMain && EnableIdaDetect)
       add(llvm::createIdaDetectPass());
-    if (EnableTimeDetect)
+    if (HasMain && EnableTimeDetect)
       add(llvm::createTimeDetectPass());
-    if (EnableRootDetect)
+    if (HasMain && EnableRootDetect)
       add(llvm::createRootDetectPass());
-    if (EnableVmProtectDetect)
+    if (HasMain && EnableVmProtectDetect)
       add(llvm::createVmProtectDetectPass());
-    if (EnableBanDump)
+    if (HasMain && EnableBanDump)
       add(llvm::createBanDumpPass());
-    if (EnableHideMaps)
+    if (HasMain && EnableHideMaps)
       add(llvm::createHideMapsPass());
-    if (EnableFakeMaps)
+    if (HasMain && EnableFakeMaps)
       add(llvm::createFakeMapsPass());
 
     // 自校验最后：读取 VMP 产出的 gv_code_seg_<fn> 最终字节，注入加载期完整性校验。

@@ -31,8 +31,13 @@ class Dex:
             owner, proto, name = struct.unpack_from("<HHI", data, offset + 8 * i)
             self.methods.append(self.types[owner][1:-1] + "." + self.strings[name] + self.protos[proto])
         self.bodies = {}
+        self.superclasses = {}
         count, offset = self.words(96, 2)
         for i in range(count):
+            owner, _, superclass = self.words(offset + 32 * i, 3)
+            owner = self.types[owner][1:-1]
+            assert owner not in self.superclasses, 'duplicate DEX class: ' + owner
+            self.superclasses[owner] = None if superclass == 0xffffffff else self.types[superclass][1:-1]
             cursor = self.words(offset + 32 * i + 24)[0]
             if not cursor:
                 continue
@@ -50,6 +55,7 @@ class Dex:
                     access, cursor = self.uleb(cursor)
                     code, cursor = self.uleb(cursor)
                     method += delta
+                    assert self.methods[method] not in self.bodies, 'duplicate DEX method: ' + self.methods[method]
                     self.bodies[self.methods[method]] = (access, code)
 
     def words(self, offset, count=1):
@@ -75,7 +81,7 @@ class Dex:
         if synchronized:
             # D8 expands ACC_SYNCHRONIZED into monitor enter/exit and a catch-all rethrow.
             lengths.update({0x1d: 1, 0x1e: 1, 0x27: 1})
-        cursor, calls = 0, []
+        cursor, calls, returned = 0, [], False
         while cursor < count:
             opcode = instructions[cursor] & 255
             if synchronized and opcode == 0x1e and count - cursor == 6:
@@ -84,12 +90,19 @@ class Dex:
                 if (0x0e <= (ret & 0xff) <= 0x11 and unwind == unlock
                         and (caught & 0xff) == 0x0d and rethrow == ((caught & 0xff00) | 0x27)
                         and jump == 0xfd28):  # goto -3, back to unwind
+                    assert len(calls) == 2 and not returned, 'return precedes native forwarding calls'
                     return calls
             assert opcode in lengths, f"non-wrapper DEX opcode {opcode:#x}"
             if opcode in (0x71, 0x77):
+                assert not returned, 'unreachable native forwarding call after return'
                 calls.append(self.methods[instructions[cursor + 1]])
+            if 0x0e <= opcode <= 0x11:
+                assert len(calls) == 2 and not returned, 'return precedes native forwarding calls'
+                returned = True
+            if opcode == 0x27:
+                assert len(calls) == 2, 'throw precedes native forwarding calls'
             cursor += lengths[opcode]
-        assert cursor == count
+        assert cursor == count and returned, 'native forwarding wrapper has no return'
         return calls
 
     def calls(self, code):
@@ -133,13 +146,33 @@ class Dex:
         return calls
 
 
-def verify_wrappers(apk, selection):
+def verify_wrappers(apk, selection, requirements=()):
     if not __debug__:
         raise RuntimeError("DEX verification requires Python assertions; do not use -O")
     dexes = []
     for path in ([apk] if isinstance(apk, (str, Path)) else apk):
         with zipfile.ZipFile(path) as archive:
             dexes.extend(Dex(archive.read(name)) for name in archive.namelist() if name.endswith(".dex"))
+    for row in requirements:
+        if row.get('entry') is None:
+            continue
+        owner, separator, signature = row['entry'].partition('#')
+        assert owner and separator and signature and '#' not in signature, 'invalid inherited entry: ' + row['entry']
+        visited, resolved = set(), None
+        while owner is not None:
+            assert owner not in visited, 'cyclic final DEX superclass: ' + row['entry']
+            visited.add(owner)
+            classes = [dex for dex in dexes if owner in dex.superclasses]
+            assert len(classes) == 1, 'missing or duplicate final DEX entry class: ' + owner
+            dex = classes[0]
+            method = owner + '.' + signature
+            if method in dex.bodies:
+                access, _ = dex.bodies[method]
+                assert not access & (0x2 | 0x8 | 0x400), 'invalid final DEX inherited implementation: ' + method
+                resolved = method
+                break
+            owner = dex.superclasses[owner]
+        assert resolved == row['method'], 'final DEX inherited target differs: ' + row['entry']
     for item in selection["methods"]:
         matches = [(dex, dex.bodies[item["method"]]) for dex in dexes if item["method"] in dex.bodies]
         assert len(matches) == 1, item["method"]
@@ -148,7 +181,9 @@ def verify_wrappers(apk, selection):
         calls = dex.forwarding_calls(code, bool(access & 0x20000))
         assert len(calls) == 2 and calls[0] == selection["registrationCall"], calls
         assert calls[1] == item["bridge"], calls
-        native = next(d.bodies[item["bridge"]] for d in dexes if item["bridge"] in d.bodies)
+        bridges = [d.bodies[item["bridge"]] for d in dexes if item["bridge"] in d.bodies]
+        assert len(bridges) == 1, 'missing or duplicate native bridge: ' + item['bridge']
+        native = bridges[0]
         assert native[0] & 0x100 and native[1] == 0
     strings = selection.get('strings', {})
     if strings.get('uniqueStrings', 0):

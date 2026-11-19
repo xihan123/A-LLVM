@@ -49,7 +49,8 @@ class StringReceiptTest(unittest.TestCase):
                         'stringSelectionSha256': self.digest('string-selection.json'),
                         'classesSha256': self.digest('classes.jar'), 'cseHardened': True,
                         'certificateBound': True, 'selfCheckEntry': True, 'vmpPost': True, 'cseVmpMethods': 2,
-                        'segmentedData': False}
+                        'segmentedData': False, 'vmpMethods': 0, 'nativeMethods': 0,
+                        'bytecodeVerifiedInContainer': False, 'bytecodeVerifiedInLibrary': True}
 
     def write(self, name, value):
         (self.generated / name).write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
@@ -74,7 +75,19 @@ class StringReceiptTest(unittest.TestCase):
             self.check()
         self.write('selection.json', {'methods': []})
         self.check()
-        self.assertEqual(json.loads((self.root / 'report.json').read_bytes()), self.receipt)
+        result = json.loads((self.root / 'report.json').read_bytes())
+        self.assertEqual(result['protectedMethods'], 0)
+        self.assertEqual(result['validationStatus'], 'not-applicable')
+        self.assertEqual(result['selectionSha256'], self.digest('selection.json'))
+
+    def test_zero_receipt_records_final_apk_without_native_tools(self):
+        self.write('selection.json', {'methods': []})
+        self.receipt = {'schemaVersion': 1, 'protectedMethods': 0}
+        (self.native / 'protection.json').write_text(json.dumps(self.receipt))
+        apk = self.root / 'plain.apk'; apk.write_bytes(b'unprotected APK fixture')
+        verify([apk], self.native, self.generated, None, None, 26, self.root / 'report.json')
+        result = json.loads((self.root / 'report.json').read_bytes())
+        self.assertEqual(result['apks'], [{'file': apk.name, 'sha256': hashlib.sha256(apk.read_bytes()).hexdigest(), 'bytes': apk.stat().st_size}])
 
     def test_missing_protection_and_changed_classes_are_rejected(self):
         self.receipt['selfCheckEntry'] = False

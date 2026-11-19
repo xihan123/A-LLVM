@@ -5,6 +5,8 @@ import org.gradle.api.provider.SetProperty;
 import org.gradle.api.provider.Property;
 
 public abstract class Dex2cExtension {
+    /** Optional frozen critical method/protection manifest for final APK verification. */
+    public abstract RegularFileProperty getCoverageRequirementsFile();
     /** Opt-in native APK v2/v3 verification before protected code executes. */
     public abstract Property<Boolean> getVerifyApkSignature();
     /** Opt-in authenticated asset segments. Requires A-LLVM LLVM 21 with segmented-data support. */

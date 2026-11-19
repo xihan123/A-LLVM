@@ -244,6 +244,48 @@ Java 异常检查、catch 顺序和 finally 分支在受保护函数内，无 C+
 此处理增加原生分析成本，不提供不可去虚拟化保证。公开证书参与密钥绑定但不是秘密；
 掌握 VM 格式和运行时材料仍能恢复算法。构建目录内保留的 C++/IR 是诊断文件，不打入 APK。
 
+### 最终产物证据和关键清单（当前源码增量）
+
+`apk-verification.json` 保留 schema 1 和已有字段，新增逐 APK 的 SO/QSEG entry 摘要、
+selection/classes/segments 摘要、验证器及 Java/apksigner 摘要、主机环境和 `evidence.missing`。
+新编译的 schema 4/5 `protection.json` 还记录 `compilerIdentity`（实际 Clang、ld.lld、llvm-strip、
+NDK source.properties SHA-256 和已有 runtimeFingerprint）以及 minSdk、库名、开关和公共编译参数。
+这些是构建回执中的来源声明；插件包/源码提交和独立构建来源仍由交付方的 provenance 绑定，
+最终 APK 验证器不会将其自行提升为已验证来源。旧回执可继续重验，其缺失来源字段明确列为未验证。
+
+报告的 `capabilities` 为每项记录 `implemented`、`enabledInArtifact`、`validationStatus` 和 `scope`。
+`enabledInArtifact: null` 表示未提供足够声明，不能解读成启用。
+顶层 `passed` 仅限 `signed-apk-static`：签名、确切产物、逐方法回执和 DEX 包装一致。
+VMP/CSE/QSEG/完整 APK 验签在设备上的执行一律保持 `unverified`；编链、旧 fixture、缺测、
+本报告中的静态成功均不能代替设备语义/攻击/性能验收。零命中仍无需 Python、NDK 或签名工具，
+记录最终 APK 摘要并标为 `not-applicable`，不表示做过 APK 签名验证。
+
+应用已有业务关键清单时继续使用它。需要把冻结分母接到最终 DEX 验证时，可设置：
+
+```kotlin
+dex2c {
+    coverageRequirementsFile.set(layout.projectDirectory.file("config/critical-methods.json"))
+}
+```
+
+清单格式如下；`entry` 固定继承入口解析到哪个实际方法，并在最终 DEX 中沿 superclass 链
+重新检查最近实例实现，拒绝子类覆盖、入口类缺失或父类变化导致的分派偏移；省略则直接检查 `method`。
+`protection` 精确匹配 `vmp` 或 `native-cse`，不能用 native 回退满足 VMP 要求。
+
+```json
+{"schemaVersion":1,"methods":[
+  {"method":"com/example/BaseHook.startHook()V","protection":"vmp","entry":"com/example/ChildHook#startHook()V"},
+  {"method":"com/example/Callback.run()V","protection":"native-cse"}
+]}
+```
+
+独立最终分发任务设置 `VerifyApkTask.requirementsFile`；Python CLI 使用 `--requirements <文件>`。
+报告绑定清单 SHA-256，列出每个关键项的实际 symbol/bridge；缺失、重复或级别不符会拒绝产物，
+未传清单则 `criticalMethodCoverage` 为 `unverified`。所有选中方法仍检查唯一的原包装/native bridge，
+VMP 必须逐符号具有 strict/post/字节码回执，QSEG 的 VM 分段大小也必须逐符号对应。
+已知 generated selection、符号清单和 C++/IR 诊断文件若混入 APK 会被拒绝；这项文件名扫描
+不代表对任意改名调试材料或所有反射/metadata 泄露完成了审计。
+
 加载/注册的普通 JNI 错误仍抛异常；错误证书、篡改或 CSE 认证失败由 A-LLVM fail-closed 终止进程，
 不能由 Java Hook 的 `runCatching` 恢复。不要把错误证书产物部署到真实宿主。
 

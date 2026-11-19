@@ -56,8 +56,76 @@ class FinalApkTest(unittest.TestCase):
         original = (ARGS.fixtures / 'protected.apk').read_bytes()
         self.check()
         expected = json.loads((self.native / 'protection.json').read_text())['apkSignatureVerification']
-        self.assertEqual(expected, json.loads(self.report.read_text())['apkSignatureVerification'])
+        result = json.loads(self.report.read_text())
+        self.assertEqual(expected, result['apkSignatureVerification'])
+        self.assertEqual(result['scope'], 'signed-apk-static')
+        self.assertEqual(result['apks'][0]['sha256'], hashlib.sha256(original).hexdigest())
+        self.assertEqual(result['evidence']['selectionSha256'], hashlib.sha256((self.generated / 'selection.json').read_bytes()).hexdigest())
+        self.assertEqual(result['evidence']['apksignerSha256'], hashlib.sha256(ARGS.apksigner.read_bytes()).hexdigest())
+        self.assertEqual(result['capabilities']['criticalMethodCoverage']['validationStatus'], 'unverified')
+        self.assertEqual(result['capabilities']['buildProvenance']['validationStatus'], 'unverified')
+        for name in ('vmp', 'nativeCse', 'segmentedData', 'apkSignatureVerification'):
+            self.assertNotEqual(result['capabilities'][name]['validationStatus'], 'passed')
         self.assertEqual(original, (ARGS.fixtures / 'protected.apk').read_bytes())
+
+    def test_frozen_critical_requirement_reaches_the_final_wrapper(self):
+        selection = json.loads((self.generated / 'selection.json').read_bytes())
+        if not selection['methods']:
+            self.skipTest('requires protected methods')
+        method = selection['methods'][0]
+        requirement = {'schemaVersion': 1, 'methods': [{'method': method['method'], 'protection': method['protection']}]}
+        path = self.out / 'critical.json'; path.write_text(json.dumps(requirement))
+        verify([ARGS.fixtures / 'protected.apk'], self.native, self.generated, ARGS.java, ARGS.apksigner, 26, self.report, path)
+        result = json.loads(self.report.read_bytes())
+        self.assertEqual(result['requirementsSha256'], hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual(result['criticalMethods'][0]['symbol'], method['symbol'])
+        self.assertEqual(result['criticalMethods'][0]['bridge'], method['bridge'])
+        self.assertEqual(result['capabilities']['criticalMethodCoverage']['validationStatus'], 'passed')
+        requirement['methods'][0]['protection'] = 'native-cse' if method['protection'] == 'vmp' else 'vmp'
+        path.write_text(json.dumps(requirement))
+        with self.assertRaisesRegex(ValueError, 'critical method protection differs'):
+            verify([ARGS.fixtures / 'protected.apk'], self.native, self.generated, ARGS.java, ARGS.apksigner, 26, self.report, path)
+        self.assertFalse(self.report.exists())
+
+    def test_legacy_toolchain_identity_is_explicitly_missing(self):
+        path = self.native / 'protection.json'
+        receipt = json.loads(path.read_bytes())
+        receipt.pop('compilerIdentity', None); receipt.pop('configuration', None)
+        path.write_text(json.dumps(receipt))
+        self.check()
+        result = json.loads(self.report.read_bytes())
+        self.assertIn('compilerIdentity', result['evidence']['missing'])
+        self.assertIn('configuration', result['evidence']['missing'])
+        self.assertEqual(result['capabilities']['buildProvenance']['validationStatus'], 'unverified')
+
+    def test_compiler_identity_and_build_configuration_are_validated(self):
+        path = self.native / 'protection.json'
+        receipt = json.loads(path.read_bytes())
+        receipt['compilerIdentity'] = {field: '0' * 64 for field in
+            ('compilerSha256', 'ndkPropertiesSha256', 'linkerSha256', 'stripSha256', 'runtimeFingerprint')}
+        receipt['compilerIdentity']['version'] = 'clang version 21 fixture'
+        selection = json.loads((self.generated / 'selection.json').read_bytes())
+        receipt['configuration'] = {'minSdk': 26, 'library': selection['library'],
+            'segmentedData': receipt['segmentedData'], 'apkSignatureVerification': receipt.get('apkSignatureVerification', False)}
+        path.write_text(json.dumps(receipt)); self.check()
+        receipt['configuration']['minSdk'] = 28
+        path.write_text(json.dumps(receipt))
+        with self.assertRaisesRegex(ValueError, 'build configuration differs'):
+            self.check()
+        receipt['configuration']['minSdk'] = 26
+        receipt['compilerIdentity']['compilerSha256'] = 'not a digest'
+        path.write_text(json.dumps(receipt))
+        with self.assertRaisesRegex(ValueError, 'invalid compiler identity'):
+            self.check()
+
+    def test_transformed_classes_are_bound_for_method_only_builds_too(self):
+        path = self.generated / 'classes.jar'
+        receipt = json.loads((self.native / 'protection.json').read_bytes())
+        if not receipt.get('classesSha256'):
+            self.skipTest('legacy fixture has no transformed class digest')
+        path.write_bytes(path.read_bytes() + b'changed')
+        with self.assertRaisesRegex(ValueError, 'transformed classes changed'):
+            self.check()
 
     def test_wrong_signer_removes_stale_success(self):
         self.check()
@@ -109,6 +177,11 @@ class FinalApkTest(unittest.TestCase):
             apk = self.repack(lambda name, data: data, [(entry, binary)])
             with self.subTest(entry=entry), self.assertRaisesRegex(ValueError, message):
                 self.check(apk)
+
+    def test_signed_build_diagnostic_is_rejected(self):
+        apk = self.repack(lambda name, data: data, [('assets/debug/selection.json', b'{"methods":[]}')])
+        with self.assertRaisesRegex(ValueError, 'packaged build diagnostic'):
+            self.check(apk)
 
     def test_signed_wrong_machine_in_arm64_path_is_rejected(self):
         def change(name, data):

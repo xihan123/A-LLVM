@@ -194,6 +194,10 @@ public final class NativeCompiler {
                 +",\"stringSymbols\":["+String.join(",",stringSymbols.stream().map(Transformer::json).toList())+"]"
                 +",\"stringSelectionSha256\":"+(stringCount==0?"null":Transformer.json(hash(generated.resolve("string-selection.json"))))
                 +",\"classesSha256\":"+Transformer.json(hash(generated.resolve("classes.jar")))
+                +",\"compilerIdentity\":"+compilerIdentity(compiler,ndk,prebuilt,version,runtimeKey)
+                +",\"configuration\":{\"minSdk\":"+minSdk+",\"library\":"+Transformer.json(library)
+                +",\"segmentedData\":"+segmented+",\"apkSignatureVerification\":"+verifyApkSignature
+                +",\"commonArguments\":["+String.join(",",common.stream().map(Transformer::json).toList())+"]}"
                 +",\"apkSignatureVerification\":"+verifyApkSignature
                 +",\"cseVmpMethods\":"+CSE_VMP_SYMBOLS.size()+",\"cseRuntimeIrSha256\":"+Transformer.json(cseIrHash)
                 +",\"cseVmpIndirectBranches\":{"+String.join(",",cseBranches.entrySet().stream().map(e->Transformer.json(e.getKey())+":"+e.getValue()).toList())+"}"
@@ -451,6 +455,14 @@ public final class NativeCompiler {
         }
     }
     private static List<String> command(List<String> prefix,String... arguments) {List<String> result=new ArrayList<>(prefix);result.addAll(List.of(arguments));return result;}
+    static String compilerIdentity(Path compiler,Path ndk,Path prebuilt,String version,String runtimeKey) throws Exception {
+        String suffix=System.getProperty("os.name").startsWith("Windows")?".exe":"";
+        return "{\"compilerSha256\":"+Transformer.json(hash(compiler))+",\"version\":"+Transformer.json(version.strip())
+                +",\"ndkPropertiesSha256\":"+Transformer.json(hash(ndk.resolve("source.properties")))
+                +",\"linkerSha256\":"+Transformer.json(hash(prebuilt.resolve("bin/ld.lld"+suffix)))
+                +",\"stripSha256\":"+Transformer.json(hash(prebuilt.resolve("bin/llvm-strip"+suffix)))
+                +",\"runtimeFingerprint\":"+Transformer.json(runtimeKey)+"}";
+    }
     static String runtimeFingerprint(Path runtime,Path compiler,Path ndk,Path resource,Path certificate) throws Exception {
         MessageDigest digest=MessageDigest.getInstance("SHA-256");
         for(Path file:List.of(compiler,ndk.resolve("source.properties"),certificate))digest.update(hash(file).getBytes(java.nio.charset.StandardCharsets.UTF_8));

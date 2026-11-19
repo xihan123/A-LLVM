@@ -1,10 +1,29 @@
 package io.github.xihan123.dex2c.core;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import java.nio.file.*;
 import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ReceiptTest {
+    @TempDir Path directory;
+    @Test void compilerIdentityTracksActualCompilerNdkLinkerAndStripBytes() throws Exception {
+        Path ndk=Files.createDirectories(directory.resolve("ndk"));
+        Path prebuilt=Files.createDirectories(directory.resolve("prebuilt/bin")).getParent();
+        String suffix=System.getProperty("os.name").startsWith("Windows")?".exe":"";
+        var inputs=List.of(directory.resolve("clang"),ndk.resolve("source.properties"),
+                prebuilt.resolve("bin/ld.lld"+suffix),prebuilt.resolve("bin/llvm-strip"+suffix));
+        for(Path file:inputs)Files.writeString(file,"first");
+        String original=NativeCompiler.compilerIdentity(inputs.getFirst(),ndk,prebuilt,"clang version 21\n","runtime-fingerprint");
+        assertTrue(original.contains("\"version\":\"clang version 21\""));
+        assertTrue(original.contains("\"runtimeFingerprint\":\"runtime-fingerprint\""));
+        for(Path file:inputs) {
+            Files.writeString(file,"changed");
+            assertNotEquals(original,NativeCompiler.compilerIdentity(inputs.getFirst(),ndk,prebuilt,"clang version 21\n","runtime-fingerprint"));
+            Files.writeString(file,"first");
+        }
+    }
     @Test void cryptoCoresRequireVmBodiesAndIntegrityWithoutBootstrapDependencies() {
         StringBuilder ir=new StringBuilder();
         int id=0;

@@ -93,6 +93,7 @@ Transforms/Obfuscation/
 | `-irobf-bandump` | 反内存转储注入 |
 | `-irobf-hidemaps` | `/proc/self/maps` 隐藏注入 |
 | `-irobf-fakemaps` | 伪造 `/proc` maps 注入 |
+| `-irobf-main-entry-strict` | 当前 TU 请求上述七种 main-only 检测但没有定义 `main` 时编译失败；本开关不启用检测 |
 | `-irobf-selfcheck` | 代码完整性自校验：校验 VMP 字节码 blob，篡改即加载期终止(SIGKILL)（需 `-irobf-vmp`） |
 | `-irobf-selfcheck-entry` | 每次 VM 入口复验当前字节码，并将实测哈希折入密钥（需 `-irobf-selfcheck` 和 `-irobf-vmp`） |
 | `-irobf-cert-bind` | APK 签名证书绑定：把运行期 APK 签名证书 SHA-256 派生的 128-bit 混合值折进 CSE 字符串 pepper 与 VMP 函数密钥；产物仅在被 `-irobf-cert-file` 指定证书签名时才正确运行（错签名/重打包→乱码，非分支、fail-closed）。字符串绑定需配合 `-irobf-cse`、VMP 密钥绑定需配合 `-irobf-vmp`；运行期读证书需 app 侧链接 `runtime/ndkp_apkcert.cpp`（见该目录 README） |
@@ -106,6 +107,22 @@ Transforms/Obfuscation/
 
 没有开关时不得执行 IR 变换。函数注解定义在 `include/ndkp.h`；当前注解仍需配合对应总开关。（`NDKP_STR_BIND` 会在模块级开启 bind 模式，但仍需 `-irobf-cse` 基础开关与 `-irobf-cse-bind-package=<包名>`。）
 
+### main-only 检测的 TU 范围（p19 开发态）
+
+`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`
+只在当前编译单元定义了 `main` 时注入。没有 `main` 或只有声明时，每个请求的开关都会输出
+包含模块标识、`skipped`、`no defined main` 和 `TU scope` 的 warning；对应检测不注入。
+无 `main` 的普通 JNI 共享库不会自动改为在 `JNI_OnLoad` 或构造器运行这些检测。
+
+需要拒绝这种局部跳过时，额外使用 `-mllvm -irobf-main-entry-strict`。它只约束当前 TU：
+另一源文件定义了 `main` 也不能满足辅助 TU 的 strict 要求，所以应按源文件配置检测开关。
+单独开启 strict 不启用任何检测，不改变 IR。仅请求这七种检测而当前 TU 无 `main` 时，
+除诊断外保持 IR 不变；其他已请求的 CSE、VMP、证书绑定和自校验按各自规则处理。
+该诊断不能证明整个最终 SO 或进程是否具有其他保护。
+
+双 major 回归和可选的安全无 `main` 共享库设备语义测试见
+[`tests/main-entry/README.md`](../tests/main-entry/README.md)。p19 当前为开发候选，未发布。
+
 ### Release 去指纹（`-irobf-debug` 关闭时，默认）
 
 未开 `-irobf-debug` 时，所有混淆 pass 跑完后对整模块做一次去指纹，消除易被分析者用来识别工具链/定位 VM 的特征：
@@ -116,7 +133,7 @@ Transforms/Obfuscation/
 
 > **关于 `.comment` 的彻底清零**：编译期只能去掉**本模块**的贡献。最终 `.so` 的 `.comment` 还来自官方 NDK 的 CRT/libc++/compiler-rt 目标与 lld，工具链把链接后的 `.so` 直接交给用户、没有 link 后处理入口，故无法在 clang 内清零。需要时在 link 后自行执行 `llvm-strip -R .comment <输出.so>`（该工具已随 NDK 提供）。注意本项目的 clang 版本串与官方 NDK clang 相同，`.comment` **并非**混淆工具链的唯一指纹，此项为纵深防御。
 
-VMP 执行状态及解释器可变缓存按线程隔离，内嵌只读字节码保持共享。p9 起每次调用使用独立栈上数据帧，TLS 保存当前帧指针，避免嵌套调用恢复旧快照时撤销合法出参写入；原生异常在恢复帧后重抛。运行语义变更须重新跑 `bash tests/vmp/roundtrip.sh <ndk> <host> <adb-serial>` 和 `python tests/vmp/call_frames.py --ndk <ndk> --serial <adb-serial>`（见 [p9 验证与边界](../docs/vmp-call-frames-p9.md)）。即使输入为 C，VMP 产物也需用 `clang++` 链接或等效配置 libc++，因为解释器使用 C++ 异常辅助函数。检测类 pass（`-irobf-{idadetect,timedetect,rootdetect,vmdetect,bandump,hidemaps,fakemaps}`）注入到 `main`；构建为可执行文件时生效，构建为 `.so`（无 `main`）时自动跳过。
+VMP 执行状态及解释器可变缓存按线程隔离，内嵌只读字节码保持共享。p9 起每次调用使用独立栈上数据帧，TLS 保存当前帧指针，避免嵌套调用恢复旧快照时撤销合法出参写入；原生异常在恢复帧后重抛。运行语义变更须重新跑 `bash tests/vmp/roundtrip.sh <ndk> <host> <adb-serial>` 和 `python tests/vmp/call_frames.py --ndk <ndk> --serial <adb-serial>`（见 [p9 验证与边界](../docs/vmp-call-frames-p9.md)）。即使输入为 C，VMP 产物也需用 `clang++` 链接或等效配置 libc++，因为解释器使用 C++ 异常辅助函数。上述七种检测类 pass 的作用域见前文 main-only TU 说明。
 
 AArch64 后端混淆和对应的 Driver 参数尚未实现。
 
