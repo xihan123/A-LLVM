@@ -56,8 +56,8 @@ def select_resources(receipt, resources, page_size):
     return [target, *pressure]
 
 
-def descriptor_address(image, identity, size):
-    ref = bytes.fromhex(identity) + struct.pack("<II", size, 1)
+def descriptor_address(image, identity, size, kind=1):
+    ref = bytes.fromhex(identity) + struct.pack("<II", size, kind)
     offset = image.find(ref)
     if offset < 0 or image.find(ref, offset + 1) >= 0:
         raise ValueError("expected one exact VM descriptor: " + identity)
@@ -67,7 +67,8 @@ def descriptor_address(image, identity, size):
     raise ValueError("VM descriptor is not fully inside RX PT_LOAD")
 
 
-def bind_executable(linked, library, symbols):
+def bind_executable(linked, library, symbols, required_symbols=(
+        "ndkp_qseg_acquire_v1", "ndkp_qseg_release_v1", "ndkp_qseg_stats_v1", "JNI_OnLoad")):
     """Hidden offsets are usable only when every final RX load byte matches."""
     def rx(image):
         return [(va, size, image[offset:offset+size])
@@ -75,8 +76,7 @@ def bind_executable(linked, library, symbols):
     original, final = rx(linked), rx(library)
     if not final or original != final:
         raise ValueError("linked.so and final SO executable load bytes differ")
-    names = ("ndkp_qseg_acquire_v1", "ndkp_qseg_release_v1", "ndkp_qseg_stats_v1", "JNI_OnLoad")
-    for name in names:
+    for name in required_symbols:
         if name not in symbols or not any(va <= symbols[name] < va + size for va, size, _ in final):
             raise ValueError("missing or non-RX probe symbol: " + name)
     return [{"address": va, "bytes": size, "sha256": sha256(raw)} for va, size, raw in final]
@@ -105,6 +105,25 @@ def write_header(path, resources, spans, symbols, page_size):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def load_authenticated_apk(apk, native, java, apksigner, output):
+    """Reuse the ordinary signature, wrapper and final-byte authentication checks."""
+    verify([apk], native, native.parent / "generated", java,
+           apksigner, 26, output / "apk-verification.json")
+    protection = json.loads((native / "protection.json").read_text(encoding="utf-8"))
+    if (protection.get("qsegLifetimeAbi") != 1 or protection.get("idlePlaintextBudgetBytes") != IDLE_BUDGET or
+            protection.get("apkSignatureVerification") is not True):
+        raise ValueError("probe requires production APK signature verification and lifetime ABI 1")
+    certificate = native / "signing-cert.der"
+    audited = audit(apk, native / "protection.json", native / "segments.json", certificate)
+    with zipfile.ZipFile(apk) as archive:
+        library_entry = next(item["name"] for item in audited["libraries"] if item["sha256"] == protection["librarySha256"])
+        library = archive.read(library_entry)
+        _, offset = qseg.locate_image(library)
+        asset = library[offset+256:offset+384].split(b"\0", 1)[0].decode("utf-8")
+        raw_resources = qseg.unpack(library, archive.read(asset), certificate.read_bytes())
+    return protection, audited, library_entry, library, raw_resources
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ndk", type=Path, required=True)
@@ -120,21 +139,8 @@ def main():
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("--output must be new or empty; preserve each run's evidence separately")
     args.output.mkdir(parents=True, exist_ok=True)
-    # The ordinary verifier checks real APK signatures and selection/wrapper identity.
-    verify([args.apk], args.native, args.native.parent / "generated", args.java,
-           args.apksigner, 26, args.output / "apk-verification.json")
-    protection = json.loads((args.native / "protection.json").read_text(encoding="utf-8"))
-    if (protection.get("qsegLifetimeAbi") != 1 or protection.get("idlePlaintextBudgetBytes") != IDLE_BUDGET or
-            protection.get("apkSignatureVerification") is not True):
-        raise ValueError("probe requires production APK signature verification and lifetime ABI 1")
-    certificate = args.native / "signing-cert.der"
-    audited = audit(args.apk, args.native / "protection.json", args.native / "segments.json", certificate)
-    with zipfile.ZipFile(args.apk) as archive:
-        library_entry = next(item["name"] for item in audited["libraries"] if item["sha256"] == protection["librarySha256"])
-        library = archive.read(library_entry)
-        _, offset = qseg.locate_image(library)
-        asset = library[offset+256:offset+384].split(b"\0", 1)[0].decode("utf-8")
-        raw_resources = qseg.unpack(library, archive.read(asset), certificate.read_bytes())
+    protection, audited, library_entry, library, raw_resources = load_authenticated_apk(
+        args.apk, args.native, args.java, args.apksigner, args.output)
     adb = [str(args.adb), "-P", str(args.server_port), "-s", args.serial]
 
     def run(*command):
