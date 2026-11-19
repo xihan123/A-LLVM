@@ -177,3 +177,66 @@ Host regression tests (no Clang, Gradle or device):
 ```powershell
 & $python -m unittest discover -s tests/dex2c -p test_runtime_cache.py
 ```
+
+# Device negative-case evidence protocol
+
+`device.py` still builds/signs its APK variants and runs the baseline/protected
+semantic checks against one explicit serial. Run it only against a disposable
+copy of a frozen fixture and its fixed signing key. `--report <path>` selects an
+external evidence file; the default remains `<fixtures>/device-results.json`.
+The selected report is replaced with the current run's `running` record before
+setup starts, then atomically updated after each result and negative-case stage.
+A failed run has `status: failed` and retains completed cases plus the failing
+attempt; an interrupted process may leave `running`, which is not a pass.
+Preserve prior evidence at a different path before invoking this script.
+
+Schema version 2 retains the existing `serial`, `sdk`, `pageSize` and `results`
+fields on a successful run. Negative rows retain `mode`, `rejected` and
+`exitCode`, and add `expectedCodes`, the exact APK path/SHA256/byte size, UTC
+timestamps, the local ADB argv, remote child argv/environment and separate push
+and execution evidence. `returnCode` in each stage is the local ADB process
+status; negative-row `exitCode` is the child status from the validated shell
+protocol. Each stream has readable UTF-8 replacement text and a lossless Base64
+copy (`stdoutBase64` / `stderrBase64`). Timeouts retain available partial bytes
+and no invented return status. ADB transport, local launch, remote launch,
+protocol, unexpected-exit and business-stdout failures cannot set `rejected`.
+
+The negative shell command uses an invocation-specific token on stderr. It
+guards the absolute `/system/bin/app_process`, emits `BEGIN`, installs an EXIT
+trap in the same child subshell as `exec`, and reports the child's status with
+`EXIT:<code>` from its parent. A failed exec emits `LAUNCH_FAILED`; a successful
+exec replaces the shell and its trap. Acceptance requires local ADB status 0,
+one ordered `BEGIN`/`EXIT` pair, no launch-failure marker or recognized launcher
+diagnostic, byte-empty stdout and a child status in that case's `expectedCodes`.
+Whitespace-only stdout also fails. Cleanup runs in `finally`, records failures
+without replacing the primary error, and removes only exact uploaded paths in
+this invocation's UUID directory before trying `rmdir` on that directory.
+
+All 14 segmented/QSEG negative cases require **127**. For nonsegmented fixtures,
+`tampered-vm`, `tampered-cse-vm` and `tampered-code` allow **127 or 137**, because
+the existing self-check/VM path tries SIGKILL before its exit-group fallback.
+`wrong-signer` allows **127** when APK signature verification is enabled, or
+**127 or 137** when it is disabled. `tampered-cse-tag`,
+`tampered-cse-ciphertext` and `cross-build-cse-records` require **127**. No case
+accepts arbitrary nonzero status or 139. These contracts follow the existing
+QSEG/CSE/APK-verifier exit-group paths and raw-syscall self-check fallback; they
+do not change the APK construction or runtime. The nonsegmented exit contracts
+have host regression coverage but were not device-validated in this change.
+
+`expected-exit-signature` means exactly the observed command/stream/status
+signature. It does not uniquely establish a native rejection cause: a process
+can exit 127 after successful exec for another reason. Keep the raw evidence,
+positive semantic results and fixture identities together, and do not infer a
+new root cause from older reports that accepted any nonzero status.
+
+Pure host regression checks, including malformed markers, ADB failure,
+stdout contamination, partial-byte timeouts and report/cleanup failure paths:
+
+```powershell
+& $python -B -m unittest discover -s tests/dex2c -p test_device.py -v
+& $python -B -O -m unittest discover -s tests/dex2c -p test_device.py -v
+```
+
+The exec/trap control also runs when a POSIX `sh` is on PATH; otherwise that
+single control is explicitly skipped. Host checks do not replace Android mksh,
+ADB transport or real-device validation of all generated APK cases.

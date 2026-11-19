@@ -1,8 +1,12 @@
 """Run baseline/native VMP DEX under ART with CheckJNI on one explicit device."""
 import argparse
+import base64
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -19,21 +23,146 @@ def run(command, timeout=300):
     return result.stdout.strip()
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sdk", required=True, type=Path)
-    parser.add_argument("--java", required=True, type=Path)
-    parser.add_argument("--serial", required=True)
-    parser.add_argument("--server-port", type=int, default=5037)
-    parser.add_argument("--fixtures", required=True, type=Path)
-    parser.add_argument("--native-reference", type=Path)
-    parser.add_argument("--ndk", type=Path, help="Build an additional unprotected JNI reference with this NDK")
-    parser.add_argument("--clang", type=Path, help="Optional Clang for the unprotected reference")
-    parser.add_argument("--trace", action="store_true")
-    args = parser.parse_args()
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def save_report(path, report):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + "." + report["runId"] + ".tmp")
+    temporary.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def streams(stdout, stderr):
+    return {"stdout": stdout.decode("utf-8", errors="replace"),
+            "stderr": stderr.decode("utf-8", errors="replace"),
+            "stdoutBase64": base64.b64encode(stdout).decode("ascii"),
+            "stderrBase64": base64.b64encode(stderr).decode("ascii")}
+
+
+def expected_codes(label, segmented, verified):
+    # Nonsegmented self-check / VM termination tries SIGKILL before exit_group(127).
+    if not segmented and (label in {"tampered-vm", "tampered-cse-vm", "tampered-code"} or
+                          (label == "wrong-signer" and not verified)):
+        return [127, 137]
+    return [127]
+
+
+def negative_command(device, target, token):
+    child = ["/system/bin/app_process", "-Xcheck:jni",
+             "-Djava.library.path=" + target + "!/lib/arm64-v8a", "/system/bin", "sample.Run"]
+    launch_failed = "printf '%s\\n' " + shlex.quote(token + ":LAUNCH_FAILED") + " >&2"
+    # The EXIT trap must be installed in the same subshell as exec. Successful exec replaces it.
+    shell = ("if [ ! -x /system/bin/app_process ]; then " + launch_failed + "; exit 0; fi\n" +
+             "printf '%s\\n' " + shlex.quote(token + ":BEGIN") + " >&2\n" +
+             "( trap " + shlex.quote(launch_failed) + " 0\n" +
+             "  CLASSPATH=" + shlex.quote(target) + " exec " + shlex.join(child) + "\n)\n" +
+             "child_status=$?\nprintf '\\n%s:%s\\n' " + shlex.quote(token + ":EXIT") +
+             " \"$child_status\" >&2\nexit 0")
+    return [str(value) for value in [*device, "shell", shell]], child
+
+
+def negative_status(execution, token, codes):
+    if execution["returnCode"] != 0:
+        return "transport-error", None
+    lines = execution["stderr"].splitlines()
+    markers = [line for line in lines if line.startswith(token + ":")]
+    endings = [re.fullmatch(re.escape(token) + r":EXIT:(\d+)", line) for line in markers]
+    exits = [int(match[1]) for match in endings if match]
+    actual = exits[0] if len(exits) == 1 else None
+    if token + ":LAUNCH_FAILED" in markers or re.search(
+            r"(?im)(?:not found|no such file or directory|permission denied|exec format error|"
+            r"cannot link executable|cannot execute|inaccessible or not found)", execution["stderr"]):
+        return "launch-error", actual
+    if actual is None or not 0 <= actual <= 255 or markers != [token + ":BEGIN", token + ":EXIT:" + str(actual)]:
+        return "protocol-error", actual
+    if execution["stdoutBase64"]:
+        return "business-stdout", actual
+    return ("expected-exit-signature" if actual in codes else "unexpected-exit"), actual
+
+
+def negative_case(device, file, target, codes, report, report_path):
+    token = "DEX2C_" + uuid.uuid4().hex
+    command, child = negative_command(device, target, token)
+    row = {"mode": file.stem, "rejected": False, "status": "preparing", "expectedCodes": codes,
+           "exitCode": None, "startedAt": utc_now(), "protocolToken": token,
+           "childArgv": child, "environment": {"CLASSPATH": target}, "remoteApk": target,
+           "artifact": {"path": str(file.resolve())}, "command": command,
+           "evidenceScope": "expected exit signature only; does not identify a unique native failure cause"}
+    report["results"].append(row)
+    save_report(report_path, report)
+    try:
+        raw = file.read_bytes()
+        row["artifact"].update(sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw))
+        report["pushed"].append(target)  # A failed push may still leave this exact file behind.
+        for stage, argv, timeout in (("push", [str(value) for value in [*device, "push", file, target]], 300),
+                                     ("execution", command, 90)):
+            evidence = {"command": argv, "startedAt": utc_now(), "returnCode": None,
+                        "status": "running", **streams(b"", b"")}
+            row[stage] = evidence
+            row["status"] = stage
+            save_report(report_path, report)
+            start = time.monotonic()
+            try:
+                process = subprocess.run(argv, capture_output=True, timeout=timeout)
+                evidence.update(returnCode=process.returncode, status="completed",
+                                **streams(process.stdout, process.stderr))
+            except subprocess.TimeoutExpired as error:
+                evidence.update(status="timeout", timeoutSeconds=timeout,
+                                **streams(error.stdout or b"", error.stderr or b""))
+                row["status"] = "timeout"
+                raise RuntimeError("negative " + file.stem + " " + stage + " timed out") from error
+            except OSError as error:
+                evidence.update(status="launch-error", error=str(error))
+                row["status"] = "launch-error"
+                raise
+            finally:
+                evidence.update(finishedAt=utc_now(), seconds=round(time.monotonic() - start, 6))
+                save_report(report_path, report)
+            if stage == "push" and process.returncode:
+                row["status"] = "push-error"
+                raise RuntimeError("negative APK push failed: " + file.stem)
+        row["status"], row["exitCode"] = negative_status(row["execution"], token, codes)
+        row["rejected"] = row["status"] == "expected-exit-signature"
+        if not row["rejected"]:
+            raise RuntimeError("negative " + file.stem + " failed: " + row["status"])
+    except BaseException as error:
+        row["error"] = {"type": type(error).__name__, "message": str(error)}
+        if row["status"] == "preparing":
+            row["status"] = "artifact-error"
+        raise
+    finally:
+        row["finishedAt"] = utc_now()
+        save_report(report_path, report)
+
+
+def cleanup_remote(report):
+    results = []
+    if "remote" not in report:
+        return results
+    device, remote = report["deviceCommand"], report["remote"]
+    commands = ([[*device, "shell", "rm", "-f", *report["pushed"]]] if report["pushed"] else [])
+    commands.append([*device, "shell", "rmdir", remote])
+    for command in commands:
+        evidence = {"command": command, "startedAt": utc_now(), "returnCode": None, **streams(b"", b"")}
+        try:
+            process = subprocess.run(command, capture_output=True, timeout=60)
+            evidence.update(returnCode=process.returncode, status="completed" if process.returncode == 0 else "failed",
+                            **streams(process.stdout, process.stderr))
+        except subprocess.TimeoutExpired as error:
+            evidence.update(status="timeout", **streams(error.stdout or b"", error.stderr or b""))
+        except OSError as error:
+            evidence.update(status="launch-error", error=str(error))
+        evidence["finishedAt"] = utc_now()
+        results.append(evidence)
+    return results
+
+
+def exercise(args, report, report_path):
     if args.ndk:
         if args.native_reference:
-            parser.error("choose --ndk or --native-reference")
+            raise ValueError("choose --ndk or --native-reference")
         host = "windows-x86_64" if os.name == "nt" else "linux-x86_64"
         suffix = ".exe" if os.name == "nt" else ""
         base = args.ndk / "toolchains/llvm/prebuilt" / host
@@ -51,6 +180,8 @@ def main():
         adb = adb.with_suffix("")
     device = [adb, "-P", str(args.server_port), "-s", args.serial]
     remote = "/data/local/tmp/dex2c-" + uuid.uuid4().hex
+    report.update(deviceCommand=[str(value) for value in device], remote=remote, pushed=[])
+    save_report(report_path, report)
     manifest = json.loads((args.fixtures / "inputs.json").read_text())
     compiler = args.sdk / "build-tools/37.0.0/lib/d8.jar"
     platform = args.sdk / "platforms/android-37.0/android.jar"
@@ -87,12 +218,14 @@ def main():
     library=(args.fixtures / "native/jniLibs/arm64-v8a/libdex2c_semantics.so").read_bytes()
     protected_apk=signed_apk("protected",library,args.fixtures / "test.jks")
     run([*device, "shell", "mkdir", remote])
-    pushed = []
+    pushed = report["pushed"]
     for file in (args.fixtures / "baseline.zip", protected_apk, args.fixtures / "protected.zip",
                  args.fixtures / "native/jniLibs/arm64-v8a/libdex2c_semantics.so"):
         target = remote + "/" + file.name
-        run([*device, "push", file, target]); pushed.append(target)
-    outcomes = []
+        pushed.append(target)
+        save_report(report_path, report)
+        run([*device, "push", file, target])
+    outcomes = report["results"]
     for main_class in manifest.get("mains", ("sample.Run", "kfixture.FixtureKt")):
         observed = {}
         for kind in (("baseline", "native", "protected") if args.native_reference else ("baseline", "protected")):
@@ -106,6 +239,7 @@ def main():
                           "-Xcheck:jni", "-Djava.library.path=" + library_path, "-Ddex2c.trace=" + str(args.trace).lower(), "/system/bin", main_class], timeout=600)
             observed[kind] = output
             outcomes.append({"main": main_class, "mode": kind, "seconds": round(time.monotonic()-start, 3), "output": output})
+            save_report(report_path, report)
         if any(value != observed["baseline"] for value in observed.values()):
             raise AssertionError(f"ART semantic mismatch for {main_class}: {observed}")
         if "WARNING" in observed["protected"] or "JNI DETECTED ERROR" in observed["protected"]:
@@ -168,7 +302,8 @@ def main():
         bytecode=bytes((92 if escape=='\\' else int(escape,16)) if escape else ord(char)
                        for escape,char in re.findall(r'\\([A-Fa-f0-9]{2}|\\)|([^\\])',encoded))
         offset=library.find(bytecode)
-        assert offset>=0 and library.find(bytecode,offset+1)<0
+        if offset < 0 or library.find(bytecode, offset + 1) >= 0:
+            raise ValueError("VM bytecode must occur exactly once in the fixture library")
         changed=bytearray(library);changed[offset]^=1
         negatives.append(signed_apk("tampered-vm",changed,args.fixtures / "test.jks"))
     receipt=json.loads((args.fixtures / "native/protection.json").read_text())
@@ -190,7 +325,8 @@ def main():
         bytecode=bytes((92 if escape=='\\' else int(escape,16)) if escape else ord(char)
                        for escape,char in re.findall(r'\\([A-Fa-f0-9]{2}|\\)|([^\\])',encoded))
         offset=library.find(bytecode)
-        assert offset>=0 and library.find(bytecode,offset+1)<0
+        if offset < 0 or library.find(bytecode, offset + 1) >= 0:
+            raise ValueError("CSE VM bytecode must occur exactly once in the fixture library")
         changed=bytearray(library);changed[offset]^=1
         negatives.append(signed_apk('tampered-cse-vm',changed,args.fixtures / 'test.jks'))
         # A separately sealed build has fresh build_nonce/key material, even with identical code/certificate.
@@ -199,23 +335,55 @@ def main():
         for pos, total in elf.payloads():
             changed[pos+cse.HEADER:pos+total]=alternate[pos+cse.HEADER:pos+total]
         negatives.append(signed_apk('cross-build-cse-records',changed,args.fixtures / 'test.jks'))
-    for file in negatives:
-        target=remote+"/"+file.name;run([*device,"push",file,target]);pushed.append(target)
-        result=subprocess.run([str(v) for v in [*device,"shell","env",f"CLASSPATH={target}","app_process",
-                "-Xcheck:jni","-Djava.library.path="+target+"!/lib/arm64-v8a","/system/bin","sample.Run"]],
-                capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=90)
-        assert result.returncode!=0,(file,result.stdout,result.stderr)
-        assert not result.stdout.strip(),(file,"algorithm ran despite invalid protection",result.stdout)
-        outcomes.append({"mode":file.stem,"rejected":True,"exitCode":result.returncode})
+    report["negativeCases"] = [{"mode": file.stem, "expectedCodes": expected_codes(
+        file.stem, segments is not None, receipt.get("apkSignatureVerification", False))} for file in negatives]
+    save_report(report_path, report)
+    for file, contract in zip(negatives, report["negativeCases"]):
+        negative_case(device, file, remote + "/" + file.name, contract["expectedCodes"], report, report_path)
         print("[ok] rejected",file.stem,flush=True)
-    report = {"serial": args.serial,
-              "sdk": run([*device, "shell", "getprop", "ro.build.version.sdk"]),
-              "pageSize": run([*device, "shell", "getconf", "PAGESIZE"]),
-              "results": outcomes}
-    (args.fixtures / "device-results.json").write_text(json.dumps(report, indent=2)+"\n")
-    # Only remove the exact files uploaded by this invocation.
-    run([*device, "shell", "rm", "-f", *pushed])
-    run([*device, "shell", "rmdir", remote])
+    report.update(sdk=run([*device, "shell", "getprop", "ro.build.version.sdk"]),
+                  pageSize=run([*device, "shell", "getconf", "PAGESIZE"]))
+    save_report(report_path, report)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sdk", required=True, type=Path)
+    parser.add_argument("--java", required=True, type=Path)
+    parser.add_argument("--serial", required=True)
+    parser.add_argument("--server-port", type=int, default=5037)
+    parser.add_argument("--fixtures", required=True, type=Path)
+    parser.add_argument("--report", type=Path, help="Current-run JSON report; defaults to fixtures/device-results.json")
+    parser.add_argument("--native-reference", type=Path)
+    parser.add_argument("--ndk", type=Path, help="Build an additional unprotected JNI reference with this NDK")
+    parser.add_argument("--clang", type=Path, help="Optional Clang for the unprotected reference")
+    parser.add_argument("--trace", action="store_true")
+    args = parser.parse_args(argv)
+    report_path = args.report or args.fixtures / "device-results.json"
+    report = {"schemaVersion": 2, "runId": uuid.uuid4().hex, "startedAt": utc_now(), "status": "running",
+              "serial": args.serial, "fixtures": str(args.fixtures.resolve()), "results": [],
+              "invocation": [sys.executable, str(Path(__file__).resolve()), *(sys.argv[1:] if argv is None else argv)]}
+    save_report(report_path, report)  # Invalidate a stale success before any setup or execution.
+    try:
+        exercise(args, report, report_path)
+        report["status"] = "passed"
+    except BaseException as error:
+        report.update(status="failed", error={"type": type(error).__name__, "message": str(error)})
+        raise
+    finally:
+        try:
+            cleanup = cleanup_remote(report)
+        except BaseException as error:
+            cleanup = [{"status": "error", "error": {"type": type(error).__name__, "message": str(error)}}]
+        report["cleanup"] = cleanup
+        cleanup_failed = any(row["status"] != "completed" for row in cleanup)
+        failed_before_cleanup = report["status"] != "passed"
+        if cleanup_failed and not failed_before_cleanup:
+            report.update(status="failed", error={"type": "RuntimeError", "message": "device cleanup failed"})
+        report["finishedAt"] = utc_now()
+        save_report(report_path, report)
+        if cleanup_failed and not failed_before_cleanup:
+            raise RuntimeError("device cleanup failed; see current-run report")
 
 
 if __name__ == "__main__":
