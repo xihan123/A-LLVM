@@ -25,6 +25,12 @@ class FinalApkTest(unittest.TestCase):
         self.generated.mkdir(); self.native.mkdir()
         for directory, name in ((self.generated, 'selection.json'), (self.native, 'protection.json')):
             (directory / name).write_bytes((ARGS.fixtures / directory.name / name).read_bytes())
+        string_selection = ARGS.fixtures / 'generated/string-selection.json'
+        if string_selection.exists():
+            (self.generated / string_selection.name).write_bytes(string_selection.read_bytes())
+        classes = ARGS.fixtures / 'generated/classes.jar'
+        if classes.exists():
+            (self.generated / classes.name).write_bytes(classes.read_bytes())
         if (ARGS.fixtures / 'native/segments.json').exists():
             (self.native / 'segments.json').write_bytes((ARGS.fixtures / 'native/segments.json').read_bytes())
 
@@ -49,7 +55,8 @@ class FinalApkTest(unittest.TestCase):
     def test_valid_and_no_mutation(self):
         original = (ARGS.fixtures / 'protected.apk').read_bytes()
         self.check()
-        self.assertTrue(json.loads(self.report.read_text())['apkSignatureVerification'])
+        expected = json.loads((self.native / 'protection.json').read_text())['apkSignatureVerification']
+        self.assertEqual(expected, json.loads(self.report.read_text())['apkSignatureVerification'])
         self.assertEqual(original, (ARGS.fixtures / 'protected.apk').read_bytes())
 
     def test_wrong_signer_removes_stale_success(self):
@@ -115,13 +122,19 @@ class FinalApkTest(unittest.TestCase):
     def test_duplicate_method_with_updated_digest_is_rejected(self):
         selection = self.generated / 'selection.json'
         data = json.loads(selection.read_text())
+        receipt = self.native / 'protection.json'
+        receipt_data = json.loads(receipt.read_text())
+        if not data['methods']:
+            method = {'method': 'Example.run()V', 'symbol': 'd2c_' + '0' * 24, 'protection': 'vmp'}
+            data['methods'] = [method]
+            data['strings'] = {}
+            (self.generated / 'string-selection.json').unlink(missing_ok=True)
         data['methods'].append(data['methods'][0])
         selection.write_text(json.dumps(data))
-        receipt = self.native / 'protection.json'
-        data = json.loads(receipt.read_text())
-        data['selectionSha256'] = hashlib.sha256(selection.read_bytes()).hexdigest()
-        data['protectedMethods'] += 1
-        receipt.write_text(json.dumps(data))
+        receipt_data['selectionSha256'] = hashlib.sha256(selection.read_bytes()).hexdigest()
+        receipt_data['protectedMethods'] = len(data['methods'])
+        receipt_data['protectedStrings'] = 0
+        receipt.write_text(json.dumps(receipt_data))
         with self.assertRaisesRegex(ValueError, 'duplicate selected'):
             self.check()
 

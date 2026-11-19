@@ -1,11 +1,11 @@
 # dex2c：Java/Kotlin 方法保护
 
-正式版本号 `0.1.13` 新增独立的 `io.github.xihan123.strings` 插件：将指定包内的 Java/Kotlin
+正式版本号 `0.1.14` 同步发布 `io.github.xihan123.dex2c` 和独立的 `io.github.xihan123.strings` 插件：字符串插件将指定包内的 Java/Kotlin
 字符串抽取到 native，业务方法继续运行在 ART，可与 dex2c 共用一个 SO。
 接入与边界见 [字符串插件](STRINGS.md)，实测与待完成门槛见 [验证记录](STRINGS_VALIDATION.md)。
-两款插件的共同发布范围与状态见 [0.1.13 发布记录](RELEASE_0.1.13.md)。
+两款插件的共同发布范围与状态见 [0.1.14 发布记录](RELEASE_0.1.14.md)。
 
-独立 Gradle 构建，插件 ID 为 `io.github.xihan123.dex2c`，本次发布版本号 `0.1.13`（远端状态见发布记录）。标注方法的实现转换为 JNI/C++，经 A-LLVM VMP、强化字符串加密、自校验和签名证书绑定后生成 SO；原方法保留为调用 native 的薄包装。Debug 默认保持原实现，Release 转换失败会终止构建。
+独立 Gradle 构建，插件 ID 为 `io.github.xihan123.dex2c`，本次发布版本号 `0.1.14`（上传状态见发布记录）。标注方法的实现转换为 JNI/C++，经 A-LLVM VMP、强化字符串加密、自校验和签名证书绑定后生成 SO；原方法保留为调用 native 的薄包装。Debug 默认保持原实现，Release 转换失败会终止构建。
 
 `segmentedData` 提供独立的 QSEG 分段容器，插件默认关闭，由接入方显式开启。
 格式、加载流程及验收门槛见 [QSEG 说明](../runtime/QSEG.md)。
@@ -16,19 +16,20 @@
 选择优先级为方法注解、继承根规则、类注解、自动回调策略；`selection.json` 记录最终级别和生效原因。
 继承根仍选择 VMP 入口、native 回调；NATIVE-only 构建受支持。显式不支持的方法拒绝构建，Release 不保留原实现备用。
 完整验签、初始化顺序和最终 APK 任务见 [接入说明](../runtime/APK_VERIFY.md)，
-历史测试和未满足门槛见 [候选验证记录](APK_VERIFY_VALIDATION.md)，当前发布状态见 [0.1.13 发布记录](RELEASE_0.1.13.md)。
+历史测试和未满足门槛见 [候选验证记录](APK_VERIFY_VALIDATION.md)，当前发布状态见 [0.1.14 发布记录](RELEASE_0.1.14.md)。
 
 ## 工具链
 
-本版构建环境：Windows、JDK 21、Gradle 9.8.1、AGP 9.4.1、Kotlin 2.4.20、NDK `30.0.16248370`、LLVM 21 / patchset p17、`arm64-v8a`、minSdk 26。
+本次 0.1.14 Windows 构建验证使用 Gradle 9.9.1 和 JDK 21。AGP 9.4.1、NDK `30.0.16248370`、LLVM 21 / patchset p18、`arm64-v8a`、minSdk 26 为目标接入配置；真实设备完整验收限制见 [发布记录](RELEASE_0.1.14.md)。
 
-上述 p17 为历史稳定版环境。当前源码包含后续 QSEG acquire/release 生命周期协议；使用此能力时须采用
-匹配的 `p18` 工具链及 receipt。`p18` 已按维护者要求设为正式版本号，远端 NDK 尚未发布。
+此前版本使用 p17 稳定工具链。当前插件源码兼容 QSEG acquire/release 生命周期协议；使用此能力时须采用
+匹配的 `p18` 工具链及 receipt。`p18` 已设为正式版本号，官方 NDK 的发布状态应单独确认。
 
 NDK 中的 Clang 必须支持 `-irobf-vmp-strict`、`-irobf-vmp-post` 及对应的保护 receipt。插件通过实际编译及逐方法 IR 验证探测能力，不仅检查版本字符串。开发时可指定本仓库 `build/bin/clang.exe`，链接器、资源头文件和 sysroot 仍使用指定 NDK。p10 及更早工具链无法通过本版二次混淆检查。
 
 0.1.4 修复 Kotlin 2.4 非 synthetic 的嵌套 lambda 选择。p12 编译器另提供离线的每方法指令映射随机化。
-Maven 插件不包含 Clang；本版使用 p17，包含此前的多 VMP TU 链接修复、字符串 runtime 和 QSEG pass。
+Maven 插件不包含 Clang；0.1.14 staging 使用 LLVM 21 / p18 验证，发布前须从下游 NDK 验收确认工具链一致。
+下文记载的 0.1.0 Maven 发布及其 p17 内容属于历史版本。
 
 0.1.8 / p15 缓存同一 payload 块的 schedule seed，允许优化解码算术，并以 switch 分发 native 调用，
 仅在选中调用后读取参数。CSE 字节材料拼装移至原生 noinline helper；derive/open 仍受 VMP 保护。
@@ -89,7 +90,7 @@ dependencyResolutionManagement {
 ```kotlin
 plugins {
     id("com.android.application")
-    id("io.github.xihan123.dex2c") version "0.1.13"
+    id("io.github.xihan123.dex2c") version "0.1.14"
 }
 android {
     ndkVersion = "30.0.16248370"
@@ -101,7 +102,7 @@ android {
 dex2c {
     buildTypes.set(setOf("release"))
     certificateFile.set(file("signing-cert.der")) // 最终 APK 签名的公开证书，DER 或 PEM
-    // NDK 中已安装 p17 时无需指定。
+    // 已安装与本插件能力匹配的 A-LLVM Clang 时无需指定。
     clangExecutable.set(file("F:/Project/android/LLVM-Patch/build/bin/clang.exe"))
 }
 ```
@@ -115,7 +116,7 @@ Python 可执行文件、Clang、NDK、证书和插件所带运行时/脚本均�
 插件自动加入应用的注解和运行时依赖。在需要注解的依赖模块中另加：
 
 ```kotlin
-dependencies { compileOnly("io.github.xihan123.dex2c:annotations:0.1.13") }
+dependencies { compileOnly("io.github.xihan123.dex2c:annotations:0.1.14") }
 ```
 
 插件应用在 application 模块；通过 AGP 公共 `ScopedArtifact.CLASSES` / `Scope.ALL` 统一处理应用及依赖模块。SO 使用生成 jniLibs 接口加入，兼容应用自己的 CMake/ndk-build，不修改它们的编译参数。
@@ -127,7 +128,7 @@ dependencies { compileOnly("io.github.xihan123.dex2c:annotations:0.1.13") }
 发布包含 annotations、runtime、core、gradle-plugin，以及 dex2c、strings 两个 `plugins {}` DSL plugin marker；各 Java 库附带 sources JAR、POM 和 Gradle metadata。测试模块 kotlin-fixtures 不发布。
 
 使用仓库根目录的 `scripts/publish_dex2c.py`（Python 3.11+）。设置 JDK 21 的 `JAVA_HOME`，
-准备 Windows / NDK r30 / A-LLVM p17 工具链后运行：
+准备 Windows / NDK r30 / 与下游验收一致的 A-LLVM 工具链后运行：
 
 ```powershell
 $env:JAVA_HOME = 'C:\Program Files\Java\jdk-21'

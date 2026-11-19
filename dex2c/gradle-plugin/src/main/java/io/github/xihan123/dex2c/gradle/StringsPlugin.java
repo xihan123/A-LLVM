@@ -8,7 +8,6 @@ public final class StringsPlugin implements Plugin<Project> {
         extension.getBuildTypes().convention(java.util.Set.of("release"));
         extension.getExcludePackages().convention(java.util.Set.of());
         extension.getVerifyApkSignature().convention(false);
-        extension.getPythonExecutable().convention(ProtectionCoordinator.python(project));
         ProtectionCoordinator.install(project);
     }
 }

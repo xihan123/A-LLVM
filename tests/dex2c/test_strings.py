@@ -39,7 +39,7 @@ class StringReceiptTest(unittest.TestCase):
         self.generated = self.root / 'generated'; self.generated.mkdir()
         self.native = self.root / 'native'; self.native.mkdir()
         self.strings = {'uniqueStrings': 1, 'occurrences': 1, 'symbol': 'native',
-                        'sites': [{'index': 0}]}
+                        'sites': [{'index': 0, 'method': '示例/类.方法()V'}]}
         self.selection = {'methods': [], 'strings': self.strings, 'library': 'test'}
         self.write('string-selection.json', self.strings)
         self.write('selection.json', self.selection)
@@ -52,7 +52,7 @@ class StringReceiptTest(unittest.TestCase):
                         'segmentedData': False}
 
     def write(self, name, value):
-        (self.generated / name).write_text(json.dumps(value))
+        (self.generated / name).write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
 
     def digest(self, name):
         return hashlib.sha256((self.generated / name).read_bytes()).hexdigest()
@@ -64,6 +64,17 @@ class StringReceiptTest(unittest.TestCase):
     def test_string_only_output_does_not_take_zero_method_shortcut(self):
         with self.assertRaisesRegex(ValueError, 'missing SO'):
             self.check()
+
+    def test_zero_receipt_requires_empty_selection(self):
+        self.receipt = {'schemaVersion': 1, 'protectedMethods': 0}
+        with self.assertRaisesRegex(ValueError, 'zero protection receipt differs'):
+            self.check()
+        self.write('selection.json', {'methods': [{'method': 'Example.run()V'}]})
+        with self.assertRaisesRegex(ValueError, 'zero protection receipt differs'):
+            self.check()
+        self.write('selection.json', {'methods': []})
+        self.check()
+        self.assertEqual(json.loads((self.root / 'report.json').read_bytes()), self.receipt)
 
     def test_missing_protection_and_changed_classes_are_rejected(self):
         self.receipt['selfCheckEntry'] = False

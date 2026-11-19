@@ -6,7 +6,6 @@ import com.android.build.api.artifact.SingleArtifact;
 import io.github.xihan123.dex2c.core.MethodKey;
 import org.gradle.api.*;
 import org.gradle.api.file.*;
-import org.gradle.api.provider.Provider;
 import java.nio.file.Files;
 
 /** Both plugin entrypoints share one transform and native build per variant. */
@@ -18,11 +17,13 @@ final class ProtectionCoordinator {
         project.getPluginManager().withPlugin("com.android.application",ignored->configure(project));
     }
 
-    static Provider<RegularFile> python(Project project) {
-        return project.getLayout().file(project.getProviders().environmentVariable("PATH").map(path->
+    static RegularFileProperty python(Project project, RegularFileProperty dex, RegularFileProperty strings) {
+        var configured = merge(project, "pythonExecutable", dex, strings);
+        configured.convention(project.getLayout().file(project.getProviders().environmentVariable("PATH").map(path->
             java.util.Arrays.stream(path.split(java.util.regex.Pattern.quote(java.io.File.pathSeparator)))
                 .map(dir->new java.io.File(dir,System.getProperty("os.name").startsWith("Windows")?"python.exe":"python3"))
-                .filter(java.io.File::isFile).findFirst().orElse(null)));
+                .filter(java.io.File::isFile).findFirst().orElse(null))));
+        return configured;
     }
 
     static RegularFileProperty merge(Project project,String name,RegularFileProperty first,RegularFileProperty second) {
@@ -69,7 +70,7 @@ final class ProtectionCoordinator {
                 throw new GradleException("strings: includePackages must explicitly select at least one package");
             var certificate=merge(project,"certificateFile",methods?dex.getCertificateFile():null,literals?strings.getCertificateFile():null);
             var clang=merge(project,"clangExecutable",methods?dex.getClangExecutable():null,literals?strings.getClangExecutable():null);
-            var python=merge(project,"pythonExecutable",methods?dex.getPythonExecutable():null,literals?strings.getPythonExecutable():null);
+            var python=python(project,methods?dex.getPythonExecutable():null,literals?strings.getPythonExecutable():null);
             boolean verifySignature=(methods && dex.getVerifyApkSignature().get()) || (literals && strings.getVerifyApkSignature().get());
             if(variant.getMinSdk().getApiLevel()<26)throw new GradleException("dex2c requires minSdk >= 26");
             String name=variant.getName();

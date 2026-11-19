@@ -9,10 +9,9 @@ public final class Dex2cPlugin implements Plugin<Project> {
         extension.getInheritedMethods().convention(java.util.Set.of());
         extension.getSegmentedData().convention(false);
         extension.getVerifyApkSignature().convention(false);
-        extension.getPythonExecutable().convention(ProtectionCoordinator.python(project));
         project.getPluginManager().withPlugin("com.android.application",ignored->{
-            project.getDependencies().add("compileOnly","io.github.xihan123.dex2c:annotations:0.1.13");
-            project.getDependencies().add("implementation","io.github.xihan123.dex2c:runtime:0.1.13");
+            project.getDependencies().add("compileOnly","io.github.xihan123.dex2c:annotations:0.1.14");
+            project.getDependencies().add("implementation","io.github.xihan123.dex2c:runtime:0.1.14");
         });
         ProtectionCoordinator.install(project);
     }

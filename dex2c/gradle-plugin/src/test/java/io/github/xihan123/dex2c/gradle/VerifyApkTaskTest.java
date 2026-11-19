@@ -34,6 +34,21 @@ class VerifyApkTaskTest {
         assertThrows(IllegalStateException.class, task()::apkPaths);
     }
 
+    @Test void zeroReceiptRequiresEmptySelection() throws Exception {
+        var task = task();
+        var report = directory.resolve("report.json");
+        task.getNativeDirectory().set(directory.toFile());
+        task.getGeneratedDirectory().set(directory.toFile());
+        task.getReport().set(report.toFile());
+        Files.writeString(directory.resolve("protection.json"), "{\"schemaVersion\":1,\"protectedMethods\":0}");
+        task.verify();
+        assertTrue(Files.exists(report));
+        Files.writeString(directory.resolve("string-symbols.txt"), "d2c_string_dispatcher\n");
+        var error = assertThrows(IllegalStateException.class, task::verify);
+        assertTrue(error.getMessage().contains("zero protection receipt differs"));
+        assertFalse(Files.exists(report));
+    }
+
     @Test void verifierShipsItsTransitivePythonDependencies() throws Exception {
         var scripts = directory.resolve("scripts");
         task().prepareVerifierScripts(scripts);

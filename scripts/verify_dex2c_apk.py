@@ -120,25 +120,29 @@ def check_runtime_format(data, min_sdk):
 def verify(apks, native, generated, java, apksigner, min_sdk, report):
     report.unlink(missing_ok=True)
     receipt_file, selection_file = native / 'protection.json', generated / 'selection.json'
-    receipt = json.loads(receipt_file.read_text())
+    receipt_bytes = receipt_file.read_bytes()
+    receipt = json.loads(receipt_bytes)
+    selection_bytes = selection_file.read_bytes()
+    selection = json.loads(selection_bytes)
+    methods = selection['methods']
+    strings = selection.get('strings', {})
+    string_count = strings.get('uniqueStrings', 0)
     if not receipt['protectedMethods'] and not receipt.get('protectedStrings', 0):
+        require(not methods and string_count == 0, 'zero protection receipt differs from selection')
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(json.dumps({'schemaVersion': 1, 'protectedMethods': 0}) + '\n'); return
-    selection_bytes = selection_file.read_bytes(); selection = json.loads(selection_bytes)
     require(digest(selection_bytes) == receipt['selectionSha256'], 'selection receipt changed')
-    methods = selection['methods']
     require(len(methods) == receipt['protectedMethods'], 'method count differs')
     require(len({m['method'] for m in methods}) == len(methods) and
             len({m['symbol'] for m in methods}) == len(methods), 'duplicate selected method or symbol')
     require(all(m['protection'] in ('vmp', 'native-cse') for m in methods), 'unknown protection policy')
     require({m['symbol'] for m in methods if m['protection'] == 'vmp'} == set(receipt['symbols']), 'VMP manifest differs')
     require({m['symbol'] for m in methods if m['protection'] == 'native-cse'} == set(receipt['nativeSymbols']), 'native manifest differs')
-    strings = selection.get('strings', {})
-    string_count = strings.get('uniqueStrings', 0)
     require(string_count == receipt.get('protectedStrings', 0), 'string count differs')
     if string_count:
-        require(digest((generated / 'string-selection.json').read_bytes()) == receipt['stringSelectionSha256'], 'string selection receipt changed')
-        require(json.loads((generated / 'string-selection.json').read_text()) == strings, 'string manifests differ')
+        string_selection = (generated / 'string-selection.json').read_bytes()
+        require(digest(string_selection) == receipt['stringSelectionSha256'], 'string selection receipt changed')
+        require(json.loads(string_selection) == strings, 'string manifests differ')
         require(receipt.get('stringSymbols') == [strings['symbol']], 'string dispatcher differs')
         require(strings['occurrences'] == len(strings['sites']) and
                 {s['index'] for s in strings['sites']} == set(range(string_count)), 'string index coverage differs')
@@ -179,15 +183,16 @@ def verify(apks, native, generated, java, apksigner, min_sdk, report):
         outputs.append({'file': apk.name, 'sha256': digest(data), 'bytes': len(data), 'certificateSha256': certificates[0].lower()})
     require(libraries >= 1 and containers == (libraries if receipt['segmentedData'] else 0), 'missing SO or container')
     if receipt['segmentedData']:
-        require(digest((native / 'segments.json').read_bytes()) == receipt['segmentsReceiptSha256'], 'segment receipt changed')
-        segments = json.loads((native / 'segments.json').read_text())
+        segment_bytes = (native / 'segments.json').read_bytes()
+        require(digest(segment_bytes) == receipt['segmentsReceiptSha256'], 'segment receipt changed')
+        segments = json.loads(segment_bytes)
         require(segments.get('schemaVersion') == 1 and segments.get('containerSha256') == receipt['containerSha256'] and
                 segments.get('containerBytes') == receipt['containerBytes'], 'segment receipt identity differs')
         check_lifetimes(receipt, segments)
     verify_wrappers(apks, selection)
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps({'schemaVersion': 1, 'protectedMethods': len(methods), 'protectedStrings': string_count, 'apkSignatureVerification': receipt.get('apkSignatureVerification', False),
-                                  'protectionSha256': digest(receipt_file.read_bytes()), 'apks': outputs}, indent=2) + '\n')
+                                  'protectionSha256': digest(receipt_bytes), 'apks': outputs}, indent=2) + '\n')
 
 
 if __name__ == '__main__':

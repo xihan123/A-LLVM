@@ -27,6 +27,8 @@ public abstract class VerifyApkTask extends DefaultTask {
         Files.deleteIfExists(report);
         if (Files.readString(getNativeDirectory().file("protection.json").get().getAsFile().toPath()).strip()
                 .equals("{\"schemaVersion\":1,\"protectedMethods\":0}")) {
+            if (ProtectionCoordinator.hasProtection(getGeneratedDirectory().get()))
+                throw new IllegalStateException("dex2c: zero protection receipt differs from selection");
             Files.createDirectories(report.getParent());
             Files.writeString(report, "{\"schemaVersion\":1,\"protectedMethods\":0}\n");
             return;

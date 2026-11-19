@@ -1,7 +1,7 @@
 # Java/Kotlin 字符串 native 保护
 
-正式版本号 `0.1.13`，插件 ID `io.github.xihan123.strings`。复用 dex2c 的 Gradle 构建、
-A-LLVM 编译器验证、CSE 封装和最终 APK 验证；当前上传状态见 [发布记录](RELEASE_0.1.13.md)。
+正式版本号 `0.1.14`，插件 ID `io.github.xihan123.strings`。复用 dex2c 的 Gradle 构建、
+A-LLVM 编译器验证、CSE 封装和最终 APK 验证；当前上传状态见 [发布记录](RELEASE_0.1.14.md)。
 
 ## 接入
 
@@ -11,7 +11,7 @@ A-LLVM LLVM 21；首版只生成 `arm64-v8a`，要求 minSdk 26。NDK 必须预�
 ```kotlin
 plugins {
     id("com.android.application")
-    id("io.github.xihan123.strings") version "0.1.13"
+    id("io.github.xihan123.strings") version "0.1.14"
 }
 android {
     ndkVersion = "30.0.16248370"

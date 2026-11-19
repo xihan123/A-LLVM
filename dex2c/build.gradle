@@ -1,6 +1,6 @@
 allprojects {
     group = 'io.github.xihan123.dex2c'
-    version = '0.1.13'
+    version = '0.1.14'
 }
 subprojects {
     apply plugin: 'java-library'

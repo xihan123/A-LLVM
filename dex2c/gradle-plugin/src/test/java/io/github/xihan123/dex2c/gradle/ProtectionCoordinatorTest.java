@@ -32,6 +32,19 @@ class ProtectionCoordinatorTest {
         second.set(temp.resolve("other-clang").toFile());
         assertThrows(GradleException.class,()->ProtectionCoordinator.merge(project,"clangExecutable",first,second));
     }
+    @Test void oneExplicitPythonPathIsSharedByBothPlugins() {
+        var project = ProjectBuilder.builder().withProjectDir(temp.toFile()).build();
+        project.getPluginManager().apply(Dex2cPlugin.class);
+        project.getPluginManager().apply(StringsPlugin.class);
+        var dex = project.getExtensions().getByType(Dex2cExtension.class).getPythonExecutable();
+        var strings = project.getExtensions().getByType(StringProtectionExtension.class).getPythonExecutable();
+        var custom = temp.resolve("custom-python").toFile();
+        strings.set(custom);
+        assertEquals(custom, ProtectionCoordinator.python(project, dex, strings).get().getAsFile());
+        strings.unset();
+        dex.set(custom);
+        assertEquals(custom, ProtectionCoordinator.python(project, dex, strings).get().getAsFile());
+    }
     @Test void nativeToolchainIsNeededOnlyForNonemptySelections() throws Exception {
         var project=ProjectBuilder.builder().withProjectDir(temp.toFile()).build();
         var directory=project.getLayout().getProjectDirectory();
