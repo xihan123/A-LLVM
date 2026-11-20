@@ -1283,6 +1283,24 @@ static uint32_t read_code_u32_raw(void) {
 	return res;
 }
 
+// Stable entry points for LLVM 21's per-method fused opcode bodies.  The
+// decoder and store helpers remain inline in the generated interpreter, while
+// these noinline symbols let the pass import the stateful operations directly.
+extern "C" __attribute__((used, noinline))
+uint64_t vmp_fusion_read_target(void) {
+	return unpack_code(pointer_size);
+}
+
+extern "C" __attribute__((used, noinline))
+uint64_t vmp_fusion_read_value(void) {
+	return get_value();
+}
+
+extern "C" __attribute__((used, noinline))
+void vmp_fusion_write_result(uint64_t offset, uint64_t value, uint32_t size) {
+	pack_store_addr(data_seg_addr + offset, value, (int)size);
+}
+
 #ifdef IS_INLINE_FUNC
 	__inline__ __attribute__((always_inline))
 #endif

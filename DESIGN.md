@@ -189,6 +189,10 @@ AArch64 后端 `-aarch64-obfuscate-*` 尚未实现。
 
 VMP（`-irobf-vmp`）：已实现且真机验证真正经解释器执行。关键修复（2026-07）：VMP 在 OptimizerLast 运行，晚于 inliner/IPSCCP，导致被保护函数在到达 VM 桩前被内联/常量折叠掉、VM 桩沦为死代码（此前"~1.0× 原生"实为函数根本没走 VM）。新增 `VMProtectPreparePass`（PipelineStartEP 早期给目标打 `NoInline`+`llvm.compiler.used`，后者令 IPSCCP 停止参数追踪→调用点不被折叠）修复此绕过。同时修复 translator 的循环/PHI 前向引用 bug（`basicblock_map` 用 `.insert()` 被 operator[] 污染的 0 卡住→分支全跳 BB0 死循环；PHI 回边 incoming 值未分配槽 `packValue` 报错；PHI bb_id 未回填），改 `basicblock_map[bb]=` 覆盖 + PHI 值提前分配槽 + `phi_bb_map` 回填。真机 arm64-v8a：直线 64-bit、循环(LCG/FNV)、递归(fib)、内存(alloca/load/store/gep)、switch、VM→native 调用、float/double 全部 == 原生；旧"compute 挂死"已修。性能：真正解释后 hot 循环 ~10000× 原生（hot(1000) 54ms vs 0.005ms）——故仅虚拟化小型/关键函数；向量指令 translator 拒绝→安全回退原生。体积 +~1.8MB 解释器/模块；待各 ABI 解释器扩展。
 
+LLVM 21 p20 增加标量二元运算融合：每个 VMP 函数在满足单使用者、同一基本块和无溢出语义标记的前提下，最多将一对相邻 `add`、`sub`、`mul`、`and`、`or`、`xor` 融合为一个私有 opcode，覆盖整数宽度 8/16/32/64。字节码按“目标槽位、第一条运算两个操作数、第二条运算的第三个操作数”布局；解释器私有 clone 在 opcode specialization 阶段内联两次运算并写回结果，随后清理桥接 helper。结果槽位复用 translator 已为 PHI/back-edge 预留的槽位，避免非拓扑块顺序造成重叠；融合边还复制 NOP continuation 的 PHI 语义并由 LLVM verifier 校验。当前实现每个函数最多一对融合，尚未覆盖多对融合、跨块语义融合或浮点/向量运算。融合减少一次 dispatch，但会增加私有 clone 的内联算术和 handler 代码；p20 已完成主机编链与 IR verifier 验证，设备性能和最终体积仍需在目标 ABI 上测量。
+
+与成熟顶级商业壳的差距仍在生产核心能力：多层、多对语义融合和更丰富的函数级 handler；VM state、字节码和密钥的分层运行期保护；覆盖解释器/机器码的完整性认证与远端或设备绑定；以及 AArch64 后端机器码级变换、反调试和反转储的组合防护。现有 CSE、证书绑定和 VMP 字节码自校验提供基础，但不能等同于商业壳的全链路运行期防护。
+
 函数级 SO 自加密只保留为实验项。开始实现前必须先验证：
 
 1. 加密函数可放入页对齐、页独占的 `PT_LOAD`；

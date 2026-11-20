@@ -370,6 +370,29 @@ struct BlockAddressInfo {
     BlockAddress *BA;
 };
 
+struct VMPFusionSpec {
+    bool Enabled = false;
+    uint8_t SemanticOpcode = 0;
+    unsigned FirstOpcode = 0;
+    unsigned SecondOpcode = 0;
+    unsigned Width = 0;
+    bool FirstIsLHS = false;
+};
+
+static bool isVMPFusionBinaryOpcode(unsigned Opcode) {
+    switch (Opcode) {
+    case Instruction::Add:
+    case Instruction::Sub:
+    case Instruction::Mul:
+    case Instruction::And:
+    case Instruction::Or:
+    case Instruction::Xor:
+        return true;
+    default:
+        return false;
+    }
+}
+
 /***
  * The main class that modify the callsite of vm-function.
  */
@@ -459,12 +482,18 @@ class GOVMTranslator {
         // current offset in data_seg
         int curr_data_offset = 0;
 
+        VMPFusionSpec fusion_spec;
+        BinaryOperator *fusion_first = nullptr;
+        BinaryOperator *fusion_second = nullptr;
+
 
         virtual bool run ();
         virtual bool prescan_supported_ir();
         virtual bool is_supported_instruction(Instruction *ins);
+        virtual void selectFusionCandidate();
         virtual void rollback_created_ir();
         virtual void handle_inst(Instruction *);
+        virtual void handle_fused_binary(BinaryOperator *);
         virtual void construct_gv();
 
         // create callinst_handler function, add instructions to callinst_handler and create ret basicblock to callinst_handler 
@@ -504,6 +533,7 @@ class GOVMTranslator {
         const uint8_t *get_opcode_dispatch_map() const { return opcode_dispatch_map; }
         const bool *get_used_opcodes() const { return used_opcodes; }
         int get_data_seg_size() { return this->curr_data_offset; }
+        const VMPFusionSpec &get_fusion_spec() const { return fusion_spec; }
         std::map<GlobalValue *, int> *get_gv_value_map() { return &gv_value_map; }
         std::map<int, GEPInfo> *get_gep_info_map() { return &gep_info_map; }
         std::map<int, BlockAddressInfo> *get_blockaddress_info_map() { return &blockaddress_info_map; }
@@ -1838,6 +1868,111 @@ void GOVMTranslator::rollback_created_ir() {
         gv_data_seg->eraseFromParent();
         gv_data_seg = nullptr;
     }
+}
+
+void GOVMTranslator::selectFusionCandidate() {
+    fusion_spec = VMPFusionSpec();
+    fusion_first = nullptr;
+    fusion_second = nullptr;
+
+    bool Reserved[4] = {};
+    for (Instruction &I : instructions(F)) {
+        if (isa<FenceInst>(&I)) Reserved[0] = true;
+        if (isa<AtomicCmpXchgInst>(&I)) Reserved[1] = true;
+        if (isa<AtomicRMWInst>(&I)) Reserved[2] = true;
+        if (isa<VAArgInst>(&I)) Reserved[3] = true;
+    }
+
+    BinaryOperator *FirstCandidate = nullptr;
+    BinaryOperator *SecondCandidate = nullptr;
+    bool FirstIsLHS = false;
+    unsigned Width = 0;
+    for (BasicBlock &BB : *F) {
+        for (Instruction &I : BB) {
+            auto *First = dyn_cast<BinaryOperator>(&I);
+            auto *Second = dyn_cast_or_null<BinaryOperator>(I.getNextNode());
+            if (!First || !Second || First->getParent() != Second->getParent() ||
+                !First->hasOneUse() || !isVMPFusionBinaryOpcode(First->getOpcode()) ||
+                !isVMPFusionBinaryOpcode(Second->getOpcode()) ||
+                First->hasNoSignedWrap() || First->hasNoUnsignedWrap() || First->isExact() ||
+                Second->hasNoSignedWrap() || Second->hasNoUnsignedWrap() || Second->isExact())
+                continue;
+
+            auto *IntTy = dyn_cast<IntegerType>(First->getType());
+            if (!IntTy || Second->getType() != IntTy)
+                continue;
+            unsigned Bits = IntTy->getBitWidth();
+            if (Bits != 8 && Bits != 16 && Bits != 32 && Bits != 64)
+                continue;
+
+            if (*First->user_begin() != Second)
+                continue;
+            bool IsLHS = Second->getOperand(0) == First;
+            if (!IsLHS && Second->getOperand(1) != First)
+                continue;
+
+            FirstCandidate = First;
+            SecondCandidate = Second;
+            FirstIsLHS = IsLHS;
+            Width = Bits;
+            break;
+        }
+        if (FirstCandidate)
+            break;
+    }
+
+    if (!FirstCandidate)
+        return;
+
+    static const uint8_t ReservedOpcodes[] = {
+        FENCE_OP, ATOMIC_CMPXCHG_OP, ATOMIC_RMW_OP, VAARG_OP};
+    uint8_t FusionOpcode = 0;
+    for (unsigned I = 0; I < 4; ++I) {
+        if (!Reserved[I]) {
+            FusionOpcode = ReservedOpcodes[I];
+            break;
+        }
+    }
+    if (!FusionOpcode)
+        return;
+
+    fusion_first = FirstCandidate;
+    fusion_second = SecondCandidate;
+    fusion_spec.Enabled = true;
+    fusion_spec.SemanticOpcode = FusionOpcode;
+    fusion_spec.FirstOpcode = FirstCandidate->getOpcode();
+    fusion_spec.SecondOpcode = SecondCandidate->getOpcode();
+    fusion_spec.Width = Width;
+    fusion_spec.FirstIsLHS = FirstIsLHS;
+    if (isIRObfuscationDebugEnabled()) {
+        errs() << "[VMP_FUSION] function=" << F->getName()
+               << " opcode=" << (unsigned)FusionOpcode
+               << " first=" << FirstCandidate->getOpcodeName()
+               << " second=" << SecondCandidate->getOpcodeName()
+               << " width=" << Width
+               << " first_is_lhs=" << (FirstIsLHS ? 1 : 0) << "\n";
+    }
+}
+
+void GOVMTranslator::handle_fused_binary(BinaryOperator *inst) {
+    if (!fusion_spec.Enabled || !inst || inst != fusion_second || !fusion_first)
+        report_fatal_error("VMP: invalid fused binary translation state");
+
+    auto Entry = value_map.emplace(inst, curr_data_offset);
+    int ResultOffset = Entry.first->second;
+    if (Entry.second)
+        curr_data_offset += modDataLayout->getTypeAllocSize(inst->getType());
+
+    std::vector<uint8_t> PackedTarget = pack(ResultOffset, pointer_size);
+    std::vector<uint8_t> PackedFirstLHS = GET_PACK_VALUE(fusion_first->getOperand(0));
+    std::vector<uint8_t> PackedFirstRHS = GET_PACK_VALUE(fusion_first->getOperand(1));
+    Value *ThirdOperand = inst->getOperand(fusion_spec.FirstIsLHS ? 1 : 0);
+    std::vector<uint8_t> PackedThird = GET_PACK_VALUE(ThirdOperand);
+
+    std::vector<uint8_t> HexCode;
+    ins_to_hex(HexCode, pack_op(fusion_spec.SemanticOpcode), PackedTarget,
+               PackedFirstLHS, PackedFirstRHS, PackedThird);
+    vm_code.insert(vm_code.end(), HexCode.begin(), HexCode.end());
 }
 
 void GOVMTranslator::handle_inst(Instruction *ins) {
@@ -3338,6 +3473,7 @@ bool GOVMTranslator::run(){
         return false;
     };
     lowerVMGEPOffsets(*F, *modDataLayout);
+    selectFusionCandidate();
     init();
     
     bool has_exception_handling = false;
@@ -3468,9 +3604,12 @@ bool GOVMTranslator::run(){
                 handle_inst(const_inst);
             }
             
-            if (inst && inst->getParent() == bb) {
+            if (inst && inst->getParent() == bb && inst != fusion_first) {
                 // errs() << "[Translator] Handling inst #" << total_instructions << ": " << inst->getOpcodeName() << "\n";
-                handle_inst(inst);
+                if (inst == fusion_second)
+                    handle_fused_binary(cast<BinaryOperator>(inst));
+                else
+                    handle_inst(inst);
             }
             total_instructions++;
         }
@@ -4436,7 +4575,9 @@ static SwitchInst *findVmOpcodeDispatchSwitch(Function *F) {
 
 static void addPhiIncomingForNewDispatchPred(BasicBlock *Dest,
                                              BasicBlock *OldPred,
-                                             BasicBlock *NewPred) {
+                                             BasicBlock *NewPred,
+                                             Value *DispatchCondition = nullptr,
+                                             uint64_t NopSemantic = NOP_OP) {
     if (!Dest || !OldPred || !NewPred) {
         return;
     }
@@ -4450,9 +4591,26 @@ static void addPhiIncomingForNewDispatchPred(BasicBlock *Dest,
             }
         }
         if (!Incoming) {
-            Incoming = UndefValue::get(PN.getType());
+            report_fatal_error("VMP: continuation PHI is missing its NOP edge");
+        }
+
+        // The interpreter's is_a_new_bb state is represented by a PHI whose
+        // NOP-edge value can be the opcode selector itself.  A fused handler
+        // reaches the same continuation after consuming its opcode, so it must
+        // carry the NOP semantic value (zero), not the decoded fused opcode.
+        if (DispatchCondition && Incoming == DispatchCondition) {
+            auto *IntegerTy = dyn_cast<IntegerType>(PN.getType());
+            if (!IntegerTy) {
+                report_fatal_error("VMP: selector continuation PHI is not integer typed");
+            }
+            Incoming = ConstantInt::get(IntegerTy, NopSemantic);
         }
         PN.addIncoming(Incoming, NewPred);
+
+        int NewIndex = PN.getBasicBlockIndex(NewPred);
+        if (NewIndex < 0 || PN.getIncomingValue((unsigned)NewIndex) != Incoming) {
+            report_fatal_error("VMP: failed to add fused continuation PHI incoming");
+        }
     }
 }
 
@@ -4470,6 +4628,279 @@ static void removePhiIncomingForOldDispatchPred(BasicBlock *Dest,
             }
             PN.removeIncomingValue((unsigned)Index, false);
         }
+    }
+}
+
+static bool switchHasSuccessor(const SwitchInst *SI, BasicBlock *Dest) {
+    if (!SI || !Dest) {
+        return false;
+    }
+    if (SI->getDefaultDest() == Dest) {
+        return true;
+    }
+    for (auto CaseIt = SI->case_begin(); CaseIt != SI->case_end(); ++CaseIt) {
+        if (CaseIt->getCaseSuccessor() == Dest) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool specializeFusionOpcode(Function *Clone,
+                                   uint64_t FunctionKey,
+                                   const VMPFusionSpec &Spec,
+                                   const bool *UsedOpcodes) {
+    auto FusionFailure = []() -> void {
+        report_fatal_error("VMP: emitted fusion opcode specialization failed");
+    };
+    if (!Clone || !Spec.Enabled || !UsedOpcodes ||
+        Spec.SemanticOpcode > OP_TOTAL || !UsedOpcodes[Spec.SemanticOpcode] ||
+        !isVMPFusionBinaryOpcode(Spec.FirstOpcode) ||
+        !isVMPFusionBinaryOpcode(Spec.SecondOpcode) ||
+        (Spec.Width != 8 && Spec.Width != 16 && Spec.Width != 32 && Spec.Width != 64))
+        FusionFailure();
+
+    SwitchInst *SI = findVmOpcodeDispatchSwitch(Clone);
+    if (!SI)
+        FusionFailure();
+
+    BasicBlock *Continuation = nullptr;
+    BasicBlock *OldFusionHandler = nullptr;
+    unsigned FusionSuccessorIndex = 0;
+    unsigned CaseIndex = 0;
+    for (auto CaseIt = SI->case_begin(); CaseIt != SI->case_end(); ++CaseIt, ++CaseIndex) {
+        uint64_t Semantic = CaseIt->getCaseValue()->getZExtValue();
+        if (Semantic == NOP_OP) {
+            if (Continuation)
+                FusionFailure();
+            Continuation = CaseIt->getCaseSuccessor();
+        }
+        if (Semantic == Spec.SemanticOpcode) {
+            if (OldFusionHandler)
+                FusionFailure();
+            OldFusionHandler = CaseIt->getCaseSuccessor();
+            FusionSuccessorIndex = CaseIndex + 1;
+        }
+    }
+    if (!Continuation || !OldFusionHandler || OldFusionHandler == Continuation)
+        FusionFailure();
+
+    Module *M = Clone->getParent();
+    LLVMContext &Ctx = Clone->getContext();
+    Type *I64Ty = Type::getInt64Ty(Ctx);
+    Type *I32Ty = Type::getInt32Ty(Ctx);
+    FunctionType *ReadType = FunctionType::get(I64Ty, false);
+    FunctionType *WriteType = FunctionType::get(Type::getVoidTy(Ctx),
+                                                 {I64Ty, I64Ty, I32Ty}, false);
+    Function *ReadTarget = M->getFunction("vmp_fusion_read_target");
+    Function *ReadValue = M->getFunction("vmp_fusion_read_value");
+    Function *WriteResult = M->getFunction("vmp_fusion_write_result");
+    auto IsBridge = [](Function *F, FunctionType *Ty) {
+        return F && !F->isDeclaration() && F->getFunctionType() == Ty &&
+               F->getCallingConv() == CallingConv::C;
+    };
+    if (!IsBridge(ReadTarget, ReadType) || !IsBridge(ReadValue, ReadType) ||
+        !IsBridge(WriteResult, WriteType))
+        FusionFailure();
+
+    BasicBlock *FusionBB = BasicBlock::Create(
+        Ctx, "vmp.fusion." + vmpHex64(FunctionKey), Clone, Continuation);
+    IRBuilder<> Builder(FusionBB);
+    SmallVector<CallBase *, 5> PendingBridgeCalls;
+    CallInst *TargetCall = Builder.CreateCall(ReadTarget, {}, "vmp.fusion.target");
+    Value *Target = TargetCall;
+    PendingBridgeCalls.push_back(TargetCall);
+    CallInst *LHSCall = Builder.CreateCall(ReadValue, {}, "vmp.fusion.lhs");
+    Value *RawLHS = LHSCall;
+    PendingBridgeCalls.push_back(LHSCall);
+    CallInst *RHSCall = Builder.CreateCall(ReadValue, {}, "vmp.fusion.rhs");
+    Value *RawRHS = RHSCall;
+    PendingBridgeCalls.push_back(RHSCall);
+    CallInst *ThirdCall = Builder.CreateCall(ReadValue, {}, "vmp.fusion.third");
+    Value *RawThird = ThirdCall;
+    PendingBridgeCalls.push_back(ThirdCall);
+
+    IntegerType *ValueTy = IntegerType::get(Ctx, Spec.Width);
+    Value *LHS = Builder.CreateTrunc(RawLHS, ValueTy);
+    Value *RHS = Builder.CreateTrunc(RawRHS, ValueTy);
+    Value *Third = Builder.CreateTrunc(RawThird, ValueTy);
+    auto BuildBinary = [&](unsigned Opcode, Value *A, Value *B) -> Value * {
+        switch (Opcode) {
+        case Instruction::Add: return Builder.CreateAdd(A, B);
+        case Instruction::Sub: return Builder.CreateSub(A, B);
+        case Instruction::Mul: return Builder.CreateMul(A, B);
+        case Instruction::And: return Builder.CreateAnd(A, B);
+        case Instruction::Or: return Builder.CreateOr(A, B);
+        case Instruction::Xor: return Builder.CreateXor(A, B);
+        default: FusionFailure(); return nullptr;
+        }
+    };
+    Value *FirstResult = BuildBinary(Spec.FirstOpcode, LHS, RHS);
+    Value *SecondLHS = Spec.FirstIsLHS ? FirstResult : Third;
+    Value *SecondRHS = Spec.FirstIsLHS ? Third : FirstResult;
+    Value *Result = BuildBinary(Spec.SecondOpcode, SecondLHS, SecondRHS);
+    Value *Result64 = Spec.Width == 64 ? Result : Builder.CreateZExt(Result, I64Ty);
+    CallInst *WriteCall = Builder.CreateCall(
+        WriteResult, {Target, Result64, ConstantInt::get(I32Ty, Spec.Width / 8)});
+    PendingBridgeCalls.push_back(WriteCall);
+    BranchInst *ContinueBranch = Builder.CreateBr(Continuation);
+
+    // Inline one call at a time and remove its pointer from the pending list
+    // before InlineFunction erases the call instruction.  This keeps the
+    // iteration free of stale CallBase pointers if inlining mutates the block.
+    while (!PendingBridgeCalls.empty()) {
+        CallBase *Call = PendingBridgeCalls.pop_back_val();
+        if (!Call || !Call->getParent())
+            FusionFailure();
+        InlineFunctionInfo IFI;
+        InlineResult Result = InlineFunction(*Call, IFI);
+        if (!Result.isSuccess())
+            FusionFailure();
+    }
+    if (!ContinueBranch->getParent() ||
+        ContinueBranch->getSuccessor(0) != Continuation)
+        FusionFailure();
+
+    SI->setSuccessor(FusionSuccessorIndex, FusionBB);
+    if (!switchHasSuccessor(SI, OldFusionHandler))
+        removePhiIncomingForOldDispatchPred(OldFusionHandler, SI->getParent());
+    addPhiIncomingForNewDispatchPred(Continuation, SI->getParent(),
+                                     ContinueBranch->getParent(),
+                                     SI->getCondition(), NOP_OP);
+
+    // Keep the fused edge structurally equivalent to the NOP edge for every
+    // continuation PHI.  In particular, the selector PHI must be a typed zero
+    // constant rather than the decoded dispatch value.
+    for (PHINode &PN : Continuation->phis()) {
+        int NewIndex = PN.getBasicBlockIndex(ContinueBranch->getParent());
+        int NopIndex = PN.getBasicBlockIndex(SI->getParent());
+        if (NewIndex < 0 || NopIndex < 0)
+            FusionFailure();
+        Value *NopValue = PN.getIncomingValue((unsigned)NopIndex);
+        Value *FusedValue = PN.getIncomingValue((unsigned)NewIndex);
+        if (NopValue == SI->getCondition()) {
+            auto *IntegerTy = dyn_cast<IntegerType>(PN.getType());
+            if (!IntegerTy || !isa<ConstantInt>(FusedValue) ||
+                !cast<ConstantInt>(FusedValue)->isZero())
+                FusionFailure();
+        } else if (FusedValue != NopValue) {
+            FusionFailure();
+        }
+    }
+
+    removeFromUsedLists(*M, [&](Constant *C) {
+        Constant *Stripped = C->stripPointerCasts();
+        return Stripped == ReadTarget || Stripped == ReadValue ||
+               Stripped == WriteResult;
+    });
+
+    if (verifyFunction(*Clone, &errs()))
+        FusionFailure();
+
+    if (isIRObfuscationDebugEnabled()) {
+        errs() << "[VMP_FUSION_SPECIALIZE] clone=" << Clone->getName()
+               << " semantic=" << (unsigned)Spec.SemanticOpcode
+               << " width=" << Spec.Width
+               << " first=" << Spec.FirstOpcode
+               << " second=" << Spec.SecondOpcode << "\n";
+    }
+    return true;
+}
+
+// Fusion bridge functions are imported with the interpreter bitcode so that
+// each private clone can inline their stateful operations.  Once all clones
+// have been specialized, no definition should remain in the output module.
+// Keep externally supplied declarations intact; they may be resolved by the
+// final link and are not owned by this pass.
+static void cleanupVMPFusionHelpers(Module &M) {
+    static constexpr StringLiteral HelperNames[] = {
+        "vmp_fusion_read_target",
+        "vmp_fusion_read_value",
+        "vmp_fusion_write_result",
+    };
+
+    SmallVector<Function *, 3> Definitions;
+    for (StringLiteral Name : HelperNames) {
+        Function *Helper = M.getFunction(Name);
+        if (Helper && !Helper->isDeclaration())
+            Definitions.push_back(Helper);
+    }
+    if (Definitions.empty())
+        return;
+
+    // The interpreter module contributes llvm.used/llvm.compiler.used entries
+    // through appending globals.  Rebuild those arrays explicitly after the
+    // link: this also handles the opaque-pointer ConstantArray shape produced
+    // by the linker, where the generic helper can leave a stale aggregate use
+    // behind.
+    auto IsFusionHelper = [&](Constant *C) {
+        Constant *Stripped = C->stripPointerCasts();
+        return llvm::any_of(Definitions, [&](Function *Helper) {
+            return Stripped == Helper;
+        });
+    };
+    auto RemoveFromUsedList = [&](StringRef Name) {
+        GlobalVariable *GV = M.getNamedGlobal(Name);
+        if (!GV || !GV->hasInitializer())
+            return;
+        auto *Array = dyn_cast<ConstantArray>(GV->getInitializer());
+        if (!Array)
+            return;
+
+        SmallVector<Constant *, 16> Kept;
+        Kept.reserve(Array->getNumOperands());
+        bool Changed = false;
+        for (Value *Operand : Array->operands()) {
+            Constant *Entry = cast<Constant>(Operand);
+            if (IsFusionHelper(Entry)) {
+                Changed = true;
+                continue;
+            }
+            Kept.push_back(Entry);
+        }
+        if (!Changed)
+            return;
+
+        Type *ElementType = Array->getType()->getElementType();
+        GlobalValue::ThreadLocalMode ThreadLocalMode =
+            GV->getThreadLocalMode();
+        unsigned AddressSpace = GV->getAddressSpace();
+        if (Kept.empty()) {
+            GV->eraseFromParent();
+            return;
+        }
+
+        ArrayType *NewArrayType = ArrayType::get(ElementType, Kept.size());
+        auto *Replacement = new GlobalVariable(
+            M, NewArrayType, false, GlobalValue::AppendingLinkage,
+            ConstantArray::get(NewArrayType, Kept), "", GV, ThreadLocalMode,
+            AddressSpace);
+        Replacement->setSection(GV->getSection());
+        Replacement->takeName(GV);
+        GV->eraseFromParent();
+    };
+    RemoveFromUsedList("llvm.used");
+    RemoveFromUsedList("llvm.compiler.used");
+
+    for (Function *Helper : Definitions) {
+        Helper->removeDeadConstantUsers();
+        if (!Helper->use_empty()) {
+            if (isIRObfuscationDebugEnabled()) {
+                errs() << "[VMP_FUSION_CLEANUP] remaining uses for "
+                       << Helper->getName() << ":\n";
+                for (Use &U : Helper->uses()) {
+                    errs() << "  user=";
+                    U.getUser()->print(errs());
+                    errs() << "\n";
+                }
+            }
+            report_fatal_error(Twine("VMP: fusion bridge helper still has uses: ") +
+                               Helper->getName());
+        }
+        if (isIRObfuscationDebugEnabled())
+            errs() << "[VMP_FUSION_CLEANUP] erased=" << Helper->getName()
+                   << "\n";
+        Helper->eraseFromParent();
     }
 }
 
@@ -4608,7 +5039,8 @@ static Function *cloneVmInterpreterForFunction(Module *M,
                                                Function *TargetFunction,
                                                uint64_t FunctionKey,
                                                const uint8_t *DispatchMap,
-                                               const bool *UsedOpcodes) {
+                                               const bool *UsedOpcodes,
+                                               const VMPFusionSpec *FusionSpec) {
     if (!M || !SharedInterpreter || !TargetFunction || SharedInterpreter->empty()) {
         report_fatal_error("VMP: missing interpreter for private opcode dispatch");
     }
@@ -4655,6 +5087,9 @@ static Function *cloneVmInterpreterForFunction(Module *M,
     IRBuilder<> Builder(&*Entry.getFirstInsertionPt());
     LoadInst *SaltLoad = Builder.CreateLoad(I64Ty, SaltGV, "vmp.clone.salt");
     SaltLoad->setVolatile(true);
+
+    if (FusionSpec && FusionSpec->Enabled)
+        specializeFusionOpcode(Clone, FunctionKey, *FusionSpec, UsedOpcodes);
 
     if (!randomizeVmOpcodeDispatch(Clone, FunctionKey, SaltGV, DispatchMap, UsedOpcodes))
         report_fatal_error("VMP: private opcode dispatch specialization failed");
@@ -5107,7 +5542,8 @@ struct VMProtect : public ModulePass {
         Function *F = translator->get_function();
         Function *vm_interpreter_func = cloneVmInterpreterForFunction(
             &M, shared_vm_interpreter_func, F, translator->get_vm_function_key(),
-            translator->get_opcode_dispatch_map(), translator->get_used_opcodes());
+            translator->get_opcode_dispatch_map(), translator->get_used_opcodes(),
+            &translator->get_fusion_spec());
         GOVMModifier *modifier = new GOVMModifier(F, translator->get_gv_value_map(), translator->get_gep_info_map(),
                                                    translator->get_blockaddress_info_map(),
                                                    translator->get_value_map(),
@@ -5136,6 +5572,7 @@ struct VMProtect : public ModulePass {
         }
       }
 
+      cleanupVMPFusionHelpers(M);
       normalizeModuleLocalDefaultVisibility(M);
       return true;
 
@@ -5230,7 +5667,8 @@ PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM)
     Function *F = translator->get_function();
     Function *vm_interpreter_func = cloneVmInterpreterForFunction(
         &M, shared_vm_interpreter_func, F, translator->get_vm_function_key(),
-        translator->get_opcode_dispatch_map(), translator->get_used_opcodes());
+        translator->get_opcode_dispatch_map(), translator->get_used_opcodes(),
+        &translator->get_fusion_spec());
     GOVMModifier *modifier = new GOVMModifier(F, translator->get_gv_value_map(), translator->get_gep_info_map(),
                                                translator->get_blockaddress_info_map(),
                                                translator->get_value_map(),
@@ -5257,6 +5695,7 @@ PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM)
     changed = true;
   }
 
+  cleanupVMPFusionHelpers(M);
   normalizeModuleLocalDefaultVisibility(M);
 
   return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

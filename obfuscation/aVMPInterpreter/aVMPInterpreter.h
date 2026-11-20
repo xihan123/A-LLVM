@@ -151,6 +151,9 @@ extern void call_handler(uint64_t targetfunc_id);
 void vmp_resume_unwind(void *exc);
 void vm_interpreter();
 void data_seg_clear();
+uint64_t vmp_fusion_read_target(void);
+uint64_t vmp_fusion_read_value(void);
+void vmp_fusion_write_result(uint64_t offset, uint64_t value, uint32_t size);
 
 #ifdef __cplusplus
 }
