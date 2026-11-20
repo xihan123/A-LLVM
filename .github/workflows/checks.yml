@@ -70,3 +70,42 @@ jobs:
           for file in scripts/*.sh tests/*/*.sh; do
             bash -n "$file" || exit 1
           done
+
+  qseg-apk-vendor-host:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: QSEG host tests
+        shell: python -B "{0}"
+        run: |
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover("tests/qseg", pattern="test_*.py")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not (result.testsRun > 0 and result.wasSuccessful() and not result.skipped):
+              raise SystemExit("Host checks require a nonempty passing suite without skips.")
+      - name: QSEG host tests (optimized)
+        shell: python -O -B "{0}"
+        run: |
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover("tests/qseg", pattern="test_*.py")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not (result.testsRun > 0 and result.wasSuccessful() and not result.skipped):
+              raise SystemExit("Host checks require a nonempty passing suite without skips.")
+      - name: APK verifier vendor sources
+        shell: python -B "{0}"
+        run: |
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover("tests/apkverify", pattern="test_vendor.py")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not (result.testsRun > 0 and result.wasSuccessful() and not result.skipped):
+              raise SystemExit("Host checks require a nonempty passing suite without skips.")
