@@ -11,8 +11,40 @@
 
 隔离结果协议回归（包括普通 Python、`-O`、vendor 源文件校验及 CLI 旧成功状态失效）记录在
 `work/m5-apkverify-result/development-v2/`。该回归覆盖 stubbed 的 `setUpClass` → `probe` → CLI 汇总
-共享结果列表，不代表重新运行了真实 native 33 场景。本轮真实 native probe 仍受此前记录的 MinGW/
-mbedTLS 配置构建阻碍，须在后续受支持的构建环境单独复跑。
+共享结果列表，不代表重新运行了真实 native 33 场景。此前真实 native probe 的 MinGW/mbedTLS
+配置阻碍已由下方 host-only formatter gate 修复；完整 native 33 场景仍须按复跑入口单独运行。
+
+## 2026-11-20 MinGW host formatter 兼容性
+
+`tests/apkverify/CMakeLists.txt` 只在 `MINGW AND NOT ANDROID` 分支启用 host gate。配置检测到
+`CMAKE_CROSSCOMPILING` 时立即失败，因为这个 gate 必须实际运行生成的检查程序。随后用当前配置选择的
+C 与 C++ 编译器分别执行 `try_run`，显式传入 runtime、裁剪版 Mbed TLS include 目录、
+`MBEDTLS_CONFIG_FILE="apkverify_mbedtls_config.h"`，以及 `MBEDTLS_PLATFORM_C`、
+`MBEDTLS_PLATFORM_SNPRINTF_MACRO=snprintf`、`MBEDTLS_PLATFORM_VSNPRINTF_MACRO=vsnprintf`。
+每次配置先清除四个 probe 结果变量及其 cache，不能用手工 cache 值代替编译或运行。
+
+两个 probe 共享 `formatter_probe.c` 的 25 项检查，并分别以 C 与 C++ 编译：普通输出、刚好填充、
+截断时返回完整长度、终止符和 sentinel、`n == 0` 不写入、`NULL` 加零长度、`n == 1`，以及
+`va_list` 的 `vsnprintf` 路径。只有编译成功、运行返回 0 且输出严格为 25 行 `PASS <id>` 加
+`SUMMARY checks=25 failures=0`，才向 `ndkp_apkcrypto` 添加这三个宏的 `PUBLIC` 定义。正式的
+`apkverify_formatter_c`、`apkverify_formatter_cpp` 目标再从该库继承宏并直接运行，验证链接和消费
+路径与 configure gate 一致；Android 和非 MinGW host 不创建这些目标。
+
+本机验证使用 WinLibs MinGW-w64 x86_64 UCRT POSIX/SEH GCC/G++ 16.2.0、CMake 3.28.3、Ninja
+1.13.2。已有成功构建树上的后续 configure、build 和运行记录（包括 stdout/stderr）位于
+`work/m5-native-host/development-v2/`；构建目录为 `cmake-build4/`。后续 `final-build.stdout.txt`
+是 `ninja: no work to do` 的 23 字节记录，不是初始 fresh build 的原始流；初始成功生成的目标
+仍以该构建树中的文件为准。C 与 C++ formatter 各为 25/25，退出码 0；`apkverify_probe.exe`
+无 fixture 参数时退出码 2，这是该 probe 的参数用法结果，不作为 formatter 通过条件。
+`source-final/` 保存四个最终源码副本，`source-final-manifest.json` 记录大小和 SHA-256。
+
+同一构建目录以四个故意过期的 `91/92` cache 值重新配置，仍退出 0，随后
+`CMakeCache.txt` 恢复为 C/C++ `COMPILE_RESULT=TRUE`、`RUN_RESULT=0`，证实配置会重做检查。
+使用 `-DCMAKE_SYSTEM_NAME=Windows` 的新目录配置退出 1，并报告
+`The MinGW apkverify host requires a runnable formatter capability probe; cross-compiling is not supported`。
+前三次失败配置的专用 stdout/stderr 和逐次源码快照没有单独保存；对应 configure 日志仍保留在
+`cmake-build/`、`cmake-build2/`、`cmake-build3/` 的 `CMakeFiles/CMakeConfigureLog.yaml`，不对这些
+尝试声称有额外的独立流证据。
 
 日期：2026-10-21。代码与本机验证已完成，**未达到正式发布验收**。
 `verifyApkSignature`、QSEG 继续默认关闭；未远程发布，未递增/覆盖正式 `0.1.9 / p16`。
