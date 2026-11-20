@@ -492,7 +492,7 @@ class OfflineReportTests(unittest.TestCase):
         row = wrapper.read_json(path); row[field] = value
         path.write_text(json.dumps(row), 'utf-8')
         # Exercise the semantic gate even when the untrusted manifest is refreshed.
-        self.report['artifacts'][str(path)] = wrapper.identity(path)
+        self.report['artifacts'][str(path.resolve())] = wrapper.identity(path)
 
     def test_complete_report_replays_without_subprocess(self):
         self.assertEqual(self.check()['status'], 'passed')
@@ -507,7 +507,7 @@ class OfflineReportTests(unittest.TestCase):
         for mutate in mutations:
             changed = copy.deepcopy(self.expected_plan); mutate(changed)
             path.write_text(json.dumps(changed), 'utf-8')
-            self.report['plan'] = self.report['artifacts'][str(path)] = wrapper.identity(path)
+            self.report['plan'] = self.report['artifacts'][str(path.resolve())] = wrapper.identity(path)
             self.assertEqual(wrapper.encode_plan(changed), binary)
             with self.assertRaisesRegex(ValueError, 'plan differs from final APK'):
                 self.check()
@@ -518,7 +518,7 @@ class OfflineReportTests(unittest.TestCase):
                 path = self.path / self.report['commands'][0]; saved = path.read_bytes()
                 self.change_record(0, field, value)
                 with self.assertRaises(ValueError): self.check()
-                path.write_bytes(saved); self.report['artifacts'][str(path)] = wrapper.identity(path)
+                path.write_bytes(saved); self.report['artifacts'][str(path.resolve())] = wrapper.identity(path)
 
     def test_duplicate_order_and_cleanup_reference_rejected(self):
         original = copy.deepcopy(self.report)

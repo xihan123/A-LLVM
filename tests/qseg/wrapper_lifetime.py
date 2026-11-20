@@ -616,6 +616,7 @@ def validate_run(stdout, stderr, token, case, plan):
 
 
 def verify_device_report(path, fixture, sdk, java, serial, port):
+    path, fixture, sdk, java = (Path(value).resolve() for value in (path, fixture, sdk, java))
     report = read_json(path)
     require(report.get('schemaVersion') == 2 and report.get('status') == 'passed', 'device.py did not pass')
     invocation = report['invocation']
@@ -661,7 +662,7 @@ def verify_device_report(path, fixture, sdk, java, serial, port):
         require(execution['status'] == 'completed' and device_helper.negative_status(execution, row['protocolToken'], [127]) ==
                 ('expected-exit-signature', 127), 'negative raw protocol did not prove child exit 127')
         artifact = row['artifact']
-        require(Path(artifact['path']) == fixture / (row['mode'] + '.apk') and
+        require(Path(artifact['path']).resolve() == fixture / (row['mode'] + '.apk') and
                 identity(artifact['path']) == artifact, 'negative signed artifact changed')
     positive = [row for row in report['results'] if 'rejected' not in row]
     require([(row['main'], row['mode'], row['output']) for row in positive] ==
@@ -683,11 +684,12 @@ def app_argv(adb, remote, dex, arguments=()):
 
 
 def expected_commands(report, output):
-    fixture, sdk = Path(report['fixture']), Path(report['sdk'])
+    output = Path(output).resolve()
+    fixture, sdk = Path(report['fixture']).resolve(), Path(report['sdk']).resolve()
     adb = [str(sdk / 'platform-tools/adb.exe'), '-P', str(report['serverPort']), '-s', report['serial']]
     remote = report['remote']
     expected = {'device-' + name: [*adb, 'shell', *argv] for name, argv in DEVICE_QUERIES.items()}
-    expected['llvm-nm'] = [str(Path(report['ndk']) / 'toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-nm.exe'),
+    expected['llvm-nm'] = [str(Path(report['ndk']).resolve() / 'toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-nm.exe'),
                            '--defined-only', str(fixture / 'native/linked.so')]
     expected['remote-mkdir'] = [*adb, 'shell', 'mkdir', remote]
     for source, name in ((fixture / 'protected.apk', 'protected.apk'), (fixture / 'baseline.zip', 'baseline.zip'),
@@ -801,6 +803,7 @@ def run(args):
 
 
 def verify_report(output, report):
+    output = Path(output).resolve()
     require(not (output / 'failure.json').exists(), 'failure report accompanies success')
     require(report['schemaVersion'] == 1 and report['checkerRevision'] == 1 and report['callRoute'] == 'ART/JNI' and
             report.get('status') == 'passed' and
@@ -809,6 +812,9 @@ def verify_report(output, report):
     require(report['inputsBefore'] == report['inputsAfter'], 'input identities changed')
     unchanged(report['inputsBefore'])
     unchanged(report['artifacts'])
+    require(Path(report['plan']['path']).resolve() == output / 'plan.json' and
+            Path(report['binaryPlan']['path']).resolve() == output / 'plan.bin',
+            'plan path differs from exact output')
     require(identity(report['plan']['path']) == report['plan'] and identity(report['binaryPlan']['path']) == report['binaryPlan'],
             'plan bytes changed')
     plan = read_json(report['plan']['path'])
@@ -818,13 +824,15 @@ def verify_report(output, report):
     records = {}
     for reference in report['commands']:
         path = (output / reference).resolve()
-        require(path.parent == output / 'commands' and path.suffix == '.json', 'command reference escapes output')
+        require(path.parent == output / 'commands' and path.suffix == '.json',
+                'command reference escapes output')
         row = read_json(path)
         require(reference not in records and row['status'] == 'completed' and row['returncode'] == 0 and
                 row['cwd'] == str(ROOT) and row['timeoutSeconds'] == 180 and row['started'] <= row['ended'],
                 'failed/duplicate command or execution metadata differs')
         for stream in ('stdout', 'stderr'):
-            require(Path(row[stream]['path']).parent == output / 'commands' and identity(row[stream]['path']) == row[stream],
+            stream_path = Path(row[stream]['path']).resolve()
+            require(stream_path.parent == output / 'commands' and identity(stream_path) == row[stream],
                     'command raw bytes changed')
         records[reference] = row
     require(len(report['normal']) == 2 and {row['mode'] for row in report['normal']} == {'baseline', 'protected'}, 'normal denominator differs')

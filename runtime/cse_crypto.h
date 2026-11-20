@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <cstdlib>
+#include <limits>
 #include <vector>
 
 // Only the separately compiled runtime opts in. Business CSE constants and the
@@ -132,9 +134,15 @@ NDKP_CSE_PRIMITIVE inline void poly1305(const uint8_t key[32], const uint8_t* ms
 }
 NDKP_CSE_PRIMITIVE inline void auth(const uint8_t key[32], const uint8_t nonce[12],
                  const uint8_t* aad, size_t an, const uint8_t* data, size_t n, uint8_t tag[16]) {
-  std::vector<uint8_t> mac((an + 15) / 16 * 16 + (n + 15) / 16 * 16 + 16, 0);
+  const size_t max_size = (std::numeric_limits<size_t>::max)();
+  if (an > max_size - 15 || n > max_size - 15) std::abort();
+  const size_t aad_size = (an + 15) / 16 * 16;
+  const size_t data_size = (n + 15) / 16 * 16;
+  if (aad_size > max_size - data_size || aad_size + data_size > max_size - 16) std::abort();
+  const size_t mac_size = aad_size + data_size + 16;
+  std::vector<uint8_t> mac(mac_size, 0);
   if (an) std::memcpy(mac.data(), aad, an);
-  const size_t offset = (an + 15) / 16 * 16;
+  const size_t offset = aad_size;
   if (n) std::memcpy(mac.data() + offset, data, n);
   store64(mac.data() + mac.size() - 16, an); store64(mac.data() + mac.size() - 8, n);
   uint8_t first[64]; block(key, nonce, 0, first);
@@ -156,7 +164,10 @@ NDKP_CSE_PRIMITIVE inline void hmac(const uint8_t* key, size_t kn, const uint8_t
   uint8_t k[64] = {}, outer[96];
   if (kn > 64) stringarmor::sha2::sha256(key, kn, k);
   else if (kn) std::memcpy(k, key, kn);
-  std::vector<uint8_t> inner(64 + n);
+  const size_t max_size = (std::numeric_limits<size_t>::max)();
+  if (n > max_size - 64) std::abort();
+  const size_t inner_size = 64 + n;
+  std::vector<uint8_t> inner(inner_size);
   for (unsigned i = 0; i < 64; ++i) { inner[i] = k[i] ^ 0x36; outer[i] = k[i] ^ 0x5c; }
   if (n) std::memcpy(inner.data() + 64, msg, n);
   stringarmor::sha2::sha256(inner.data(), inner.size(), outer + 64);
