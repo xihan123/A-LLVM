@@ -1,5 +1,19 @@
 # 0.1.11-verify1 验证记录
 
+## 2026-11-20 APK verifier 结果完整性
+
+`tests/apkverify/test_verify.py` 增加 schema version 1 的 `run-summary.json`。每次 CLI 运行先发布新的
+`running` 状态并清空旧结果；最终摘要记录 `passed` 或 `failed`、退出时间、实际测试方法、33 个 case
+计数、unittest 状态、输入前后文件身份，以及 `results.json` 精确字节的大小和 SHA-256。逐例 `results.json`
+仍为顶层数组，保留 APK/证书摘要、API、host 退出码，以及适用时的 device 与 apksigner oracle 记录。
+只有六个预期方法和每个预期 case 均完整且唯一、所有结果字段符合预期、输入在运行期间未变化时才会通过；
+调用者还必须检查 CLI 退出码为 0。旧 `passed` 摘要不能代表新一轮结果。
+
+隔离结果协议回归（包括普通 Python、`-O`、vendor 源文件校验及 CLI 旧成功状态失效）记录在
+`work/m5-apkverify-result/development-v2/`。该回归覆盖 stubbed 的 `setUpClass` → `probe` → CLI 汇总
+共享结果列表，不代表重新运行了真实 native 33 场景。本轮真实 native probe 仍受此前记录的 MinGW/
+mbedTLS 配置构建阻碍，须在后续受支持的构建环境单独复跑。
+
 日期：2026-10-21。代码与本机验证已完成，**未达到正式发布验收**。
 `verifyApkSignature`、QSEG 继续默认关闭；未远程发布，未递增/覆盖正式 `0.1.9 / p16`。
 工作树中原有 QSEG、LLVM overlay、解释器及 vm.h 改动保留，此候选没有新增 LLVM pass 改动。
