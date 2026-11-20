@@ -201,3 +201,62 @@ once 状态、Java 对象、intern/cache 或业务明文生命周期；不执行
 `runtime_benchmark.py` 在两个签名 fixture APK 间交替顺序，预热后于 ART 进程内部计时
 1000 次数学、递归和字符串混合工作负载；核对校验和，保存逐次结果、配对中位比及
 bootstrap 95% 区间。它不包含进程启动，不代表全部宿主业务性能。
+
+`wrapper_lifetime.py` 使用新的固定 fixture 验证真实生成 wrapper 的正常 ART/JNI
+嵌套、递归与最终归还。它复用 `large_fixture.py` 的 14 个压力方法、原有 Transformer /
+NativeCompiler，以及 `device.py` 的同次签名、语义差分和 14 个认证负例。
+仅 fresh generated 的 registration TU 纳入测试 Probe；不修改生产代码，不新增导出。
+
+```powershell
+python -B tests/qseg/wrapper_lifetime.py build --output <新的fixture目录> `
+  --ndk <r30> --clang <候选Clang21> --java <JDK21的java.exe>
+python -B tests/dex2c/device.py --fixtures <同一fixture目录> --sdk <AndroidSDK> `
+  --java <同一java.exe> --serial <设备> --server-port 5038
+python -B tests/qseg/wrapper_lifetime.py run --fixtures <同一fixture目录> --sdk <AndroidSDK> `
+  --java <同一java.exe> --serial <设备> --server-port 5038 --output <新的观察目录>
+python -B tests/qseg/wrapper_lifetime.py verify --output <同一观察目录>
+```
+
+固定目标是 `sample/Run.outer(I)I`、`inner(I)I`、`recursive(II)I`；完整选中分母还包括
+`work0..13(I)I` 和 `marker()I`，symbol 从完整 MethodKey 推导。raw/final IR、逐方法
+收据、唯一 descriptor、staging 和最终认证 bytes 必须一致且为 `lease-v1`。aVMP 在改写
+前根据 doesNotThrow 选择 lease；后续 hardened CSE 会统一清除 NoUnwind，因此记录
+raw/final 的实际 nounwind 布尔值，不以该后处理属性单独推断租约。raw 的 br CFG 与
+final 的三块 indirectbr CFG 都严格检查自身 descriptor 的主租约、SelfCheck 临时租约
+及配对 release：解释器正常返回后，主 release 必须先于所有 return/后续 resume 分流。
+这是正常返回及其后续分流的结构证明，不表示任意 native EH 已覆盖。pinned、未知 IR 形状、缺块、
+目标超预算或独立压力不足均保留失败，不添加 noexcept 或降低门禁。固定 4 KiB 页、
+SDK build-tools 37.0.0，正常语义输出为
+`wrapper-lifetime:nested=71,recursive=342,pressure=14`。
+
+Probe 在 seal 前编入，最终签名后才生成 `plan.json` 和有界 `plan.bin`，以 configure
+导入 RX、descriptor、资源及 chunk 摘要，避免依赖最终 SO 的编译循环。配置只做配对
+acquire/read/release，实际 case 期间绝不 acquire/get 目标。首次 O_ENTER、I_ENTER、E3
+分别扫描完整解析的匿名 r--p 页候选，以 `/proc/self/mem` pread 到自有缓冲：前 32 字节
+只筛选，full 和所有 chunk 摘要唯一匹配并复查完整页区间后固定地址。读取、解析、EOF、
+关闭、权限或有界扫描失败均不算 absence/unique；活跃期不重新发现替代地址。
+
+嵌套事件为 O_ENTER、I_ENTER、I_EXIT、O_AFTER、O_EXIT、OUT；O_AFTER 在 outer 仍
+活跃时单独施压，直到 inner 的完整旧区间首次消失即停并丢旧指针。O_EXIT 再完整施压
+验证 outer。`recursive(3,7)` 恰为四帧，事件为
+E3,E2,E1,E0,X0,A1,X1,A2,X2,A3,X3,OUT，11 个 inside 事件各遍历全部压力资源，验证
+最深处和每次返回后的续执行。active 只按独立映射计费，不能解释为递归引用数。
+所有活跃目标须保持完整 r--p、full/chunk 摘要和精确 active/idle/pinned 合同；OUT 后
+逐步施压至外层/递归资源旧区间完整消失，首次 absence 后不再压力分配，然后关闭 hooks
+重入真实 wrapper，核对 71/342 和最终 active/pinned 为零。
+
+新 runner 对同一个最终 APK 再记录 baseline/protected 正向命令的 exact argv、状态和
+原始双流，双方都检查 CheckJNI；不依赖旧入口丢失的正向 stderr。nested/recursive
+使用独立 fresh app_process 和随机 token，拒绝缺失、重复、乱序或错 token 事件。
+`build.json` 绑定稳定构建子集及实际 Gradle classpath，签名/D8 产物在 run 阶段另行绑定。
+只有精确文件 cleanup、设备身份和输入/产物前后复核全部成功才发布 `results.json`；
+失败保存 `failure.json` 与原始证据。`verify_results(output)` 可离线重放报告与双流。
+
+此证据的 `callRoute` 为 ART/JNI；不证明同 TU 原生 handler 直连、真实 native unwind /
+EH、擦零、API26、真 16 KiB、业务宿主注入兼容性或性能。现有静态 native handler 合同
+与这里的动态 ART/JNI 证据保持各自范围。
+
+离线 verify 会从同一 fixture 的实际 selection、raw/final IR、staging、protection、
+segments、最终 APK 认证解包及已记录的 llvm-nm 原始字节重建整个 plan，重新绑定精确
+MethodKey/symbol、资源及 chunk、descriptor 和全部 RX 摘要，再逐字段比较保存的 plan。
+仅更新 plan 与文件身份清单，不能替代其与最终签名产物和方法分母的关联。
