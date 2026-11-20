@@ -260,3 +260,67 @@ EH、擦零、API26、真 16 KiB、业务宿主注入兼容性或性能。现有
 segments、最终 APK 认证解包及已记录的 llvm-nm 原始字节重建整个 plan，重新绑定精确
 MethodKey/symbol、资源及 chunk、descriptor 和全部 RX 摘要，再逐字段比较保存的 plan。
 仅更新 plan 与文件身份清单，不能替代其与最终签名产物和方法分母的关联。
+
+`java_exception.py` 使用独立的新 fixture 验证 Java `catch` / 原对象 `rethrow` 经过
+真实 ART/JNI wrapper 时的租约。它复用上述纯 IR、RX、descriptor、nounwind 和身份
+检查，不修改 `wrapper_lifetime` 的协议或生产 runtime / overlay / 编译参数。
+
+```powershell
+python -B -m unittest discover -s tests/qseg -p test_java_exception.py -v
+python -B -O -m unittest discover -s tests/qseg -p test_java_exception.py -v
+python -B tests/qseg/java_exception.py build --output <新的fixture目录> `
+  --ndk <r30> --clang <候选Clang21> --java <JDK21的java.exe>
+python -B tests/dex2c/device.py --fixtures <同一fixture目录> --sdk <AndroidSDK> `
+  --java <同一java.exe> --serial <设备> --server-port 5038
+python -B tests/qseg/java_exception.py run --fixtures <同一fixture目录> --sdk <AndroidSDK> `
+  --java <同一java.exe> --serial <设备> --server-port 5038 --output <新的观察目录>
+python -B tests/qseg/java_exception.py verify --output <同一观察目录>
+```
+
+完整分母固定为 `exceptionLeaf`、`caughtOuter`、`rethrowOuter`，14 个 `workN` 及
+`marker` 共 18 个选中方法；前三者 descriptor 都是
+`(Ljava/lang/IllegalStateException;)I`。全部 18 个方法（包括不参与观察的 marker）
+都必须通过 selection、raw/final IR、staging、收据和认证 chunk 的 `lease-v1` 门禁。
+二进制计划 magic 为 `QJEX01\0\0`，只携带前三个目标和 14 个压力资源；JSON 的
+`methodBindings` 另保存完整 18 个方法及目标的生成 C++ 异常路径绑定。
+
+未转换的 harness 预先创建唯一 `IllegalStateException("qseg-java-exception-sentinel-v1")`。
+叶方法在 event2 后抛出传入对象。两个外层方法都先尝试返回叶方法的结果，按顺序
+catch `IllegalArgumentException`（只返回 -11）和 `IllegalStateException`；后者先拒绝
+替代对象（-12），再发 event3。A 返回 73，B 重抛同一个 caught 对象。B 的 harness
+只在捕获原对象且精确类型、message 一致时编码 91，外层正常返回任何值都失败。
+普通 baseline/protected 的 exact stdout 为
+`java-exception:caught=73,rethrown=sentinel,pressure=14`。
+
+`caught`、`rethrow` 各用独立 fresh app_process、32hex token 和 `-Xcheck:jni`，每例
+严格六条记录：configure0、outer1、leaf2（depth1）、matched-catch3、harness4、finish10。
+active 分别为 0、outer、outer+leaf、outer、0、0；pinned 和观察器 targetLoans 始终0。
+event1/2 记录首次发现目标的 ID、起址和映射尺寸，并完整遍历 14 个压力资源；离线
+校验将 event3/4 的旧区间与对应首次发现逐项绑定。event3/4 分别在 1..14 步内证明叶 / 外层的固定旧
+完整区间首次无重叠。部分重叠或权限漂移立即失败，首次完整 absence 后停止新分配并
+丢弃地址；只读 maps 判断已释放目标，不读其旧内容。活跃目标仍须完整 r--p 和全部
+摘要正确。预算仅要求 leaf+每个外层分别不超过1 MiB，每个压力映射不超过1 MiB、
+独立压力之和超过1 MiB，固定真实4 KiB页。event4 前关闭 hooks，再次执行同一 wrapper
+并验证 73/73 或91/91，最终 active/pinned0。
+
+configure 绑定签名后 plan、加载 RX 和 descriptor，不 acquire/get 目标；目标只在
+真实 wrapper 持有期间经完整候选扫描发现。observe 的首个 JNI 操作是 ExceptionCheck，
+每次有效记录核对 global sentinel 身份，matched catch 和 B 的 harness 再核对 caught。
+同一签名 APK 另运行 `reject-substitute`、`reject-pending` 两个独立控制进程，单列
+`controlNegatives`：必须有 token 绑定的 BEGIN、ATTEMPT、精确身份 / pending 诊断和
+child125，adb本身退出0；退出码、信号或启动失败均不能单独充当拒绝证明。这两例
+不替代 `device.py` 的14个严格认证负例，每个认证负例仍须 child127。所有双流均检查
+CheckJNI，runner还重放普通 baseline/protected 的实际 exact argv 与原始双流。
+
+离线 `verify_results(output)` 不启动 subprocess、工具或设备：它从保存的 Java/classes、
+生成 protected.cpp、实际编译 classpath 中的 production runtime 资源、生成的
+`d2c_throw` / `d2c_catch`、全部 raw/final IR、staging、最终 APK 认证 bytes 和记录的
+llvm-nm 双流重建整个计划，再比较 JSON / 二进制、精确命令、事件、控制和 cleanup。
+生成 C++ 的未知语句、错误 catch 顺序 / 类型、缺 ExceptionCheck、错身份分支或重抛
+来源、默认0冒充成功都拒绝。只有 cleanup 和全部前后身份一致才写 `results.json`；
+失败材料保留在原目录，重试必须新目录。
+
+这里证明的仍是固定 Java 异常语义和 ART/JNI 租约。JNI pending exception 不等于
+原生 C++ unwind，静态 `vmp_resume_unwind_shared` 也不证明动态 native EH。此测试不
+主张任意 native EH、OOM恢复、unmap前直接擦零、QD/LSPosed业务、API26真机、物理16 KiB、
+Linux或有效性能A/B，也不改变 `apkOnlyRecoveryPrevented=false` 的既有限制。
