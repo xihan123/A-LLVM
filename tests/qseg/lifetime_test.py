@@ -1,4 +1,4 @@
-"""编译并在独立设备进程验证缓存生命周期及冷 kind1 分配失败的 fatal 路径。"""
+"""验证缓存生命周期、冷 kind1 分配失败及定向源擦零与调用方副本所有权。"""
 import argparse
 from datetime import datetime, timezone
 import errno
@@ -38,8 +38,23 @@ def unique_object(pairs):
     return result
 
 
+def reject_constant(value):
+    raise ValueError('invalid JSON constant: ' + value)
+
+
+def exact_json(actual, expected):
+    """JSON equality with exact types, including bool versus int and int versus float."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(exact_json(actual[key], value) for key, value in expected.items())
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(exact_json(a, b) for a, b in zip(actual, expected))
+    return actual == expected
+
+
 def read_json(path):
-    return json.loads(Path(path).read_text('utf-8'), object_pairs_hook=unique_object)
+    return json.loads(Path(path).read_text('utf-8'), object_pairs_hook=unique_object, parse_constant=reject_constant)
 
 
 def write_json(path, value):
@@ -112,10 +127,114 @@ def expected_events(token):
     return [('QSEG_MMAP:' + token + ':' + event).encode('ascii') for event in events]
 
 
+def validate_copy_wipe(stderr, token, page_size):
+    """Bind both forked cases to their source interval, caller buffer and real wait status."""
+    require(type(token) is str and re.fullmatch('[0-9a-f]{32}', token) is not None, 'invalid copy wipe run token')
+    require(type(page_size) is int and 0 < page_size <= 65536 and page_size & (page_size - 1) == 0,
+            'invalid copy wipe page size')
+    size, budget = 700000, 1 << 20
+    mapped = (size + page_size - 1) // page_size * page_size
+    require(size < mapped < budget < 2 * mapped, 'invalid copy wipe padding/pressure sizes')
+    prefix = b'QSEG_COPY_WIPE:'
+    records = [json.loads(line[len(prefix):].decode('ascii'), object_pairs_hook=unique_object,
+                          parse_constant=reject_constant)
+               for line in stderr.splitlines() if line.startswith(prefix)]
+    require(len(records) == 27 and all(type(record) is dict for record in records),
+            'missing/duplicate copy wipe events')
+    source_id, pressure_id = '05' + '00' * 15, '01' + '00' * 15
+    # active, idle and peak are mapped-size multiples; lastUsed/clock follow the real LRU transitions.
+    stages = (
+        (0, 0, 0, 0, False, 0, 0, False, 0, 0, 0),
+        (1, 0, 1, 0, True, 1, 1, False, 0, 0, 1),
+        (0, 1, 1, 0, True, 0, 2, False, 0, 0, 2),
+        (1, 1, 2, 0, True, 0, 2, True, 1, 3, 3),
+        (0, 2, 2, 0, True, 0, 2, True, 0, 4, 4),
+        (0, 1, 2, 1, False, 0, 2, True, 0, 4, 4),
+    )
+    first_events = [('BEGIN', 0), ('SOURCE_HELD', 1), ('COPY_BEFORE', 1), ('COPY_AFTER', 1),
+                    ('SOURCE_RELEASED', 2), ('PRESSURE_ACQUIRED', 3), ('PRESSURE_RELEASE_ATTEMPT', 3),
+                    ('TARGET_ENTER', 4)]
+    payload = {'payloadCheckedBytes': 64, 'payloadValue': 69, 'leadingCheckedBytes': 16,
+               'trailingCheckedBytes': 16, 'canaryValue': 165}
+    source = {'sourceCheckedBytes': size, 'sourceValue': 69, 'paddingCheckedBytes': mapped - size, 'paddingValue': 0}
+    summaries = []
+    start = 0
+    for case, reject in (('positive', False), ('reject-padding', True)):
+        tail = ([('INJECTED', 4), ('ZERO_SCAN', 4), ('REJECT_SOURCE_NONZERO', 4)] if reject else
+                [('ZERO_SCAN', 4), ('REAL_MUNMAP', 4), ('EVICTED', 5), ('COPY_RETAINED', 5),
+                 ('COPY_WIPED', 5), ('COMPLETE', 5)])
+        events = first_events + tail
+        observed = records[start:start + len(events) + 1]
+        start += len(observed)
+        base, buffer = observed[1].get('sourceBase'), observed[0].get('bufferBase')
+        pressure = observed[5].get('pressure')
+        require(type(pressure) is dict, 'missing copy wipe pressure identity')
+        pressure_base = pressure.get('data')
+        for address, length, alignment in ((base, mapped, page_size), (buffer, 96, 1),
+                                           (pressure_base, mapped, page_size)):
+            require(type(address) is int and 0 < address <= (1 << 64) - 1 - length and address % alignment == 0,
+                    'invalid copy wipe address/interval')
+        require(base + mapped <= buffer or buffer + 96 <= base, 'copy wipe source/caller buffer overlap')
+        require(base + mapped <= pressure_base or pressure_base + mapped <= base,
+                'copy wipe source/pressure mapping overlap')
+        interval = {'unmapBase': base, 'unmapBytes': mapped}
+        extras = {
+            'SOURCE_HELD': source,
+            'COPY_BEFORE': {'offset': 65520, 'length': 64, 'encoding': 2, 'bufferBytes': 96, 'payloadOffset': 16,
+                            'leadingCanaryBytes': 16, 'trailingCanaryBytes': 16,
+                            'initialCheckedBytes': 96, 'initialValue': 165, 'disjoint': True},
+            'COPY_AFTER': payload,
+            'SOURCE_RELEASED': source,
+            'PRESSURE_ACQUIRED': {'pressureCheckedBytes': size, 'pressureValue': 65},
+            'TARGET_ENTER': interval,
+            'INJECTED': {**interval, 'offset': mapped - 1, 'oldValue': 0, 'newValue': 123},
+            'ZERO_SCAN': {**interval, 'checkedBytes': mapped, 'nonzeroBytes': int(reject),
+                          'firstBadOffset': mapped - 1 if reject else -1, 'firstBadValue': 123 if reject else 0},
+            'REAL_MUNMAP': {**interval, 'result': 0},
+            'REJECT_SOURCE_NONZERO': {**interval, 'exitCode': 123},
+            'COPY_RETAINED': payload,
+            'COPY_WIPED': {**payload, 'payloadValue': 0, 'wipeOffset': 16, 'wipedBytes': 64},
+            'COMPLETE': {'apkOnlyRecoveryPrevented': False},
+        }
+        for seq, (name, stage) in enumerate(events):
+            active, idle, peak, evictions, resident, refs, last, pressure_resident, pressure_refs, pressure_last, clock = stages[stage]
+            expected = {
+                'runToken': token, 'case': case, 'seq': seq, 'event': name,
+                'target': {'id': source_id, 'kind': 2, 'size': size, 'data': base if resident else 0,
+                           'mapped': mapped if resident else 0, 'references': refs, 'pinned': False, 'lastUsed': last},
+                'pressure': {'id': pressure_id, 'kind': 1, 'size': size,
+                             'data': pressure_base if pressure_resident else 0, 'mapped': mapped if pressure_resident else 0,
+                             'references': pressure_refs, 'pinned': False, 'lastUsed': pressure_last},
+                'pageSize': page_size, 'mappedBytes': mapped, 'sourceBase': 0 if stage == 0 else base, 'bufferBase': buffer,
+                'cache': {'activeBytes': active * mapped, 'idleBytes': idle * mapped, 'pinnedBytes': 0,
+                          'peakResidentBytes': peak * mapped, 'evictions': evictions},
+                'clock': clock, 'otherResourcesCold': True, 'targetMatches': int(seq >= 7),
+                'injectHits': int(reject and seq >= 8), 'realMunmapCalls': int(not reject and seq >= 9),
+                'armed': name == 'PRESSURE_RELEASE_ATTEMPT' or stage == 4,
+                **extras.get(name, {}),
+            }
+            require(exact_json(observed[seq], expected), 'invalid copy wipe event: ' + case + '/' + name)
+        wait = {'runToken': token, 'case': case, 'seq': len(events), 'event': 'WAIT',
+                'status': 31488 if reject else 0, 'exited': True, 'code': 123 if reject else 0, 'signal': 0}
+        require(exact_json(observed[-1], wait), 'invalid copy wipe wait: ' + case)
+        summaries.append({'case': case, 'sourceBase': base, 'bufferBase': buffer, 'pressureBase': pressure_base,
+                          'eventCount': len(observed), 'checkedBytes': mapped, 'nonzeroBytes': int(reject),
+                          'firstBadOffset': mapped - 1 if reject else -1, 'targetMatches': 1,
+                          'injectHits': int(reject), 'realMunmapCalls': int(not reject), 'wait': wait,
+                          'copyRetainedObserved': not reject, 'payloadWipedBytes': 0 if reject else 64})
+    return {'targetId': source_id, 'targetKind': 2, 'sourceBytes': size, 'pageSize': page_size, 'mappedBytes': mapped,
+            'offset': 65520, 'length': 64, 'encoding': 2, 'bufferBytes': 96, 'payloadOffset': 16,
+            'canaryBytes': 16, 'apkOnlyRecoveryPrevented': False, 'cases': summaries}
+
+
 def validate_run(stdout, stderr, token, page_size):
     """Validate one exit-zero parent process's raw bytes; no Python assertions."""
     observed = [line for line in stderr.splitlines() if line.startswith(b'QSEG_MMAP:')]
     require(observed == expected_events(token), 'missing, duplicate, foreign or out-of-order mmap events')
+    validate_copy_wipe(stderr, token, page_size)
+    copy_lines = [line for line in stderr.splitlines() if line.startswith(b'QSEG_COPY_WIPE:')]
+    protocol = [line for line in stderr.splitlines() if line.startswith((b'QSEG_COPY_WIPE:', b'QSEG_MMAP:'))]
+    require(protocol == copy_lines + observed, 'early/interleaved suite completion or copy wipe events')
     match = re.fullmatch(rb'page=(\d+) active=(\d+) idle=(\d+) pinned=(\d+) peak=(\d+) '
                          rb'evictions=(\d+) wiped=(\d+)\r?\n', stdout)
     require(match is not None, 'missing/invalid full lifetime suite statistics')
@@ -160,8 +279,9 @@ def verify_results(output):
 
 
 def verify_report(output, report):
-    require(report['schemaVersion'] == 1 and report['checkerRevision'] == 1 and
-            report['status'] == 'passed', 'invalid results schema/status')
+    require(type(report['schemaVersion']) is int and report['schemaVersion'] == 1 and
+            type(report['checkerRevision']) is int and report['checkerRevision'] == 2 and
+            report['status'] == 'passed' and report.get('apkOnlyRecoveryPrevented') is False, 'invalid results schema/status')
     require(not (output / 'failure.json').exists(), 'failure report accompanies success')
     require(re.fullmatch('[0-9a-f]{32}', report['runId']) is not None and
             report['remoteDirectory'] == '/data/local/tmp/qseg-lifetime-' + report['runId'], 'invalid remote identity')
@@ -204,9 +324,11 @@ def verify_report(output, report):
         expected[optimization + '-chmod'] = [*adb, 'shell', 'chmod', '755', remote + '/test']
         expected[optimization + '-run'] = [*adb, 'shell', remote + '/test', remote + '/chunks.bin', run['token']]
         record = records[optimization + '-run']
-        stats = validate_run(Path(record['stdout']['path']).read_bytes(), Path(record['stderr']['path']).read_bytes(),
-                             run['token'], device['pageSize'])
-        require(stats == run['stats'], 'statistics mismatch')
+        stdout, stderr = Path(record['stdout']['path']).read_bytes(), Path(record['stderr']['path']).read_bytes()
+        stats = validate_run(stdout, stderr, run['token'], device['pageSize'])
+        require(exact_json(stats, run['stats']), 'statistics mismatch')
+        require(exact_json(validate_copy_wipe(stderr, run['token'], device['pageSize']), run.get('copyWipe')),
+                'copy wipe proof mismatch')
     expected['cleanup-files'] = [*adb, 'shell', 'rm', '-f', remote + '/test', remote + '/chunks.bin']
     expected['cleanup-directory'] = [*adb, 'shell', 'rmdir', remote]
     require(list(records) == list(expected), 'missing/duplicate/out-of-order command')
@@ -225,7 +347,8 @@ def execute(args):
     commands = Commands(output, root)
     run_id = uuid.uuid4().hex
     remote = '/data/local/tmp/qseg-lifetime-' + run_id
-    report = {'schemaVersion': 1, 'checkerRevision': 1, 'status': 'running', 'runId': run_id,
+    report = {'schemaVersion': 1, 'checkerRevision': 2, 'status': 'running', 'runId': run_id,
+              'apkOnlyRecoveryPrevented': False,
               'repository': str(root), 'serial': args.serial, 'serverPort': args.server_port,
               'remoteDirectory': remote, 'inputsBefore': {}, 'inputsAfter': {}, 'runs': [],
               'commands': commands.records}
@@ -256,6 +379,7 @@ def execute(args):
             stdout, stderr = commands.checked(optimization + '-run',
                 [*adb, 'shell', remote + '/test', remote + '/chunks.bin', run['token']])
             run['stats'] = validate_run(stdout, stderr, run['token'], report['device']['pageSize'])
+            run['copyWipe'] = validate_copy_wipe(stderr, run['token'], report['device']['pageSize'])
     except Exception as caught:
         error = {'type': type(caught).__name__, 'message': str(caught)}
     finally:

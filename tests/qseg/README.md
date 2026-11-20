@@ -152,14 +152,54 @@ O0/O2 均以 `-UNDEBUG -fno-lto` 编译并跑完新增子进程与原有生命�
 先保存 argv/cwd/起止时间/exit、timeout 或 launch-error，以及未解码的 stdout/stderr
 字节文件；失败写 `failure.json`，保留主错误和 cleanup 错误。报告记录固定 serial/
 server-port、独立远程目录及设备 model/SDK/pageSize/arch 四条原始查询。成功 schema
-为 `schemaVersion: 1, checkerRevision: 1`，包含 `inputsBefore/inputsAfter`、命令记录引用
-和 `runs` 中 O0/O2 的 token、`binaryBefore/binaryAfter`、stats；每份 identity 含路径、
+为 `schemaVersion: 1, checkerRevision: 2`，包含 `inputsBefore/inputsAfter`、命令记录引用
+和 `runs` 中 O0/O2 的 token、`binaryBefore/binaryAfter`、stats 与 `copyWipe`；每份 identity 含路径、
 字节数和 SHA256。可导入 `validate_run(stdout, stderr, token, page_size)` 复核单次原始
-输出，或 `verify_results(output)` 复核完整报告、命令、摘要及两次执行证据。
+输出，或 `verify_results(output)` 纯离线复核完整报告、命令、摘要及两次执行证据，不执行
+compiler、ADB 或其他 subprocess。v1 旧报告缺少定向读回协议，不能当作 v2 证据。
 
 该 ENOMEM 测试仍使用认证/APK 桩，只覆盖冷 kind1 acquire 的既有 fatal 行为；它不制造
 真实地址空间或系统内存耗尽，不证明失败后的清理、recover/retry、业务 EH 或签名 APK
 认证链，也不把一次受控 fault 扩展为全部 OOM 路径通过。
+
+同一个辅助单元还在 `setup()` 后、父进程任何 acquire 或线程开始前，分别 fork
+`positive` 与 `reject-padding`。两者直接继承五个资源和全部 cache/clock 为零的冷初态，
+只访问既有源 refs[4]（ID `05000000000000000000000000000000`、kind2、700000 字节全
+`0x45`）与唯一压力 refs[0]（kind1、700000 字节全 `0x41`）。源外借存活时，真实
+`ndkp_qseg_copy(payload, refs[4], 65520, 64, 2)` 复制跨 65536 边界的固定区间到独立
+96 字节 buffer；payload 位于 `[16,80)`，两侧各 16 字节 canary 为 `0xA5`。
+copy 紧邻前后直接检查源 data/mapped/pinned 和 `references == 1`，不能只凭 active
+统计推断内部借用归还；同时验证全量源内容、页尾 padding、payload、canary 和地址不重叠。
+
+外借 release 后不再读取源，只有已绑定原区间的 pre-munmap hook 例外。一次 refs[0]
+acquire/release 就使 idle 超过 1 MiB 并按 LRU 逐出源；P=4096 时 M=700416，padding
+`[700000,700416)` 共 416 字节，hook 入口 idle=1400832、evictions=0。原
+`checkedMunmap` 已经在真实 munmap 前逐字节读取整段并要求零；本次新增的是源 ID、
+原 B/M 区间、仍存活副本与直接读回的绑定，不能把旧 wipe 计数当成新增内容观察。
+正例对全部 M 字节（含 padding）做 volatile 扫描，要求 nonzero=0，再真实 munmap
+恰一次且返回 0。API 返回后源元数据清空、压力映射保留 idle，其余三个资源仍冷；
+不再解引用旧 B，也不继续施压或重载源。随后核对原副本与 canary 仍完整，fixture
+只对 payload 的 64 字节 volatile 清零并读回；不是清零整个 96 字节分配。
+
+拒绝控制只在同一精确目标 hook 将最后 padding 字节 M-1 从 0 改为 `0x7B`，再进入
+同一个全 M 字节扫描门禁。扫描不提前停止，必须报告恰一个非零及精确偏移/值，由共同
+门禁输出 `REJECT_SOURCE_NONZERO` 并 `_exit(123)`；注入器不模拟拒绝，目标真实 munmap
+次数必须为 0。父进程实际 `waitpid` 要求正常退出 123（status=31488、signal=0），
+不接受 assert、信号、普通 fatal 127 或缺失事件。此控制验证观察器，不是生产 wipe 缺陷。
+
+新 `QSEG_COPY_WIPE:` 严格 JSON 协议逐事件绑定 runToken/case/连续 seq、ID、B/C、
+尺寸、LRU/账务、直接引用数、全量扫描、实际 munmap 和父 WAIT；拒重复 key、额外/缺失
+字段、bool/int 或 int/float 混淆、错目标/尺寸、counter-only 和提前 COMPLETE。
+O0/O2 token 不同，正负例后仍须完成原 ENOMEM 与整套 `suite:COMPLETE`，ADB 顶层退出 0。
+`copyWipe` 摘要必须由保存的原始双流重新验证，不能用报告自述代替。
+
+本结果只来自真实生产缓存实现加认证/APK 桩及测试 munmap 包装器。现有 setup 对
+kind2 人工构造了 11 个 chunk 并设置 `ready=true`，而生产认证索引拒绝 kind2 多
+chunk，因此不证明生产 kind2 认证格式通过；恒定 `0x45` 也不能证明通用 offset 选择
+语义。不能与另一份原签名 APK `copy_probe` 结果拼成该 APK 的直接源擦零证据。
+不覆盖 CSE DecGV/once/全局解密副本、Java/intern/cache/业务生命周期、寄存器或临时
+明文、任意 native EH，也不证明业务副本自动清理。实际只支持本次跑过的设备与页大小，
+不扩展为 API26、真实 16 KiB、Linux 或性能结论；`apkOnlyRecoveryPrevented=false`。
 
 `copy_probe.py` 复用同一个已签名 large fixture，不重新生成夹具。它复用上述 APK
 签名、wrapper、收据及认证解包检查，固定选择 203 字节 kind2 资源
