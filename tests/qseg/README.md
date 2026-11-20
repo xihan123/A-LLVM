@@ -6,6 +6,42 @@
 python -B -m unittest discover -s tests/qseg -p 'test_*.py'
 ```
 
+`compiler_lifetime.py` 使用 LLVM 21 候选编译器生成独立的普通、嵌套、递归及未知展开
+fixture，只检查编译产物合同。保留原 CLI，输出目录必须全新或为空：
+
+```powershell
+python -B tests/qseg/compiler_lifetime.py --clang <候选clang.exe> `
+  --cert-file <公开证书.der> --output <新的空compiler-contract目录>
+```
+
+无混淆 flags 的对照必须保持未保护，并保留预期 nounwind 和嵌套/递归调用边。保护产物
+沿 wrapper 的 VM 收据、Code、RX descriptor 与 manifest 逐项绑定 ID、大小、kind 和
+策略，拒绝重复 VM 行。仅接受 LLVM 21 当前生成的直接调用、无环 br/ret wrapper 形状；
+未知形状失败，不能退回调用总数相等。主指针必须由目标 acquire/get 设置到 bytecode
+地址；从该指针准备好直到解释器返回，主借用始终有效。SelfCheck 的同 descriptor
+临时 acquire → CheckOne(ptr) → release 必须独立闭合；解释器处 lease 深度为 1，
+pinned 深度为 0，所有正常返回和 resume-helper 路径均无未归还借用。两个 Code slot
+只允许各自规定的一次 store；拒绝别名使用、地址逃逸、其他 descriptor 的 QSEG 调用、
+未知 wrapper helper 和借用指针额外使用。memset 只接受紧邻对应 stack alloca 的 frame
+零初始化。嵌套和递归的静态边须沿绑定解释器的入口 CFG、桥接入口 invoke、共享 Code
+compare 的实际 false-edge chain，再到由 handler 的 funcid 参数经 store/load 绑定的
+switch case；不可达的调用文本、跳过的比较和常量 selector 均不能作为证据。
+
+真正 EH 使用独立同源 fixture：先无 flags 编译，确认目标内同时存在 personality、
+invoke 和 landingpad，再 strict 编译，要求同名 EH 拒绝与 strict translation rejected
+诊断同时成立。超时、启动失败或其他 nonzero 不算 EH 拒绝。未知原生展开仍使用
+`pinned-unproven-unwind`，不能称为支持任意 C++ EH 的租约回收。
+
+每条命令保留参数、cwd、exit、原始 stdout/stderr；失败写 `failure.json`，不发布
+`results.json`。成功结果绑定输入源码、证书、compiler 文件、相关仓库源码、生成 IR、
+manifest 与 staging bytes 的路径和 SHA256，并复核运行期间未变。仓库源码摘要不证明
+候选 compiler 的构建来源。正常 Python 与 `python -O` 均执行相同显式校验。
+`checkerRevision: 2` 在原有范围上收紧 slot 使用、调用白名单和入口 CFG 连接检查；
+旧 v1 产物不因此成为 v2 证据，须在新的空目录重新编译。静态 CFG 连接不证明 VM opcode
+或 funcid 在实际执行中的动态可达性，也不证明完整 runtime。此检查不执行 VM、设备
+嵌套或 EH 路径，也不验证 OOM；这些运行时门禁
+仍需独立完成，现有手写 RAII 测试也不替代它们。
+
 三次独立标准 Java/Kotlin fixture 构建的逐目标差异门禁：
 
 ```powershell
