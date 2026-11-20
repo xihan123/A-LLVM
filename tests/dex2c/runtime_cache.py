@@ -78,8 +78,9 @@ def fresh_files(fixture):
     return result
 
 
-def check_freshness(fixture, ticket):
-    restored = {"native/" + name for name in RUNTIME.values()} if ticket["phase"] == "warm" else set()
+def check_freshness(fixture, ticket, *, expected_misses=()):
+    restored = {"native/" + artifact for log, artifact in RUNTIME.items()
+                if log not in expected_misses} if ticket["phase"] == "warm" else set()
     for path in fresh_files(fixture):
         # Windows Files.copy may preserve the cache artifact's old LastWriteTime.
         require(path.is_file() and (path.relative_to(fixture).as_posix() in restored or
@@ -154,7 +155,8 @@ def cache_key(inputs, command):
     return digest(inputs.encode("utf-8") + b"".join(b"\0" + arg.encode("utf-8") for arg in command))
 
 
-def check_cache(ticket, receipt, native):
+def check_cache(ticket, receipt, native, *, expected_misses=()):
+    require(set(expected_misses) <= RUNTIME.keys(), "unknown runtime miss target")
     commands = runtime_commands(ticket, receipt, native)
     exact_targets(commands, RUNTIME, "runtime commands")
     expected, targets = {}, {}
@@ -169,11 +171,12 @@ def check_cache(ticket, receipt, native):
                 (entry / "sha256").read_text(encoding="utf-8").strip() == value,
                 "cache artifact/receipt differs: " + artifact)
         text = (native / log).read_text(encoding="utf-8")
-        if ticket["phase"] == "warm":
+        if ticket["phase"] == "warm" and log not in expected_misses:
             match = HIT.fullmatch(text)
             require(match is not None and match[1] == value, "expected exactly one runtime hit: " + log)
         else:
-            require("runtime cache hit" not in text, "cold runtime hit: " + log)
+            require("runtime cache hit" not in text, "unexpected runtime hit for compile miss: " + log
+                    if log in expected_misses else "cold runtime hit: " + log)
         expected[key + "/artifact"] = value
         expected[key + "/sha256"] = file_hash(entry / "sha256")
         targets[key] = {"log": log, "artifact": artifact, "sha256": value, "command": command,
@@ -226,7 +229,7 @@ def tool_evidence(fixture, receipt, ticket):
     return evidence
 
 
-def inspect(fixture, ticket, contract, inputs):
+def inspect(fixture, ticket, contract, inputs, *, expected_misses=()):
     native = fixture / "native"
     receipt = read_json(native / "protection.json")
     require(receipt["schemaVersion"] == 7 and receipt["segmentedData"] is True and
@@ -271,7 +274,7 @@ def inspect(fixture, ticket, contract, inputs):
     keys, dispatch = clone_material((native / "protected.raw.ll").read_text(encoding="utf-8"), symbols)
     return {"compilerIdentity": receipt["compilerIdentity"], "configuration": configuration,
             "certificateSha256": receipt["certificateSha256"], "inputClasses": classes,
-            "runtimeTargets": check_cache(ticket, receipt, native),
+            "runtimeTargets": check_cache(ticket, receipt, native, expected_misses=expected_misses),
             "business": {name: file_hash(native / name) for name in BUSINESS_FILES},
             "resourceIds": {name: row[0] for name, row in resources.items()},
             "resourceContentSha256": {name: row[1] for name, row in resources.items()},
@@ -294,15 +297,17 @@ def copy_public(source, destination):
         shutil.copy2(source, destination)
 
 
-def snapshot(fixture, begin_path, output):
+def snapshot(fixture, begin_path, output, *, expected_misses=()):
     fixture, output = fixture.resolve(), output.resolve()
     outside(fixture, output)
     require(not output.exists(), "snapshot output must be new; preserve previous evidence")
     ticket = read_json(begin_path)
+    require(("cacheRecovery" in ticket) == bool(expected_misses),
+            "recovery tickets require the dedicated cache_recovery.py entrypoint")
     require(ticket["fixture"] == str(fixture), "begin fixture path differs")
     require(ticket["freshFiles"] == FRESH_FILES and ticket["emptyTrees"] == list(FRESH_TREES),
             "begin fresh-file contract differs")
-    check_freshness(fixture, ticket)
+    check_freshness(fixture, ticket, expected_misses=expected_misses)
     output.mkdir(parents=True)
     copy_public(fixture, output / "fixture")
     require(inventory(fixture) == inventory(output / "fixture"), "fixture changed during snapshot")
@@ -327,10 +332,10 @@ def snapshot(fixture, begin_path, output):
     write_json(output / "tool-inputs.json", tool_evidence(fixture, receipt, ticket))
     write_json(output / "capture.json", {"schemaVersion": 1, "capturedNs": time.time_ns(),
         "beginSha256": file_hash(output / "begin.json"), "files": inventory(output)})
-    return inspect_snapshot(output)
+    return inspect_snapshot(output, expected_misses=expected_misses)
 
 
-def inspect_snapshot(directory):
+def inspect_snapshot(directory, *, expected_misses=()):
     require(not any(path.suffix.lower() in PRIVATE_SUFFIXES for path in files(directory)),
             "snapshot contains a private keystore")
     capture = read_json(directory / "capture.json")
@@ -339,6 +344,8 @@ def inspect_snapshot(directory):
     require(actual == capture["files"], "snapshot file manifest differs")
     require(capture["beginSha256"] == file_hash(directory / "begin.json"), "begin digest differs")
     ticket = read_json(directory / "begin.json")
+    require(("cacheRecovery" in ticket) == bool(expected_misses),
+            "recovery tickets require the dedicated cache_recovery.py entrypoint")
     outside(Path(ticket["fixture"]).resolve(), directory.resolve())
     require(ticket["startedNs"] < capture["capturedNs"], "invalid capture chronology")
     contract_path = directory / "expected-contract.json"
@@ -349,8 +356,8 @@ def inspect_snapshot(directory):
     for mode in ("baseline", "protected", "common"):
         inputs[mode] = [directory / name for name in inputs[mode]]
     fixture = directory / "fixture"
-    check_freshness(fixture, ticket)
-    result = inspect(fixture, ticket, contract, inputs)
+    check_freshness(fixture, ticket, expected_misses=expected_misses)
+    result = inspect(fixture, ticket, contract, inputs, expected_misses=expected_misses)
     evidence = read_json(directory / "tool-inputs.json")
     runtime = inventory(fixture / "native/a_llvm", private=True)
     runtime = {name: value for name, value in runtime.items() if name.split("/")[0] != "__pycache__"}
@@ -365,6 +372,8 @@ def inspect_snapshot(directory):
 
 def compare(cold, warm):
     first, second = cold["ticket"], warm["ticket"]
+    require("cacheRecovery" not in first and "cacheRecovery" not in second,
+            "recovery tickets require the dedicated cache_recovery.py entrypoint")
     require((first["phase"], second["phase"]) == ("cold", "warm"), "requires a cold then warm pair")
     require(first["fixture"] == second["fixture"], "cold/warm must use the same absolute fixture path")
     require(first["token"] != second["token"] and cold["capture"]["capturedNs"] < second["startedNs"],
@@ -373,6 +382,13 @@ def compare(cold, warm):
     cache_files = inventory_from_capture(cold["capture"])
     require(second["cacheBefore"] == cache_files == inventory_from_capture(warm["capture"]),
             "warm must preserve exactly the cold runtime cache")
+    return {"passed": True, "coldHits": 0, "warmHits": len(RUNTIME), **compare_outputs(cold, warm),
+            "scope": "runtime artifact reuse correctness; not business reuse or a performance comparison"}
+
+
+def compare_outputs(cold, warm):
+    """The fixed inputs and fresh business material required by both cache protocols."""
+    first, second = cold["ticket"], warm["ticket"]
     for key in ("contractSha256", "contract", "separator", "freshFiles", "emptyTrees"):
         require(first[key] == second[key], "begin inputs differ: " + key)
     for key in ("compilerIdentity", "configuration", "certificateSha256", "toolInputs"):
@@ -390,11 +406,10 @@ def compare(cold, warm):
                 "business method material did not change: " + field)
     for name in ("protected.raw.ll", "protected.ll", "protected.o"):
         require(cold["business"][name] != warm["business"][name], "business output did not change: " + name)
-    return {"passed": True, "runtimeTargets": warm["runtimeTargets"], "coldHits": 0, "warmHits": len(RUNTIME),
+    return {"runtimeTargets": warm["runtimeTargets"],
             "expectedMethods": first["contract"]["methods"], "perMethod": differences,
             "business": {name: {"cold": value, "warm": warm["business"][name]}
-                         for name, value in cold["business"].items()},
-            "scope": "runtime artifact reuse correctness; not business reuse or a performance comparison"}
+                         for name, value in cold["business"].items()}}
 
 
 def inventory_from_capture(capture):

@@ -240,3 +240,94 @@ stdout contamination, partial-byte timeouts and report/cleanup failure paths:
 The exec/trap control also runs when a POSIX `sh` is on PATH; otherwise that
 single control is explicitly skipped. Host checks do not replace Android mksh,
 ADB transport or real-device validation of all generated APK cases.
+
+# Runtime cache corruption recovery
+
+`cache_recovery.py` version 2 is a separate protocol for one cold build followed
+by one mixed-hit rebuild at the **same absolute fixture path**. It keeps the ordinary
+`runtime_cache.py` cold/warm contract unchanged: those public snapshot/compare
+entrypoints reject recovery tickets and still require all 29 warm hits.
+
+The recovery denominator is fixed in the script, not inferred from observed
+logs. Corrupt exactly these four cold cache artifacts, each by flipping one
+byte without changing its size or touching its `sha256` receipt:
+
+| Compiler log | Cache artifact's output name | Required recovery result |
+| --- | --- | --- |
+| `apkverify-sha256.c.log` | `apkverify-sha256.c.o` | compile miss |
+| `ndkp_apkcert.log` | `ndkp_apkcert.o` | compile miss |
+| `cse-object.log` | `ndkp_cse_runtime.o` | compile miss |
+| `qseg-runtime.log` | `qseg-runtime.o` | compile miss |
+
+All other 25 targets must hit. In particular, **both** `cse-vmp.log` /
+`cse-runtime.raw.ll` and `cse-optimize.log` / `cse-runtime.ll` require exact hits
+and unchanged input, key and output identities. Only four object files are
+rebuilt. All 29 command/input keys, runtime output digests and the complete
+58 cache files must equal the cold baseline after recovery.
+
+The first four-target experiment included `cse-optimize.log`. Its real rebuild
+produced different optimized IR despite byte-identical raw IR: `-irobf-vmp-post`
+runs randomized constant encryption and indirect-branch protection. That
+changed the downstream CSE object key, left the old damaged object cache entry
+unused and added a new entry. The attempt failed its original fixed-key/cache
+contract and remains a failed attempt. Version 2 replaces that target with
+`ndkp_apkcert.log` and requires both IR stages to hit; it does not retroactively
+accept version 1 tickets or results. Recompiling randomized raw or optimized IR
+and recovering through downstream key migration are outside this protocol.
+
+Use a new scratch fixture and new external evidence paths. The tool never
+deletes files, injects corruption, compiles, signs or invokes ADB. The caller
+retains the real build command, zero process status and log, fixed production
+source identities, signing evidence and the strict device/audit results. Run
+the same build command and configuration in both rounds.
+
+1. Run the ordinary cold `begin` before the cold build. Complete the real build,
+   signing/device checks and authentication audits, then freeze an ordinary
+   cold snapshot.
+2. Remove only the documented `FRESH_FILES` and files inside `FRESH_TREES` from
+   the scratch fixture. Keep runtime sources, signing keys and cache intact.
+3. Get each selected key from the cold snapshot's inspected `runtimeTargets`
+   by its exact log name. Flip exactly one byte in that key's live cache
+   `artifact`; preserve all 29 `sha256` files and every unselected cache file.
+4. Run recovery `begin` **after** cleanup/injection and **before** rebuilding.
+   It rehashes the full frozen cold evidence, checks fresh outputs are absent,
+   and requires the complete live cache inventory to differ only at the four
+   selected artifacts. Its ticket binds the cold capture digest, exact keys,
+   offsets, before/after byte values and full before/after artifact digests.
+   These single-byte changes can be independently reconstructed from cold.
+5. Complete the real rebuild, strict device checks and audits. Freeze through
+   the recovery snapshot entrypoint, then re-read both snapshots with compare.
+
+```powershell
+# $fixture is the same absolute scratch fixture in every command.
+# $cold, $recovery and ticket/report paths are external, new evidence paths.
+& $python -B tests/dex2c/runtime_cache.py begin --fixture $fixture --phase cold --expected-contract $contract --output $coldBegin
+# Complete the real cold build and device/audit checks, then:
+& $python -B tests/dex2c/runtime_cache.py snapshot --fixture $fixture --begin $coldBegin --output $cold
+# Remove only documented fresh outputs and inject the four single-byte faults.
+& $python -B tests/dex2c/cache_recovery.py begin --fixture $fixture --cold $cold --output $recoveryBegin
+# Complete the identical real build command and device/audit checks, then:
+& $python -B tests/dex2c/cache_recovery.py snapshot --fixture $fixture --begin $recoveryBegin --cold $cold --output $recovery
+& $python -B tests/dex2c/cache_recovery.py compare --cold $cold --recovery $recovery --output $recoveryReport
+```
+
+Every snapshot and compare rechecks the public-file manifest, contract, exact
+29-target command/cache denominator, fixed input/tool/configuration identities,
+receipt hashes and all per-method business diversity checks. Recovery requires
+four fresh compile logs without a cache-hit marker and fresh rebuilt artifacts;
+only the other 25 hit artifacts retain the Windows cache-copy timestamp
+exception. Hit logs require the exact digest line. No extra or missing cache
+files are accepted, and repaired artifacts and receipts must match their
+outputs and cold bytes. Empty compiler logs alone do not prove a compile:
+absence at begin, fresh output/log evidence, exact production miss path, the
+real build's successful status and cache repopulation support that conclusion
+together. Snapshots exclude private keys. Keep device reports outside the
+fixture and preserve frozen snapshots unchanged.
+
+Host regression checks (synthetic builds; no compiler, Gradle, signing or ADB):
+
+```powershell
+& $python -B -m unittest discover -s tests/dex2c -p test_cache_recovery.py -v
+& $python -B -O -m unittest discover -s tests/dex2c -p test_cache_recovery.py -v
+& $python -B -m unittest discover -s tests/dex2c -p test_runtime_cache.py -v
+```
