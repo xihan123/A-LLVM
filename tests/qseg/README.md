@@ -133,6 +133,34 @@ python tests/qseg/cache_probe.py --ndk <ndk> --native <native目录> --apk <签�
 签名 APK 的直接擦零证据。这里只在隔离 fixture/API37/4 KiB 设备执行；API26、真
 16 KiB、Linux 和业务应用均需独立验证。
 
+`lifetime_test.py` 的辅助单元在同一生产 runtime TU 中包装唯一的 QSEG `mmap` 调用，
+默认转发真实调用。在线程启动前分别 fork 控制和注入 child；两者先成功 acquire/read/
+release 一个合法资源，再明确核对目标为未映射、无引用且未 pinned 的 2 MiB kind1。
+控制组真实映射并读取首尾、释放并核对映射状态清空；注入组只让该次精确参数匹配的
+调用返回一次 `MAP_FAILED`，在原始 write 事件后设置 `errno=ENOMEM`，由未修改的生产
+`allocate → fail` 路径退出 127。包装器自身不模拟退出。父进程使用实际 `waitpid`
+状态区分 exit/signal；带本次随机 token 的有序事件必须证明 warm/cold、attempt=1、
+hit=1 和 child 127，父进程及 ADB 顶层必须退出 0。意外返回会输出 `RETURNED` 并失败。
+
+```powershell
+python -B tests/qseg/lifetime_test.py --ndk <ndk> --adb <adb> --serial <设备> `
+  --server-port 5037 --output <新的空lifetime证据目录>
+```
+
+O0/O2 均以 `-UNDEBUG -fno-lto` 编译并跑完新增子进程与原有生命周期测试后，且必要的
+精确文件 cleanup 成功、输入和可执行文件摘要未变，才发布 `results.json`。每条命令
+先保存 argv/cwd/起止时间/exit、timeout 或 launch-error，以及未解码的 stdout/stderr
+字节文件；失败写 `failure.json`，保留主错误和 cleanup 错误。报告记录固定 serial/
+server-port、独立远程目录及设备 model/SDK/pageSize/arch 四条原始查询。成功 schema
+为 `schemaVersion: 1, checkerRevision: 1`，包含 `inputsBefore/inputsAfter`、命令记录引用
+和 `runs` 中 O0/O2 的 token、`binaryBefore/binaryAfter`、stats；每份 identity 含路径、
+字节数和 SHA256。可导入 `validate_run(stdout, stderr, token, page_size)` 复核单次原始
+输出，或 `verify_results(output)` 复核完整报告、命令、摘要及两次执行证据。
+
+该 ENOMEM 测试仍使用认证/APK 桩，只覆盖冷 kind1 acquire 的既有 fatal 行为；它不制造
+真实地址空间或系统内存耗尽，不证明失败后的清理、recover/retry、业务 EH 或签名 APK
+认证链，也不把一次受控 fault 扩展为全部 OOM 路径通过。
+
 `copy_probe.py` 复用同一个已签名 large fixture，不重新生成夹具。它复用上述 APK
 签名、wrapper、收据及认证解包检查，固定选择 203 字节 kind2 资源
 `83f9a7802590faea85342a4234ccff7e`，强制单 chunk0、`copy-v1` 及完整摘要。

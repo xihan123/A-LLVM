@@ -2,6 +2,9 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <cassert>
+#include <cerrno>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -11,9 +14,51 @@
 #include <unistd.h>
 static unsigned clearedMappings = 0;
 static int checkedMunmap(void* data, size_t size);
+static void* checkedMmap(void* address, size_t size, int prot, int flags, int fd, off_t offset);
 #define munmap checkedMunmap
+#define mmap checkedMmap
 #include "../../runtime/ndkp_qseg_runtime.cpp"
+#undef mmap
 #undef munmap
+static const char* runToken = "invalid";
+static const char* mmapCase = nullptr;
+static bool failNextMmap = false;
+static unsigned targetMmapAttempts = 0, injectedMmapCalls = 0;
+static constexpr size_t OomBytes = 2u << 20;
+static void event(const char* name, const char* format, ...) {
+  char message[512];
+  int prefix = std::snprintf(message, sizeof message, "QSEG_MMAP:%s:%s:", runToken, name);
+  if (prefix < 0 || size_t(prefix) >= sizeof message) _exit(120);
+  va_list args; va_start(args, format);
+  int count = std::vsnprintf(message + prefix, sizeof message - size_t(prefix), format, args);
+  va_end(args);
+  if (count < 0 || size_t(count) + size_t(prefix) + 1 >= sizeof message) _exit(120);
+  size_t bytes = size_t(prefix) + size_t(count); message[bytes++] = '\n';
+  for (size_t sent = 0; sent < bytes;) {
+    ssize_t n = ::write(STDERR_FILENO, message + sent, bytes - sent);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) _exit(120);
+    sent += size_t(n);
+  }
+}
+static void check(bool condition, const char* reason) {
+  if (!condition) { event("suite", "ERROR %s", reason); _exit(121); }
+}
+static void* checkedMmap(void* address, size_t size, int prot, int flags, int fd, off_t offset) {
+  if (mmapCase && address == nullptr && size == OomBytes && prot == (PROT_READ | PROT_WRITE) &&
+      flags == (MAP_PRIVATE | MAP_ANONYMOUS) && fd == -1 && offset == 0) {
+    ++targetMmapAttempts;
+    if (failNextMmap) {
+      failNextMmap = false; ++injectedMmapCalls;
+      event(mmapCase, "MMAP_ENOMEM attempts=%u hits=%u bytes=%zu errno=%d",
+          targetMmapAttempts, injectedMmapCalls, size, ENOMEM);
+      errno = ENOMEM;
+      return MAP_FAILED;
+    }
+    event(mmapCase, "MMAP_REAL attempts=%u hits=%u bytes=%zu", targetMmapAttempts, injectedMmapCalls, size);
+  }
+  return ::mmap(address, size, prot, flags, fd, offset);
+}
 static int checkedMunmap(void* data, size_t size) {
   const auto* p = static_cast<const volatile uint8_t*>(data);
   for (size_t i = 0; i < size; ++i) assert(p[i] == 0);
@@ -56,8 +101,53 @@ static void expectFailure(void (*test)(), int code, bool signal = false) {
   int status = 0; assert(waitpid(pid, &status, 0) == pid);
   assert(signal ? WIFSIGNALED(status) && WTERMSIG(status) == code : WIFEXITED(status) && WEXITSTATUS(status) == code);
 }
+static void mmapChild(bool inject) {
+  const char* name = inject ? "enomem" : "control";
+  event(name, "BEGIN");
+  const uint8_t* warm = ndkp_qseg_acquire_v1(refs[0]);
+  check(warm && warm[0] == 65 && warm[699999] == 65, "warmup contents");
+  ndkp_qseg_release_v1(refs[0]);
+  check(!stats().active_bytes, "warmup release");
+  event(name, "WARMUP_OK");
+  auto found = state().resources.find(ID{4});
+  check(found != state().resources.end() && found->second.kind == 1 && found->second.size == OomBytes &&
+        !found->second.data && !found->second.mapped && !found->second.references && !found->second.pinned,
+        "target must be a cold 2MiB kind1 resource");
+  check(!failNextMmap && !targetMmapAttempts && !injectedMmapCalls, "injection initially disabled");
+  event(name, "COLD_TARGET bytes=%zu", OomBytes);
+  mmapCase = name;
+  if (inject) { failNextMmap = true; event(name, "ARMED"); }
+  event(name, "TARGET_ATTEMPT");
+  const uint8_t* target = ndkp_qseg_acquire_v1(refs[3]);
+  if (inject) { event(name, "RETURNED"); _exit(122); }
+  check(target && target[0] == 68 && target[OomBytes - 1] == 68, "control target contents");
+  check(targetMmapAttempts == 1 && !injectedMmapCalls && !failNextMmap, "control real mmap count");
+  ndkp_qseg_release_v1(refs[3]);
+  check(!stats().active_bytes && !found->second.data && !found->second.mapped &&
+        !found->second.references && !found->second.pinned, "control target release");
+  event(name, "TARGET_OK attempts=%u hits=%u", targetMmapAttempts, injectedMmapCalls);
+  _exit(0);
+}
+static void mmapCaseWithWait(bool inject) {
+  pid_t pid = fork(); check(pid >= 0, "mmap fork");
+  if (!pid) mmapChild(inject);
+  int status = 0; pid_t waited;
+  do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+  check(waited == pid, "mmap waitpid");
+  const bool exited = WIFEXITED(status);
+  const int code = exited ? WEXITSTATUS(status) : -1;
+  const int signal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+  // Child counters are private after fork; only child events report attempts/hits.
+  event(inject ? "enomem" : "control", "WAIT status=%d exited=%d code=%d signal=%d", status, int(exited), code, signal);
+  check(exited && code == (inject ? 127 : 0) && !signal, "mmap child exit status");
+}
 int main(int argc, char** argv) {
-  assert(argc == 2); setup(argv[1]);
+  check(argc == 3, "chunks path and run token required");
+  runToken = argv[2]; check(std::strlen(runToken) == 32, "invalid run token length");
+  for (size_t i = 0; i < 32; ++i)
+    check((runToken[i] >= '0' && runToken[i] <= '9') || (runToken[i] >= 'a' && runToken[i] <= 'f'), "invalid run token");
+  setup(argv[1]);
+  mmapCaseWithWait(false); mmapCaseWithWait(true);
   const auto* outer = ndkp_qseg_acquire_v1(refs[0]);
   assert(outer[0] == 65 && outer[699999] == 65);
   assert(ndkp_qseg_acquire_v1(refs[0]) == outer);
@@ -106,5 +196,6 @@ int main(int argc, char** argv) {
       sysconf(_SC_PAGESIZE), (unsigned long long)stats().active_bytes, (unsigned long long)stats().idle_bytes,
       (unsigned long long)stats().pinned_bytes, (unsigned long long)stats().peak_resident_bytes,
       (unsigned long long)stats().evictions, clearedMappings);
-  close(state().fd); assert(unlink(argv[1]) == 0);
+  check(close(state().fd) == 0 && unlink(argv[1]) == 0 && std::fflush(stdout) == 0, "suite cleanup/output");
+  event("suite", "COMPLETE");
 }
