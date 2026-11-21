@@ -14,8 +14,8 @@
 #ifndef STRINGARMOR_SHA256_H
 #define STRINGARMOR_SHA256_H
 
-#include <cstddef>
-#include <cstdint>
+#include <stddef.h>
+#include <stdint.h>
 
 namespace stringarmor {
 namespace sha2 {
