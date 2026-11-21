@@ -6,6 +6,70 @@
 python -B -m unittest discover -s tests/qseg -p 'test_*.py'
 ```
 
+## p29 显式敏感 native 借用
+
+`scoped_sensitive.cpp/.py` 创建独立的真实签名 QSEG fixture。生产 QSEG runtime 对象由
+pristine 与 observed 两个 SO 共用，CSE derive/open 使用既有 VMP 编链；未定义
+`NDKP_APK_VERIFY`。主机 apksigner 验证 APK 签名和唯一证书，设备执行生产证书绑定、
+实时 RX 度量、容器/目录/块认证。该结果不等同于设备完整 APK 验签。
+
+```powershell
+python -B tests/qseg/scoped_sensitive.py build --output <新的fixture目录> `
+  --ndk <r30> --clang <候选Clang21> --java <JDK21的java.exe> --sdk <AndroidSDK>
+python -B tests/qseg/scoped_sensitive.py run --fixtures <同一fixture目录> `
+  --output <新的设备证据目录> --adb <adb> --serial <设备> --server-port 5037
+```
+
+载荷固定为 700003 字节 kind1 记录和 203 字节 kind2 块，原生调用方消费全部字节并核对
+摘要；kind1 使用真实 11 块格式，但不运行其中的 VM 指令。合法描述符完整位于该 SO 的
+RX，数据与预期摘要绑定到 staging、认证恢复和最终 APK。只导出 fixture 入口，不新增
+生产导出，也不预置 runtime `ready` 或替换认证函数。外部 runner 在新子进程中从签名
+APK dlopen，再调用编入 SO 的显式 sensitive acquire/release；调用路线为 native，
+不是 ART/JNI。未改 core-hardening 样例只用于旧路径回归，不执行新接口。
+
+两个正例都检查完整只读映射、三层配对重入、8 个跨线程借用与仍存活 owner 返回同一
+指针；8 个线程归还后 owner 仍可消费全部记录，最后一次归还后立即检查保存的完整旧页
+区间无任何映射覆盖，再恢复并检查全部内容。kind2 同时走普通 acquire、get 和 copy，
+要求普通与敏感地址不同，普通永久固定后敏感映射仍立即清除，原副本和 canary 保持完整。
+stats 仅计普通映射；fixture 最后显式擦除自己保存的 203 字节 copy。
+
+observed 只在独立测试库的链接层使用 `--wrap=mmap/munmap`。目标真实 mmap 后、
+解码前将整个映射填成非零 `0xA5`，发布后直接逐字节核对 padding；生产 release
+完成 RW 和擦除后，hook 以 volatile 逐字节扫描全部页取整范围，要求全部为零，随后
+调用真实 munmap 且结果为 0。每次扫描、实际 unmap 和 API 返回后的 absence 都绑定到
+本次 acquire 的原地址和尺寸。pristine 不插包装器，只验证生产行为和完整区间消失；
+它本身不直接观察 unmap 前的字节。
+
+其余八个独立子进程分别检查只读写入信号 11、重复 sensitive release 与伪造栈上 ref
+退出 127、padding 观察器控制、受控 mmap ENOMEM，以及错证书和两种篡改。padding
+控制只在目标 pre-munmap hook 将末尾一字节改为 `0x7B`，同一完整扫描必须发现恰一个
+非零、准确位置和值，公共门禁退出 123，真实 munmap 次数为零；这验证观察器，不是
+生产擦除缺陷。ENOMEM 在完成另一个资源的认证借用/清理后，只对冷目标 mmap 注入
+`MAP_FAILED/errno=12`，要求生产 fatal 127；不代表真实系统耗尽、恢复或全部 OOM 路径。
+
+错证书与未更新外层摘要的 asset 篡改在初始化认证期间退出 127；末块控制保持认证目录
+不变，只翻转目标 chunk10 的最后密文字节并更新 image 的容器摘要。该控制必须先出现
+初始化成功，再在敏感 acquire 返回指针前退出 127。所有子进程保留 exact argv、原始
+stdout/stderr 和实际 waitpid 状态；缺少有效前置标记、启动错误、assert 或其他信号均
+不算认证/参数拒绝。只有全部 10 例、源/产物前后摘要与精确设备清理通过才写 results。
+主机 `test_scoped_sensitive.py` 只校验生成器和双流门禁，不执行编译器或设备。
+
+正式结果为 `work/m3-scoped-p29/sol/scoped-fixture-final/build.json` 和
+`work/m3-scoped-p29/sol/scoped-device/results.json`。OnePlus 7 / API37 / ARM64 / 4 KiB
+的 10 例全部通过：两个正例退出 0，拒写 waitpid signal=11，配对/ENOMEM/三个认证负例
+退出 127，padding 控制退出 123。观察正例四次全页扫描及真实 unmap 均完成；700003
+字节记录映射为 700416 字节、padding 为 413，203 字节块映射为 4096 字节、padding
+为 3893。专项 host 12 项普通/`-O`、QSEG 全套 236 项、旧 lifetime O0/O2 和未改
+core-hardening 主/worker 各 39 项及禁用/恢复均通过。首次构建因未识别新版 apksigner
+标签而失败的 `scoped-fixture/` 原目录保留，不计为成功构建。
+`work/m3-scoped-p29/disassembly-receipts.json` 另绑定真实 qseg 对象与 pristine/observed
+链接库的 acquire、release、destroy 和 wipe 四个符号反汇编；pristine wipe 保留
+逐字节 volatile store，末引用路径按 mprotect → wipe → munmap 执行，再清映射状态。
+
+证据限定到实际设备和页大小，不外推 API26、物理 16 KiB、Linux、业务宿主、
+性能或任意 native unwind。清理只覆盖独立敏感映射，不清除普通缓存、CSE region、Java
+对象或其他业务/crypto 副本；`apkOnlyRecoveryPrevented=false`。
+
 `compiler_lifetime.py` 使用 LLVM 21 候选编译器生成独立的普通、嵌套、递归及未知展开
 fixture，只检查编译产物合同。保留原 CLI，输出目录必须全新或为空：
 

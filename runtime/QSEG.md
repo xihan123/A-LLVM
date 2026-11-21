@@ -76,7 +76,34 @@ p18 的 v1 生命周期接口 `ndkp_qseg_acquire_v1/release_v1` 使用 RX 描述
 锁内维护引用计数。活跃资源不回收；零引用资源按页计费，获取/释放触发 LRU，空闲预算 1MiB。
 淘汰时映射改为可写、volatile 清零整个映射再 munmap；不新增后台线程。
 旧 get 与借用混用时永久固定该资源。隐藏 `ndkp_qseg_stats_v1` 统计互斥的活跃、空闲、
-固定驻留字节及驻留峰值、淘汰次数；统计范围仅为恢复资源映射，不是全部进程内存。
+固定驻留字节及驻留峰值、淘汰次数；统计范围仅为普通 get/acquire/copy 缓存，
+不包含下面的敏感映射，也不是全部进程内存。
+
+p29 增加隐藏的显式敏感借用接口，声明为
+`ndkp_qseg_sensitive_acquire_v1(const uint8_t* ref)` 和
+`ndkp_qseg_sensitive_release_v1(const uint8_t* ref)`。它接收既有 kind 1/2 的合法 RX
+描述符，沿用目录、证书、实时 RX 与每个资源块的认证，不改变容器、描述符或段回执格式。
+完整资源恢复和认证成功后才发布只读指针。调用方显式使用：
+
+```cpp
+const uint8_t* bytes = ndkp_qseg_sensitive_acquire_v1(ref);
+consume_native_bytes(bytes, size);
+ndkp_qseg_sensitive_release_v1(ref);
+```
+
+每次成功 acquire 必须且只能配对一次 **sensitive release**，使用同一个描述符；普通
+`release_v1` 不能归还敏感借用。调用方负责所有已知退出与异常路径的配对，以及保存副本的
+后续清理。指针不得越过最后一次配对 release，也不得写入或自行 unmap。嵌套、重入和并发
+借用共享同一份敏感映射，非零引用期间一直有效；最后一次 release 在锁内将整页映射改为
+可写，volatile 擦除按运行时页大小取整的全部字节（含 padding），立即真实 munmap。
+再次 acquire 会重新认证、恢复和保护资源，不经过 1 MiB 空闲 LRU。
+
+同一资源的普通缓存与敏感映射是独立分配；普通 get 的永久固定不会延长敏感映射的寿命。
+清理保证只覆盖该 sensitive acquire 返回的映射。已有普通缓存、CSE 静态字符串、Java
+`String` / `intern()`、业务副本、寄存器及其他 crypto 临时明文各自保留原生命周期；
+同一资源仍可能有这些副本。普通 cache stats 的 peak 不能解释为含敏感映射的总驻留峰值。
+CSE region 的作用域借用留到独立批次，需要把 `decode_region_v1` 与生成的 guard 上下文
+接线；p29 没有将该编译器内部接口直接变成通用借用入口。
 
 编译器仅对原函数具有 nounwind 契约的 VM 生成主借用，在解释器返回后、Java 异常分支前释放。
 未知原生异常展开路径使用 `pinned-unproven-unwind`，不构成任意 C++ EH 的回收支持。

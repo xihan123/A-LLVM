@@ -29,6 +29,9 @@ struct Resource {
   size_t mapped = 0;
   uint64_t references = 0, lastUsed = 0;
   bool pinned = false;
+  const uint8_t* sensitiveData = nullptr;
+  size_t sensitiveMapped = 0;
+  uint64_t sensitiveReferences = 0;
 };
 struct State {
   std::mutex mutex;
@@ -53,6 +56,12 @@ uint64_t tick(State& s) {
   if (s.clock == std::numeric_limits<uint64_t>::max()) fail();
   return ++s.clock;
 }
+void destroy(const uint8_t* data, size_t mapped) {
+  void* p = const_cast<uint8_t*>(data);
+  if (mprotect(p, mapped, PROT_READ | PROT_WRITE)) fail();
+  wipe(p, mapped);
+  if (munmap(p, mapped)) fail();
+}
 void trim(State& s) {
   while (s.cache.idle_bytes > IdleBudget) {
     Resource* oldest = nullptr;
@@ -62,10 +71,7 @@ void trim(State& s) {
     }
     if (!oldest) fail();
     Resource& r = *oldest;
-    void* data = const_cast<uint8_t*>(r.data);
-    if (mprotect(data, r.mapped, PROT_READ | PROT_WRITE)) fail();
-    wipe(static_cast<uint8_t*>(data), r.mapped);
-    if (munmap(data, r.mapped)) fail();
+    destroy(r.data, r.mapped);
     s.cache.idle_bytes -= r.mapped;
     ++s.cache.evictions;
     r.data = nullptr; r.mapped = 0;
@@ -243,8 +249,7 @@ Resource& resource(State& s, const uint8_t* ref) {
   if (found == s.resources.end() || found->second.size != load32(ref + 16) || found->second.kind != load32(ref + 20)) fail();
   return found->second;
 }
-const uint8_t* restore(State& s, Resource& r, const ID& id) {
-  if (r.data) return r.data;
+const uint8_t* decode(State& s, const Resource& r, const ID& id) {
   auto* out = static_cast<uint8_t*>(allocate(r.size)); size_t cursor = 0;
   for (uint32_t i = 0; i < r.chunks.size(); ++i) {
     const Chunk& c = r.chunks[i]; std::vector<uint8_t> cipher(c.stored);
@@ -263,7 +268,13 @@ const uint8_t* restore(State& s, Resource& r, const ID& id) {
     wipe(cipher.data(), cipher.size()); cursor += c.plain;
   }
   if (cursor != r.size) fail();
-  publish(out, r.size); r.data = out; r.mapped = mappingSize(r.size);
+  publish(out, r.size);
+  return out;
+}
+const uint8_t* restore(State& s, Resource& r, const ID& id) {
+  if (r.data) return r.data;
+  const uint8_t* out = decode(s, r, id);
+  r.data = out; r.mapped = mappingSize(r.size);
   r.lastUsed = tick(s); s.cache.idle_bytes += r.mapped;
   const uint64_t resident = s.cache.active_bytes + s.cache.idle_bytes + s.cache.pinned_bytes;
   if (resident > s.cache.peak_resident_bytes) s.cache.peak_resident_bytes = resident;
@@ -290,6 +301,26 @@ extern "C" const uint8_t* ndkp_qseg_acquire_v1(const uint8_t* ref) {
 extern "C" void ndkp_qseg_release_v1(const uint8_t* ref) {
   State& s = state(); std::lock_guard<std::mutex> guard(s.mutex); initialize(s);
   release(s, resource(s, ref));
+}
+extern "C" const uint8_t* ndkp_qseg_sensitive_acquire_v1(const uint8_t* ref) {
+  State& s = state(); std::lock_guard<std::mutex> guard(s.mutex); initialize(s);
+  Resource& r = resource(s, ref);
+  if (r.sensitiveReferences == std::numeric_limits<uint64_t>::max()) fail();
+  if (!r.sensitiveData) {
+    ID id; std::memcpy(id.data(), ref, 16);
+    r.sensitiveData = decode(s, r, id); r.sensitiveMapped = mappingSize(r.size);
+  }
+  ++r.sensitiveReferences;
+  return r.sensitiveData;
+}
+extern "C" void ndkp_qseg_sensitive_release_v1(const uint8_t* ref) {
+  State& s = state(); std::lock_guard<std::mutex> guard(s.mutex); initialize(s);
+  Resource& r = resource(s, ref);
+  if (!r.sensitiveData || !r.sensitiveReferences) fail();
+  if (!--r.sensitiveReferences) {
+    destroy(r.sensitiveData, r.sensitiveMapped);
+    r.sensitiveData = nullptr; r.sensitiveMapped = 0;
+  }
 }
 extern "C" void ndkp_qseg_stats_v1(ndkp_qseg_cache_stats_v1* out) {
   if (!out) fail();
