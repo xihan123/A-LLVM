@@ -627,6 +627,9 @@ static int vm_restore_call_frame(void) {
 	vm_function_key = frame->vm_function_key;
 	last_br_from_bb_id = frame->last_br_from_bb_id;
 	current_bb_id = frame->current_bb_id;
+	volatile uint8_t *retired = (volatile uint8_t *)frame;
+	for (size_t i = 0; i < sizeof(*frame); ++i)
+		retired[i] = 0;
 	return 1;
 }
 

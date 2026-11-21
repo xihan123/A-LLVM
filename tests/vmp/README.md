@@ -19,11 +19,48 @@ python tests/vmp/call_frames.py --ndk "$NDK" --serial "$SERIAL"
 另在预热 TLS 后注入可执行文件的 malloc 失败，验证 native 错误出参与无堆快照的 VM 递归。
 IR 门禁要求真实字节码、TLS 帧指针、无分发器快照 malloc/free、入口复验，以及未被优化掉的
 VM callee/递归调用。支持 `--clang` 和 `--work-dir`；不传序列号仅编链，CI 不含设备验证。
-`--semantic-only` 用于演示旧编译器失败，跳过新帧结构断言。
+`--semantic-only` 用于演示旧版 LLVM 21 编译器失败，只跳过新 IR 结构断言，仍观察退休控制帧是否清零。
 
 每次入口增加与 VM 数据帧大小成正比的栈空间和清零成本，大帧及深递归需单独测量。
 跨 VM 的 `longjmp`、线程取消、异步信号重入不受支持，原有向量、动态 alloca、过度对齐等
 IR 支持边界也未扩展。详情见 [p9 验证记录](../../docs/vmp-call-frames-p9.md)。
+
+## p26 退休控制帧擦除
+
+LLVM 21 的解释器在完整恢复调用者控制状态后，使用 volatile 字节写入擦除整个退休帧槽，
+包括结构体 padding。当前 ARM64 帧为 88 字节，其中 `ip` 后有 4 字节 padding。数据帧、
+返回值、`sret` 和待传播异常继续遵守既有生命周期。
+
+脚本按实际选用 Clang 的 `-dumpversion` 识别 major，仅 LLVM 21 启用本节的观察与 post。
+O0 的 `switch i64` 和 switch 前无数据帧读取断言也仅适用于 LLVM 21；LLVM 20 的分发器
+使用条件链。其他 major 仍执行六模式语义编链、TLS 帧指针、无分发器快照 malloc/free、
+入口复验和 callee 门禁。LLVM 20 的生成 bitcode 未在本批更新。
+
+`call_frames.py` 在实际生成的 IR 后追加仅用于测试的隐藏访问器，取得唯一真实 TLS 控制栈、
+栈顶及由结构体 GEP 计算的帧大小和 padding 边界。驱动只向空闲槽填入 `0xA5`，在 native
+回调中确认栈顶前进、实际槽已保存状态且 padding 仍为 `0xA5`；正常和异常弹栈后检查完整槽
+全零、相邻未使用槽未改。嵌套回调快照全部活跃前缀，再确认更深回调到达下一层，返回后活跃
+帧不变、深层退休槽清零。这些检查随现有八线程用例运行，保留原生参考差分。
+
+O2 的 VMP+SelfCheck+Entry 先执行真实 `-irobf-vmp-post`，再追加访问器；对象编译禁用后续
+IR passes。`--work-dir` 保存原始 `.ll`、`.post.ll`、实际对象输入 `.observed.ll`、各模式对象
+和可执行文件，以及传入 `--serial` 时的 `*.device.log`。不传设备序列号仅验证编链。
+
+```bash
+python tests/vmp/call_frames.py --clang "$CLANG" --ndk "$NDK" --serial "$SERIAL" \
+  --work-dir work/m3-frame-wipe-p26/call-frames
+python tests/vmp/call_frames.py --clang "$P25_CLANG" --ndk "$NDK" --serial "$SERIAL" \
+  --semantic-only --work-dir work/m3-frame-wipe-p26/negative
+```
+
+第二条命令应在旧版保留退休槽内容时失败。此批只处理退休控制帧，缓存回收和受控敏感数据借用
+仍在 [M3 路线图](../../docs/CORE_HARDENING_ROADMAP.md#m3-敏感数据借用与-vm-状态回收) 中待做。
+
+本轮 LLVM 21 六模式设备验证全部通过，四个观察模式均确认 88 字节完整帧、4 字节 padding、
+正常/原生异常/嵌套和八线程；最终记录在 `work/m3-frame-wipe-p26/final-call-frames.log`
+及同名目录。冻结 p25 的 VMP/O0 和 protected/O2+post 动态负例均退出 38，见同根
+`p25-negative-results.json`。实际 LLVM 20 的默认六模式编链通过，未传 `--semantic-only`，
+见 `llvm20-final-call-frames.log`；此项核对共用测试兼容性，不代表 LLVM 20 已加入擦除。
 
 ## p8 定长内存操作
 

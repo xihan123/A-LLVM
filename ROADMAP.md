@@ -2,20 +2,22 @@
 
 `[x]` 已完成，`[~]` 已实现但未完成端到端验证，`[ ]` 未开始。
 
-LLVM 21 的多组 VM 指令融合及首批 handler/操作数布局变体已完成本地专项与样例验证，后续推进运行期数据生命周期、共享库完整性和 AArch64 机器码保护。计划和各批验收见 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md)。
+LLVM 21 的多组 VM 指令融合、首批 handler/操作数布局变体及 p26 退休控制帧擦除已完成本地专项与样例验证。M3 后续推进缓存和敏感数据生命周期，再进入共享库完整性和 AArch64 机器码保护。计划和各批验收见 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md)。
 
 下面各阶段为历史记录，具体环境和验证范围见 [验证记录](./tests/VALIDATION.md)。
 
-## 当前状态：p25 / M2
+## 当前状态：p26 / M3 首批
 
-- [x] p23 每函数最多四组整数融合、p24 dex2c 纯整数区段标量化保持生效。p25 在每组编译期独立选择原生运算或同宽 carry/borrow 循环，并选择 target 在前三个值之前或之后的布局；每组最多替换首个 add/sub，沿用系统随机源，无新增启用开关。`config/patchset.env` 当前为 `p25`。
+- [x] p26 在完整恢复调用者状态后，以 volatile 字节循环清零完整退休控制帧，包括 padding。真实 TLS 槽观察覆盖正常、原生异常、嵌套活跃帧与八线程；O0/O2 六种设备组合通过，含 O2 protected 的真实 post；p25 两个动态负例均退出 38。未改样例完成主/worker 各 39 项、禁用失败和恢复通过；真实对象到 APK 内恢复函数代码绑定已核对，22 个非 README 源文件未改。证据在 `work/m3-frame-wipe-p26/validation-report.json`；当前补丁集为 `p26`。
+- [x] 共用调用帧测试对实际 Clang 21 启用擦除观察、post 及其 O0 switch 结构断言；Clang 20 保留条件链分发器。实际 LLVM 20 默认六模式编链通过，TLS、无快照 malloc/free、入口复验与 callee 门禁保留；LLVM 20 未移植退休帧擦除。
+- [x] p23 每函数最多四组整数融合、p24 dex2c 纯整数区段标量化保持生效。p25 在每组编译期独立选择原生运算或同宽 carry/borrow 循环，并选择 target 在前三个值之前或之后的布局；每组最多替换首个 add/sub，沿用系统随机源，无新增启用开关。
 - [x] `tests/vmp/fusion.py --variant-coverage` 的 14 个候选和一个冻结 p24 基线全部通过 ARM64 设备参考差分；16 组覆盖 60 种有效 handler/布局组合。raw/post 的真实字段消费顺序和计算结构相同，专项总字节码均为 1585 字节；固定 64 位 add/xor 的四组合已从真实对象核到最终 SO 的原生运算或 carry 循环。
-- [x] 仓库内 [core-hardening 示例](./dex2c/samples/core-hardening/README.md) 的两个未改 Java 方法仍各有四组融合，raw/post 各保留一个 carry/borrow 循环；字节码为 4158/1351 字节。同模块 native 为四组、一个循环、363 字节。真实对象、链接库和封装库的代码对应已核对，最终签名 APK 的两项关键方法静态检查通过。
+- [x] p25 的仓库内 [core-hardening 示例](./dex2c/samples/core-hardening/README.md) 两个未改 Java 方法各有四组融合，raw/post 各保留一个 carry/borrow 循环；字节码为 4158/1351 字节。同模块 native 为四组、一个循环、363 字节。真实对象、链接库和封装库的代码对应已核对，最终签名 APK 的两项关键方法静态检查通过。
 - [x] p25 在 OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 上主/worker 各 39 项通过，禁用模块后两进程明确失败，恢复后再次通过；安装包哈希与冻结候选一致。证据在本地 `work/m2-variants-p25/validation-report.json`；样例算法、断言、配置及 22 个非 README 源文件未改。
 - [x] 固定产物和冻结 driver 完成五轮交错复测，八项 checksum 一致；审查后新增两项高位可见向量，在原 15 份 SO 上追加语义复验全部通过。i64 H1/L0 的典型、64 轮 carry/borrow 输入中位数为 4.270/4.167/4.184 微秒，p24 为 3.203/3.211/3.224 微秒；同布局 H0 也有 4.136/4.144/4.075 微秒。整段 VM 粗计时未绑核或锁频，差异不能全部归于新增算法。
 - [ ] 完整 QDReadHook 业务覆盖、发布预算与性能验收仍待单独完成。本轮保持每组最多一个 add/sub 变体，不扩大指令族；dex2c/native SO 相对 p24 为 267048→268056 / 31456→31544 字节，无整体体积或性能收益结论。
 
-规划保留 p22 基线，p25 实现以 `b9c71b7` 的 p24 为冻结对照。M1 与 M2 本批范围的本地验证已完成，M3 及后续阶段另行排期。
+规划保留 p22 基线，p25 实现以 `b9c71b7` 的 p24 为冻结对照，p26 首批以 `3133e358` 的 p25 代码树为冻结对照。M1、M2 本批范围及 M3 退休控制帧首批的本地验证已完成；M3 的缓存回收、受控敏感数据借用和后续阶段仍待实施。
 
 ## 阶段 0 — 骨架
 
@@ -92,7 +94,7 @@ LLVM 21 的多组 VM 指令融合及首批 handler/操作数布局变体已完�
 ## 当前优先事项
 
 1. M1 多组融合与 M2 首批 handler/布局变体已在未改 Java/native 样例上完成本地验证；保持当前选择上限，完整业务覆盖与性能预算另行验收。
-2. 后续批次按 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md) 另行安排。构建加速仍有独立的 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md)。
+2. p26 退休控制帧首批已完成本地验证，继续按 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md) 推进 M3 缓存与敏感数据生命周期。构建加速仍有独立的 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md)。
 
 ## 发版前必做
 

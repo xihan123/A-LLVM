@@ -72,6 +72,98 @@ struct TrackedError : std::runtime_error {
   ~TrackedError() override { --live_exceptions; }
 };
 static int throw_tracked(int *out, int) { *out = 42; throw TrackedError(); }
+#ifdef NDKP_OBSERVE_FRAMES
+extern "C" {
+unsigned char *ndkp_test_frame_stack();
+unsigned ndkp_test_frame_top();
+size_t ndkp_test_frame_stride();
+size_t ndkp_test_frame_padding_end();
+}
+static thread_local int observation_error;
+static thread_local unsigned observed_callbacks;
+static bool bytes_are(const volatile unsigned char *bytes, size_t size, unsigned char value) {
+  for (size_t i = 0; i < size; ++i)
+    if (bytes[i] != value) return false;
+  return true;
+}
+static bool observe_active(unsigned expected_top) {
+  ++observed_callbacks;
+  if (ndkp_test_frame_top() != expected_top) return false;
+  size_t stride = ndkp_test_frame_stride();
+  size_t padding_end = ndkp_test_frame_padding_end();
+  volatile unsigned char *frame = ndkp_test_frame_stack() + (expected_top - 1) * stride;
+  bool written = false;
+  for (size_t i = 0; i < stride; ++i) {
+    if (i >= sizeof(int) && i < padding_end) {
+      if (frame[i] != 0xa5) return false;
+    } else if (frame[i] != 0xa5) {
+      written = true;
+    }
+  }
+  return written;
+}
+static int observing_write(int *out) {
+  if (!observe_active(1)) observation_error = 1;
+  return native_frame_write(out);
+}
+static int observing_throw(int *out, int code) {
+  if (!observe_active(1)) observation_error = 2;
+  return write_throw(out, code);
+}
+static int observing_deeper(int *out) {
+  if (!observe_active(2)) observation_error = 3;
+  return native_frame_write(out);
+}
+static int observing_nested(int *out) {
+  unsigned top = ndkp_test_frame_top();
+  size_t stride = ndkp_test_frame_stride();
+  volatile unsigned char *stack = ndkp_test_frame_stack();
+  unsigned char active[512];
+  size_t active_size = top * stride;
+  if (!observe_active(1) || active_size > sizeof(active)) {
+    observation_error = 4;
+    return native_frame_write(out);
+  }
+  for (size_t i = 0; i < active_size; ++i) active[i] = stack[i];
+  unsigned before = observed_callbacks;
+  int result = frame_local(observing_deeper);
+  if (result != 342 || observed_callbacks != before + 1 || ndkp_test_frame_top() != top ||
+      !bytes_are(stack + active_size, stride, 0) ||
+      !bytes_are(stack + active_size + stride, stride, 0xa5)) observation_error = 5;
+  for (size_t i = 0; i < active_size; ++i)
+    if (stack[i] != active[i]) observation_error = 6;
+  return native_frame_write(out);
+}
+static int check_retired_frames() {
+  size_t stride = ndkp_test_frame_stride();
+  size_t padding_end = ndkp_test_frame_padding_end();
+  if (stride > 128 || padding_end >= stride || padding_end <= sizeof(int)) return 30;
+  volatile unsigned char *stack = ndkp_test_frame_stack();
+  if (ndkp_test_frame_top() != 0) return 31;
+  for (int phase = 0; phase < 3; ++phase) {
+    // Prime only inactive slots, including padding that member stores leave alone.
+    for (size_t i = 0; i < 3 * stride; ++i) stack[i] = 0xa5;
+    observation_error = 0;
+    observed_callbacks = 0;
+    if (phase == 0) {
+      if (frame_local(observing_write) != 342) return 32;
+    } else if (phase == 1) {
+      int out = 7;
+      try { frame_escape(observing_throw, &out, 9); return 33; }
+      catch (int code) { if (code != 9 || out != 42) return 34; }
+    } else if (frame_local(observing_nested) != 342) {
+      return 35;
+    }
+    if (observation_error) return 40 + observation_error;
+    if (observed_callbacks != (phase == 2 ? 2u : 1u)) return 36;
+    if (ndkp_test_frame_top() != 0) return 37;
+    if (!bytes_are(stack, stride, 0)) return 38;
+    if (!bytes_are(stack + stride, stride, phase == 2 ? 0 : 0xa5) ||
+        !bytes_are(stack + 2 * stride, stride, 0xa5)) return 39;
+  }
+  return 0;
+}
+#endif
 static int check() {
   if (frame_local(native_frame_write) != reference_frame_local(native_frame_write)) return 1;
   if (frame_direct() != reference_frame_direct()) return 2;
@@ -103,7 +195,11 @@ static int check() {
   catch (const TrackedError &error) {
     if (out != 42 || error.what()[0] != 'f') return 16;
   }
+#ifdef NDKP_OBSERVE_FRAMES
+  return check_retired_frames();
+#else
   return 0;
+#endif
 }
 static std::atomic<int> start{0};
 static int failures[8];
@@ -138,6 +234,14 @@ int main() {
     if (failures[i]) failed = failures[i];
   }
   if (live_exceptions.load() != 0) return 18;
-  std::puts(failed ? "call frames FAIL" : "VMP call frames OK");
+  if (failed) {
+    std::printf("call frames FAIL case %d\n", failed);
+    return failed;
+  }
+#ifdef NDKP_OBSERVE_FRAMES
+  std::printf("VMP retired frames OK: stride=%zu padding=%zu normal/unwind/nested, 8 threads\n",
+              ndkp_test_frame_stride(), ndkp_test_frame_padding_end() - sizeof(int));
+#endif
+  std::puts("VMP call frames OK");
   return failed;
 }
