@@ -39,8 +39,8 @@ fi
 # stub：按与 pass（ObfuscationPassManager ensureCertMix）/ runtime（ndkp_apkcert.cpp）相同的
 # le64 公式，从指定 DER 文件算证书混合值。独立转写以便交叉校验编码期公式。
 cat > "$OUT/stub.cpp" <<'EOF'
-#include <cstdint>
-#include <cstdio>
+#include <stdint.h>
+#include <stdio.h>
 #include "sha256.h"   // stringarmor::sha2::sha256
 static uint64_t le64(const uint8_t *b) {
   uint64_t v = 0;

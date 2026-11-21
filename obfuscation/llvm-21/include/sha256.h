@@ -14,8 +14,8 @@
 #ifndef STRINGARMOR_SHA256_H
 #define STRINGARMOR_SHA256_H
 
-#include <cstddef>
-#include <cstdint>
+#include <stddef.h>
+#include <stdint.h>
 #if defined(__ANDROID__) && defined(__aarch64__)
 #include <arm_neon.h>
 #include <asm/hwcap.h>
