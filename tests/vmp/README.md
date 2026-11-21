@@ -50,6 +50,23 @@ CI 执行编链验证，设备结果单独记录。
 p8 同时修复 VMP 将函数/别名地址错误编码为数据槽零，以及 O0 入口残留 `optnone` 与
 `alwaysinline` 冲突的问题。`roundtrip.sh` 的全局地址测试包含回调地址的返回、保存和调用。
 
+## p23 相邻二元运算融合
+
+LLVM 21 的 VMP 在同一基本块中选择多个相邻、且有数据依赖的整数二元运算对，
+为每组分配独立语义 opcode，并保留非交换运算的操作数顺序。回归同时检查四组上限、
+`fence` 对保留 opcode 容量的占用、重叠候选与零候选、`i8`/`i16` 宽度、PHI 回边，
+以及 protected IR、post IR 和最终 ELF 对象的完整编链。传入 `--serial` 会额外在 ARM64
+设备执行独立的原生 C 参考驱动，覆盖全部样本（多组、保留码位、重叠、零候选、循环、
+非交换运算、窄宽度和 `i64` 链）及边界向量；`--baseline-clang` 可比较单组基线的融合计数
+和字节码长度。
+
+```bash
+python tests/vmp/fusion.py --clang "$CLANG" --ndk "$NDK"
+python tests/vmp/fusion.py --clang "$CLANG" --ndk "$NDK" --serial "$SERIAL"
+python tests/vmp/fusion.py --clang "$CLANG" --ndk "$NDK" \
+  --baseline-clang path/to/baseline/clang
+```
+
 ## 既有覆盖
 
 测试将受保护函数与独立编译的原生实现比较，覆盖：

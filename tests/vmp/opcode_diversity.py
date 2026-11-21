@@ -64,7 +64,7 @@ def inspect_variant(stderr, ir):
     for clone, cases in handlers:
         require(clone not in clones and 0 < int(cases) < 28, "duplicate/invalid dispatch clone: " + clone)
         clones.add(clone)
-    require(clones == {f"vm_interpreter_{name}_k{key:x}" for name, (key, _) in variants.items()},
+    require(clones == {f"vm_interpreter_{name}_k{key:016x}" for name, (key, _) in variants.items()},
             "dispatch clones differ from variant methods/keys")
     require(ir.count("!ndkp.vmp.protected") == 2 and "opcode_dispatch_map" not in ir,
             "protected IR markers/dispatch map differ")

@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/MapVector.h"
@@ -371,7 +372,8 @@ struct BlockAddressInfo {
 };
 
 struct VMPFusionSpec {
-    bool Enabled = false;
+    BinaryOperator *First = nullptr;
+    BinaryOperator *Second = nullptr;
     uint8_t SemanticOpcode = 0;
     unsigned FirstOpcode = 0;
     unsigned SecondOpcode = 0;
@@ -482,18 +484,16 @@ class GOVMTranslator {
         // current offset in data_seg
         int curr_data_offset = 0;
 
-        VMPFusionSpec fusion_spec;
-        BinaryOperator *fusion_first = nullptr;
-        BinaryOperator *fusion_second = nullptr;
+        SmallVector<VMPFusionSpec, 4> fusion_specs;
 
 
         virtual bool run ();
         virtual bool prescan_supported_ir();
         virtual bool is_supported_instruction(Instruction *ins);
-        virtual void selectFusionCandidate();
+        virtual void selectFusionCandidates();
         virtual void rollback_created_ir();
         virtual void handle_inst(Instruction *);
-        virtual void handle_fused_binary(BinaryOperator *);
+        virtual void handle_fused_binary(const VMPFusionSpec &);
         virtual void construct_gv();
 
         // create callinst_handler function, add instructions to callinst_handler and create ret basicblock to callinst_handler 
@@ -533,7 +533,7 @@ class GOVMTranslator {
         const uint8_t *get_opcode_dispatch_map() const { return opcode_dispatch_map; }
         const bool *get_used_opcodes() const { return used_opcodes; }
         int get_data_seg_size() { return this->curr_data_offset; }
-        const VMPFusionSpec &get_fusion_spec() const { return fusion_spec; }
+        ArrayRef<VMPFusionSpec> get_fusion_specs() const { return fusion_specs; }
         std::map<GlobalValue *, int> *get_gv_value_map() { return &gv_value_map; }
         std::map<int, GEPInfo> *get_gep_info_map() { return &gep_info_map; }
         std::map<int, BlockAddressInfo> *get_blockaddress_info_map() { return &blockaddress_info_map; }
@@ -1870,10 +1870,8 @@ void GOVMTranslator::rollback_created_ir() {
     }
 }
 
-void GOVMTranslator::selectFusionCandidate() {
-    fusion_spec = VMPFusionSpec();
-    fusion_first = nullptr;
-    fusion_second = nullptr;
+void GOVMTranslator::selectFusionCandidates() {
+    fusion_specs.clear();
 
     bool Reserved[4] = {};
     for (Instruction &I : instructions(F)) {
@@ -1883,12 +1881,22 @@ void GOVMTranslator::selectFusionCandidate() {
         if (isa<VAArgInst>(&I)) Reserved[3] = true;
     }
 
-    BinaryOperator *FirstCandidate = nullptr;
-    BinaryOperator *SecondCandidate = nullptr;
-    bool FirstIsLHS = false;
-    unsigned Width = 0;
+    static const uint8_t ReservedOpcodes[] = {
+        FENCE_OP, ATOMIC_CMPXCHG_OP, ATOMIC_RMW_OP, VAARG_OP};
+    SmallVector<uint8_t, 4> AvailableOpcodes;
+    for (unsigned I = 0; I < 4; ++I)
+        if (!Reserved[I])
+            AvailableOpcodes.push_back(ReservedOpcodes[I]);
+
+    std::set<Instruction *> SelectedInstructions;
     for (BasicBlock &BB : *F) {
+        if (fusion_specs.size() >= AvailableOpcodes.size())
+            break;
         for (Instruction &I : BB) {
+            if (fusion_specs.size() >= AvailableOpcodes.size())
+                break;
+            if (SelectedInstructions.count(&I))
+                continue;
             auto *First = dyn_cast<BinaryOperator>(&I);
             auto *Second = dyn_cast_or_null<BinaryOperator>(I.getNextNode());
             if (!First || !Second || First->getParent() != Second->getParent() ||
@@ -1911,66 +1919,50 @@ void GOVMTranslator::selectFusionCandidate() {
             if (!IsLHS && Second->getOperand(1) != First)
                 continue;
 
-            FirstCandidate = First;
-            SecondCandidate = Second;
-            FirstIsLHS = IsLHS;
-            Width = Bits;
-            break;
-        }
-        if (FirstCandidate)
-            break;
-    }
-
-    if (!FirstCandidate)
-        return;
-
-    static const uint8_t ReservedOpcodes[] = {
-        FENCE_OP, ATOMIC_CMPXCHG_OP, ATOMIC_RMW_OP, VAARG_OP};
-    uint8_t FusionOpcode = 0;
-    for (unsigned I = 0; I < 4; ++I) {
-        if (!Reserved[I]) {
-            FusionOpcode = ReservedOpcodes[I];
-            break;
+            VMPFusionSpec Spec;
+            Spec.First = First;
+            Spec.Second = Second;
+            Spec.SemanticOpcode = AvailableOpcodes[fusion_specs.size()];
+            Spec.FirstOpcode = First->getOpcode();
+            Spec.SecondOpcode = Second->getOpcode();
+            Spec.Width = Bits;
+            Spec.FirstIsLHS = IsLHS;
+            fusion_specs.push_back(Spec);
+            SelectedInstructions.insert(First);
+            SelectedInstructions.insert(Second);
         }
     }
-    if (!FusionOpcode)
-        return;
 
-    fusion_first = FirstCandidate;
-    fusion_second = SecondCandidate;
-    fusion_spec.Enabled = true;
-    fusion_spec.SemanticOpcode = FusionOpcode;
-    fusion_spec.FirstOpcode = FirstCandidate->getOpcode();
-    fusion_spec.SecondOpcode = SecondCandidate->getOpcode();
-    fusion_spec.Width = Width;
-    fusion_spec.FirstIsLHS = FirstIsLHS;
     if (isIRObfuscationDebugEnabled()) {
-        errs() << "[VMP_FUSION] function=" << F->getName()
-               << " opcode=" << (unsigned)FusionOpcode
-               << " first=" << FirstCandidate->getOpcodeName()
-               << " second=" << SecondCandidate->getOpcodeName()
-               << " width=" << Width
-               << " first_is_lhs=" << (FirstIsLHS ? 1 : 0) << "\n";
+        for (const VMPFusionSpec &Spec : fusion_specs) {
+            errs() << "[VMP_FUSION] function=" << F->getName()
+                   << " opcode=" << (unsigned)Spec.SemanticOpcode
+                   << " first=" << Spec.First->getOpcodeName()
+                   << " second=" << Spec.Second->getOpcodeName()
+                   << " width=" << Spec.Width
+                   << " first_is_lhs=" << (Spec.FirstIsLHS ? 1 : 0) << "\n";
+        }
     }
 }
 
-void GOVMTranslator::handle_fused_binary(BinaryOperator *inst) {
-    if (!fusion_spec.Enabled || !inst || inst != fusion_second || !fusion_first)
+void GOVMTranslator::handle_fused_binary(const VMPFusionSpec &Spec) {
+    BinaryOperator *Inst = Spec.Second;
+    if (!Inst || !Spec.First || !Spec.SemanticOpcode)
         report_fatal_error("VMP: invalid fused binary translation state");
 
-    auto Entry = value_map.emplace(inst, curr_data_offset);
+    auto Entry = value_map.emplace(Inst, curr_data_offset);
     int ResultOffset = Entry.first->second;
     if (Entry.second)
-        curr_data_offset += modDataLayout->getTypeAllocSize(inst->getType());
+        curr_data_offset += modDataLayout->getTypeAllocSize(Inst->getType());
 
     std::vector<uint8_t> PackedTarget = pack(ResultOffset, pointer_size);
-    std::vector<uint8_t> PackedFirstLHS = GET_PACK_VALUE(fusion_first->getOperand(0));
-    std::vector<uint8_t> PackedFirstRHS = GET_PACK_VALUE(fusion_first->getOperand(1));
-    Value *ThirdOperand = inst->getOperand(fusion_spec.FirstIsLHS ? 1 : 0);
+    std::vector<uint8_t> PackedFirstLHS = GET_PACK_VALUE(Spec.First->getOperand(0));
+    std::vector<uint8_t> PackedFirstRHS = GET_PACK_VALUE(Spec.First->getOperand(1));
+    Value *ThirdOperand = Inst->getOperand(Spec.FirstIsLHS ? 1 : 0);
     std::vector<uint8_t> PackedThird = GET_PACK_VALUE(ThirdOperand);
 
     std::vector<uint8_t> HexCode;
-    ins_to_hex(HexCode, pack_op(fusion_spec.SemanticOpcode), PackedTarget,
+    ins_to_hex(HexCode, pack_op(Spec.SemanticOpcode), PackedTarget,
                PackedFirstLHS, PackedFirstRHS, PackedThird);
     vm_code.insert(vm_code.end(), HexCode.begin(), HexCode.end());
 }
@@ -3473,7 +3465,7 @@ bool GOVMTranslator::run(){
         return false;
     };
     lowerVMGEPOffsets(*F, *modDataLayout);
-    selectFusionCandidate();
+    selectFusionCandidates();
     init();
     
     bool has_exception_handling = false;
@@ -3604,11 +3596,25 @@ bool GOVMTranslator::run(){
                 handle_inst(const_inst);
             }
             
-            if (inst && inst->getParent() == bb && inst != fusion_first) {
+            if (inst && inst->getParent() == bb) {
                 // errs() << "[Translator] Handling inst #" << total_instructions << ": " << inst->getOpcodeName() << "\n";
-                if (inst == fusion_second)
-                    handle_fused_binary(cast<BinaryOperator>(inst));
-                else
+                const VMPFusionSpec *Fusion = nullptr;
+                for (const VMPFusionSpec &Spec : fusion_specs) {
+                    if (Spec.First == inst) {
+                        Fusion = &Spec;
+                        break;
+                    }
+                    if (Spec.Second == inst) {
+                        Fusion = &Spec;
+                        break;
+                    }
+                }
+                if (Fusion && Fusion->First == inst) {
+                    // The first operation is encoded as part of its adjacent
+                    // dependent second operation.
+                } else if (Fusion && Fusion->Second == inst)
+                    handle_fused_binary(*Fusion);
+                else if (!Fusion)
                     handle_inst(inst);
             }
             total_instructions++;
@@ -4653,7 +4659,7 @@ static bool specializeFusionOpcode(Function *Clone,
     auto FusionFailure = []() -> void {
         report_fatal_error("VMP: emitted fusion opcode specialization failed");
     };
-    if (!Clone || !Spec.Enabled || !UsedOpcodes ||
+    if (!Clone || !Spec.First || !Spec.Second || !UsedOpcodes ||
         Spec.SemanticOpcode > OP_TOTAL || !UsedOpcodes[Spec.SemanticOpcode] ||
         !isVMPFusionBinaryOpcode(Spec.FirstOpcode) ||
         !isVMPFusionBinaryOpcode(Spec.SecondOpcode) ||
@@ -5040,7 +5046,7 @@ static Function *cloneVmInterpreterForFunction(Module *M,
                                                uint64_t FunctionKey,
                                                const uint8_t *DispatchMap,
                                                const bool *UsedOpcodes,
-                                               const VMPFusionSpec *FusionSpec) {
+                                               ArrayRef<VMPFusionSpec> FusionSpecs) {
     if (!M || !SharedInterpreter || !TargetFunction || SharedInterpreter->empty()) {
         report_fatal_error("VMP: missing interpreter for private opcode dispatch");
     }
@@ -5088,8 +5094,9 @@ static Function *cloneVmInterpreterForFunction(Module *M,
     LoadInst *SaltLoad = Builder.CreateLoad(I64Ty, SaltGV, "vmp.clone.salt");
     SaltLoad->setVolatile(true);
 
-    if (FusionSpec && FusionSpec->Enabled)
-        specializeFusionOpcode(Clone, FunctionKey, *FusionSpec, UsedOpcodes);
+    for (const VMPFusionSpec &Spec : FusionSpecs)
+        if (!specializeFusionOpcode(Clone, FunctionKey, Spec, UsedOpcodes))
+            report_fatal_error("VMP: emitted fusion opcode specialization failed");
 
     if (!randomizeVmOpcodeDispatch(Clone, FunctionKey, SaltGV, DispatchMap, UsedOpcodes))
         report_fatal_error("VMP: private opcode dispatch specialization failed");
@@ -5543,7 +5550,7 @@ struct VMProtect : public ModulePass {
         Function *vm_interpreter_func = cloneVmInterpreterForFunction(
             &M, shared_vm_interpreter_func, F, translator->get_vm_function_key(),
             translator->get_opcode_dispatch_map(), translator->get_used_opcodes(),
-            &translator->get_fusion_spec());
+            translator->get_fusion_specs());
         GOVMModifier *modifier = new GOVMModifier(F, translator->get_gv_value_map(), translator->get_gep_info_map(),
                                                    translator->get_blockaddress_info_map(),
                                                    translator->get_value_map(),
@@ -5668,7 +5675,7 @@ PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM)
     Function *vm_interpreter_func = cloneVmInterpreterForFunction(
         &M, shared_vm_interpreter_func, F, translator->get_vm_function_key(),
         translator->get_opcode_dispatch_map(), translator->get_used_opcodes(),
-        &translator->get_fusion_spec());
+        translator->get_fusion_specs());
     GOVMModifier *modifier = new GOVMModifier(F, translator->get_gv_value_map(), translator->get_gep_info_map(),
                                                translator->get_blockaddress_info_map(),
                                                translator->get_value_map(),

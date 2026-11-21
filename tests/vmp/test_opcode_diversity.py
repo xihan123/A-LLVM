@@ -25,8 +25,8 @@ def csv(values):
 
 def log(first=1, second=2):
     return "\n".join(
-        f"[VMP_VARIANT] function={name} key=0x0007 semantic_to_ordinal={csv(mapping(shift))}\n"
-        f"[VMP_DISPATCH_RANDOMIZE] clone=vm_interpreter_{name}_k7 cases=8 style=volatile-xor-chain"
+        f"[VMP_VARIANT] function={name} key=0x7 semantic_to_ordinal={csv(mapping(shift))}\n"
+        f"[VMP_DISPATCH_RANDOMIZE] clone=vm_interpreter_{name}_k0000000000000007 cases=8 style=volatile-xor-chain"
         for name, shift in (("first", first), ("second", second)))
 
 
@@ -76,8 +76,10 @@ class OpcodeDiversityTests(unittest.TestCase):
                 diversity.inspect_variant(broken, IR)
 
     def test_dispatch_clone_must_be_unique_and_bound_to_method_key(self):
-        for broken in (log().replace("clone=vm_interpreter_second_k7", "clone=vm_interpreter_first_k7"),
-                       log().replace("clone=vm_interpreter_second_k7", "clone=vm_interpreter_second_k8"),
+        for broken in (log().replace("clone=vm_interpreter_second_k0000000000000007",
+                                     "clone=vm_interpreter_first_k0000000000000007"),
+                       log().replace("clone=vm_interpreter_second_k0000000000000007",
+                                     "clone=vm_interpreter_second_k0000000000000008"),
                        log().replace("cases=8", "cases=28", 1)):
             with self.assertRaises(ValueError):
                 diversity.inspect_variant(broken, IR)

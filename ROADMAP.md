@@ -2,7 +2,17 @@
 
 `[x]` 已完成，`[~]` 已实现但未完成端到端验证，`[ ]` 未开始。
 
-状态核对：2026-10-15。稳定性修复的环境、结果及未覆盖项见 [验证记录](./tests/VALIDATION.md)；历史 CI 成功不代表当前工作区修复已通过 CI。
+当前开发主线从 LLVM 21 的多组 VM 指令融合开始，随后推进指令处理逻辑（handler）与操作数布局变体、运行期数据生命周期、共享库完整性和 AArch64 机器码保护。计划和首批验收见 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md)。
+
+下面各阶段为历史记录，具体环境和验证范围见 [验证记录](./tests/VALIDATION.md)。
+
+## 当前状态：p23 / M1
+
+- [x] LLVM 21 VMP 已支持每函数最多四组不重叠的相邻标量整数融合，并为每组保留独立语义 opcode、位宽和操作数顺序；`config/patchset.env` 当前为 `p23`。
+- [x] `tests/vmp/fusion.py` 已覆盖多组、预留 opcode 占用、重叠与零候选、窄整数、非交换运算、循环 PHI 和 `i64` 链，并检查 protected IR、post IR、ELF 对象、基线字节码长度及 ARM64 原生参考驱动。
+- [~] QDReadHook 固定方法清单的端到端产物验证，以及同分母的 dispatch、`.text`、SO 体积和性能测量仍待完成；这些结果不由本 fixture 的专项验证代替。
+
+规划和对照仍保留 p22 基线；本轮 p23/M1 的实现与专项验证已记录，后续阶段另行排期。
 
 ## 阶段 0 — 骨架
 
@@ -78,17 +88,12 @@
 
 ## 当前优先事项
 
-按优先级排列：
-
-1. 等待并检查当前 p1 的 Linux/Windows Actions 结果：r30 LLVM 21 两组构建已启动，链接见 [验证记录](./tests/VALIDATION.md)。本地 Windows r29 LLVM 21 构建及设备回归已通过。
-2. LLVM 20 对应 r29-beta1（`20.0.0 / r547379`），实际 Base revision 为 `f142f8afe21bceb00fb495468aa0b5043e98c419`。补丁检查已通过，Linux/Windows 完整构建与回归已启动。双目录内容一致不等于双版本都已验证。
-3. 新增宿主字符串生命周期、常量/证书往返，以及 VMP 样本编链已接入 `build.yml`；Android 设备测试仍需显式运行，发布前按 [验证记录](./tests/VALIDATION.md) 复测。
-4. 注解独立开启 pass / annotation-only 模式暂缓；保持现有 opt-in 开关行为。完成稳定性门槛后再推进性能/体积基准、其他 ABI 解释器及后端扩展。
-5. 构建加速按 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md) 推进：先实现增量 overlay 同步，再验证 Linux/Windows 快照恢复；准备检查已完成，流水线尚未修改。
+1. LLVM 21 首批把每函数一对标量整数融合扩为有上限的非重叠多组融合。用固定业务方法清单对比 p22 源码基线，验证新的融合确实生成并执行。
+2. 首批闭环后按 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md) 推进后续小批次。构建加速仍有独立的 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md)。
 
 ## 发版前必做
 
-以下完成项记录历史流水线；p1 仍需完成上述当前优先事项 1–3。
+以下完成项记录历史流水线。当前候选产物按 [贡献指南](./CONTRIBUTING.md) 要求重新完成相关构建、验证和发布门槛。
 
 - [x] 跑一次 `patch-check.yml`（`mode=build` / AArch64+ARM+X86），验证 overlay、四 ABI、构建系统与字符串测试全绿
 - [x] Linux `mode=build` 全量（四 ABI）端到端跑通一次

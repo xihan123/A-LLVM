@@ -370,6 +370,7 @@ jobs:
         CLANG="$PWD/build/bin/clang$EXT"
         python tests/vmp/strict.py --clang "$CLANG" --ndk "$NDK_DIR"
         python tests/vmp/casts.py --clang "$CLANG" --ndk "$NDK_DIR"
+        python tests/vmp/fusion.py --clang "$CLANG" --ndk "$NDK_DIR"
 
     - uses: actions/setup-java@v5
       if: ${{ inputs.mode == 'build' && inputs.host == 'windows-x86_64' && steps.loc.outputs.llvm_major == '21' }}
