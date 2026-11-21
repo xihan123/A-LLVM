@@ -1,12 +1,16 @@
 """Regression coverage for LLVM 21 adjacent integer-operation fusion."""
 
 import argparse
+from contextlib import nullcontext
+import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
 import uuid
+
+from opcode_diversity import inspect_fusion_structure
 
 
 IR = r"""
@@ -85,6 +89,20 @@ entry:
   ret i32 %b
 }
 
+define i32 @order_lhs(i32 %x, i32 %y, i32 %z) {
+entry:
+  %a = xor i32 %x, %y
+  %b = sub i32 %a, %z
+  ret i32 %b
+}
+
+define i32 @order_rhs(i32 %x, i32 %y, i32 %z) {
+entry:
+  %a = xor i32 %x, %y
+  %b = sub i32 %z, %a
+  ret i32 %b
+}
+
 define i32 @loop(i32 %x) {
 entry:
   br label %body
@@ -114,8 +132,24 @@ entry:
 
 FUNCTIONS = (
     "multi_cap", "reserved_fence", "overlap", "zero", "narrow8",
-    "narrow16", "order", "loop", "i64_chain",
+    "narrow16", "order", "order_lhs", "order_rhs", "loop", "i64_chain",
 )
+
+# Selection order in the IR above; the tuple retains the semantic pair and width
+# when comparing native and carry implementations across randomized builds.
+FUSIONS = {
+    "multi_cap": [("add", "xor", 32), ("sub", "and", 32),
+                  ("mul", "or", 32), ("add", "xor", 32)],
+    "reserved_fence": [("add", "xor", 32), ("sub", "and", 32), ("mul", "or", 32)],
+    "overlap": [("add", "xor", 32)],
+    "narrow8": [("add", "xor", 8)],
+    "narrow16": [("sub", "and", 16)],
+    "order": [("sub", "sub", 32)],
+    "order_lhs": [("xor", "sub", 32)],
+    "order_rhs": [("xor", "sub", 32)],
+    "loop": [("add", "mul", 32)],
+    "i64_chain": [("add", "xor", 64), ("sub", "and", 64)],
+}
 
 
 def command(*args, timeout=180):
@@ -139,14 +173,16 @@ def resource_dir(ndk):
 def fusion_lines(stderr):
     pattern = re.compile(
         r"^\[VMP_FUSION\] function=(\w+) opcode=(\d+) "
-        r"first=(\w+) second=(\w+) width=(\d+) first_is_lhs=(\d+)$",
+        r"first=(\w+) second=(\w+) width=(\d+) first_is_lhs=(\d+)"
+        r"(?: handler=(\d+) layout=(\d+))?$",
         re.M,
     )
     return [
         {"function": function, "opcode": int(opcode), "first": first,
          "second": second, "width": int(width),
-         "first_is_lhs": int(first_is_lhs)}
-        for function, opcode, first, second, width, first_is_lhs
+         "first_is_lhs": int(first_is_lhs), "handler": int(handler or 0),
+         "layout": int(layout or 0)}
+        for function, opcode, first, second, width, first_is_lhs, handler, layout
         in pattern.findall(stderr)
     ]
 
@@ -168,12 +204,13 @@ def protected(clang, base, resource, source, output, functions, debug, strict=Tr
     result = command(
         clang, "--target=aarch64-linux-android26",
         "--sysroot=" + str(base / "sysroot"), "-resource-dir=" + str(resource),
-        "-O0", *flags, "-S", "-emit-llvm", source, "-o", output,
+        "-O0", "-fno-discard-value-names", "-fPIC", *flags,
+        "-S", "-emit-llvm", source, "-o", output,
     )
     return result
 
 
-def check_fusions(stderr, ir):
+def check_fusions(stderr, ir, functions=FUNCTIONS):
     lines = fusion_lines(stderr)
     counts = {name: 0 for name in FUNCTIONS}
     for line in lines:
@@ -186,29 +223,33 @@ def check_fusions(stderr, ir):
         "narrow8": 1,
         "narrow16": 1,
         "order": 1,
+        "order_lhs": 1,
+        "order_rhs": 1,
         "loop": 1,
         "i64_chain": 2,
     }
+    expected = {name: count if name in functions else 0 for name, count in expected.items()}
     assert counts == expected, counts
     assert len(re.findall(r"^\[VMP_FUSION_SPECIALIZE\]", stderr, re.M)) == sum(expected.values())
     by_function = {name: [line for line in lines if line["function"] == name]
                    for name in FUNCTIONS}
-    assert by_function["narrow8"][0]["width"] == 8
-    assert by_function["narrow16"][0]["width"] == 16
-    assert by_function["order"][0]["first_is_lhs"] == 0
-    assert by_function["order"][0]["first"] == "sub"
-    assert by_function["order"][0]["second"] == "sub"
-    assert by_function["i64_chain"][0]["width"] == 64
+    for name, field, value in (("narrow8", "width", 8), ("narrow16", "width", 16),
+                               ("order", "first_is_lhs", 0), ("order", "first", "sub"),
+                               ("order", "second", "sub"), ("order_lhs", "first_is_lhs", 1),
+                               ("order_lhs", "second", "sub"), ("i64_chain", "width", 64)):
+        if name in functions:
+            assert by_function[name][0][field] == value, (name, field)
     lengths = byte_lengths(ir)
-    for name in FUNCTIONS:
+    for name in functions:
         assert name in lengths and lengths[name] > 0, name
     return counts, lengths
 
 
-def build_device_binary(clang, base, resource, obj, output):
+def build_device_binary(clang, base, resource, obj, output, timings=False):
     driver = output.with_suffix(".c")
     driver.write_text(r'''#include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 
 extern uint32_t multi_cap(uint32_t, uint32_t, uint32_t);
 extern uint32_t reserved_fence(uint32_t, uint32_t, uint32_t);
@@ -217,6 +258,8 @@ extern uint32_t zero(uint32_t, uint32_t, uint32_t);
 extern uint8_t narrow8(uint8_t, uint8_t, uint8_t);
 extern uint16_t narrow16(uint16_t, uint16_t, uint16_t);
 extern uint32_t order(uint32_t, uint32_t, uint32_t);
+extern uint32_t order_lhs(uint32_t, uint32_t, uint32_t);
+extern uint32_t order_rhs(uint32_t, uint32_t, uint32_t);
 extern uint32_t loop(uint32_t);
 extern uint64_t i64_chain(uint64_t, uint64_t, uint64_t, uint64_t);
 
@@ -277,6 +320,14 @@ static uint32_t reference_order(uint32_t x, uint32_t y, uint32_t z) {
   return z - a;
 }
 
+static uint32_t reference_order_lhs(uint32_t x, uint32_t y, uint32_t z) {
+  return (x ^ y) - z;
+}
+
+static uint32_t reference_order_rhs(uint32_t x, uint32_t y, uint32_t z) {
+  return z - (x ^ y);
+}
+
 static uint32_t reference_loop(uint32_t x) {
   uint32_t result = 0;
   for (unsigned i = 0; i < 4; ++i)
@@ -329,6 +380,35 @@ static int check64(const char *name, unsigned index, uint64_t got,
   return 0;
 }
 
+static uint64_t nanoseconds(void) {
+  struct timespec stamp;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &stamp);
+  return (uint64_t)stamp.tv_sec * UINT64_C(1000000000) + stamp.tv_nsec;
+}
+
+static void timing(const char *name, uint32_t (*call)(uint32_t, uint32_t, uint32_t),
+                   uint32_t x, uint32_t y, uint32_t z) {
+  const unsigned calls = 2000;
+  uint32_t checksum = 0;
+  for (unsigned i = 0; i < 100; ++i) checksum ^= call(x, y, z) + i;
+  uint64_t start = nanoseconds();
+  for (unsigned i = 0; i < calls; ++i) checksum += call(x, y, z) ^ i;
+  uint64_t elapsed = nanoseconds() - start;
+  printf("VMP fusion timing name=%s calls=%u ns=%llu checksum=%u\n", name,
+         calls, (unsigned long long)elapsed, (unsigned)checksum);
+}
+
+static void timing64(const char *name, uint64_t x, uint64_t y, uint64_t z, uint64_t w) {
+  const unsigned calls = 2000;
+  uint64_t checksum = 0;
+  for (unsigned i = 0; i < 100; ++i) checksum ^= i64_chain(x, y, z, w) + i;
+  uint64_t start = nanoseconds();
+  for (unsigned i = 0; i < calls; ++i) checksum += i64_chain(x, y, z, w) ^ i;
+  uint64_t elapsed = nanoseconds() - start;
+  printf("VMP fusion timing name=%s calls=%u ns=%llu checksum=%llu\n", name,
+         calls, (unsigned long long)elapsed, (unsigned long long)checksum);
+}
+
 int main(void) {
   static const uint32_t vectors[][3] = {
       {0, 0, 0},
@@ -359,6 +439,10 @@ int main(void) {
       return 1;
     if (!check32("order", i, order(x, y, z), reference_order(x, y, z)))
       return 1;
+    if (!check32("order_lhs", i, order_lhs(x, y, z), reference_order_lhs(x, y, z)))
+      return 1;
+    if (!check32("order_rhs", i, order_rhs(x, y, z), reference_order_rhs(x, y, z)))
+      return 1;
     if (!check32("loop", i, loop(x), reference_loop(x)))
       return 1;
     if (!check8("narrow8", i,
@@ -375,6 +459,9 @@ int main(void) {
       {0, 0, 0, 0},
       {1, 2, 3, 4},
       {UINT64_MAX, 1, 0, 2},
+      {0, 1, 1, 1},
+      {UINT64_MAX, UINT64_C(0x8000000000000001), 0, 0},
+      {0, UINT64_C(0x8000000000000001), UINT64_C(0x8000000000000001), 1},
       {UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX},
       {UINT64_C(0x7fffffffffffffff), 1,
        UINT64_C(0x8000000000000000), 0},
@@ -392,6 +479,16 @@ int main(void) {
                  reference_i64_chain(x, y, z, w)))
       return 1;
   }
+#if FUSION_TIMING
+  timing("order-typical", order, 10, 3, 20);
+  timing("order-borrow32", order, 0, 1, 0);
+  timing("order-lhs-typical", order_lhs, 10, 3, 20);
+  timing("order-lhs-borrow32", order_lhs, 0, 0, 1);
+  timing("multi-typical", multi_cap, 10, 3, 20);
+  timing64("i64-typical", 1, 2, 3, 4);
+  timing64("i64-carry64", UINT64_MAX, 1, 0, 0);
+  timing64("i64-borrow64", 0, 1, 1, 1);
+#endif
   puts("VMP fusion OK");
   return 0;
 }
@@ -401,9 +498,96 @@ int main(void) {
         clang, "--target=aarch64-linux-android26",
         "--sysroot=" + str(base / "sysroot"), "-resource-dir=" + str(resource),
         "--driver-mode=g++", "--ld-path=" + str(linker),
-        "-static-libstdc++", "-x", "c", str(driver), "-x", "none", str(obj),
+        "-static-libstdc++", "-DFUSION_TIMING=" + str(int(timings)),
+        "-Wl,-rpath,$ORIGIN", "-x", "c", str(driver), "-x", "none", str(obj),
         "-o", output,
     )
+
+
+def run_variant_coverage(args, out, base, resource):
+    linker = base / "bin" / ("ld.lld.exe" if os.name == "nt" else "ld.lld")
+    expected = {(name, index): ({(0, 0), (0, 1), (1, 0), (1, 1)}
+                               if first in ("add", "sub") or second in ("add", "sub")
+                               else {(0, 0), (0, 1)})
+                for name, specs in FUSIONS.items()
+                for index, (first, second, width) in enumerate(specs)}
+    seen = {key: set() for key in expected}
+    rounds = []
+    source = out / "fusion.ll"
+    source.write_text(IR)
+    for iteration in range(-int(bool(args.baseline_clang)), 32):
+        clang = (args.baseline_clang if iteration < 0 else args.clang).resolve()
+        common = [clang, "--target=aarch64-linux-android26",
+                  "--sysroot=" + str(base / "sysroot"), "-resource-dir=" + str(resource)]
+        folder = out / ("baseline" if iteration < 0 else "build-" + str(iteration))
+        folder.mkdir()
+        raw, final, assembly, obj, library = (folder / name for name in
+                                             ("raw.ll", "post.ll", "post.s", "post.o", "libfusion.so"))
+        compiled = protected(clang, base, resource, source, raw, FUNCTIONS, False)
+        (folder / "raw.stderr").write_text(compiled.stderr)
+        raw_text = raw.read_text()
+        structures = inspect_fusion_structure(raw_text)
+        require_names = {re.fullmatch(r"vm_interpreter_(\w+)_k[0-9a-f]{16}", clone)[1]
+                         for clone in structures}
+        assert require_names == set(FUSIONS), require_names
+        post = command(*common, "-Oz", "-fno-discard-value-names", "-fPIC", "-mllvm",
+                       "-irobf-vmp-post", "-S", "-emit-llvm", raw, "-o", final)
+        (folder / "post.stderr").write_text(post.stderr)
+        final_text = final.read_text()
+        assert "!ndkp.vmp.post" in final_text
+        assert inspect_fusion_structure(final_text) == structures, "post changed fusion structure"
+        assert re.findall(r'^@gv_code_seg_\w+ = .*? c"([^"\n]+)"', raw_text, re.M) == re.findall(
+            r'^@gv_code_seg_\w+ = .*? c"([^"\n]+)"', final_text, re.M), "post changed bytecode"
+        # Assemble this exact backend output once; both the final SO and device
+        # program use this object, so assembly comments can locate actual code.
+        command(*common, "-Oz", "-fPIC", "-Xclang", "-disable-llvm-passes", "-S", final, "-o", assembly)
+        command(*common, "-c", "-Wa,-L", assembly, "-o", obj)
+        command(*common, "--driver-mode=g++", "--ld-path=" + str(linker),
+                "-static-libstdc++", "-shared", "-Wl,-soname,libfusion.so", obj, "-o", library)
+        assert library.read_bytes().startswith(b"\x7fELF")
+        record = {"build": iteration, "structures": structures, "deviceExecuted": False}
+        if args.serial:
+            binary = folder / "fusion-test"
+            build_device_binary(clang, base, resource, library, binary, timings=True)
+            remote = "/data/local/tmp/ndkp-vmp-fusion-" + uuid.uuid4().hex
+            adb = ["adb", "-s", args.serial]
+            command(*adb, "shell", "mkdir", remote)
+            try:
+                command(*adb, "push", library, remote + "/libfusion.so")
+                command(*adb, "push", binary, remote + "/fusion-test")
+                command(*adb, "shell", "chmod", "700", remote + "/fusion-test")
+                device = command(*adb, "shell", "timeout", "90", remote + "/fusion-test")
+                (folder / "device.log").write_text(device.stdout + device.stderr)
+                assert "VMP fusion OK" in device.stdout, device.stdout
+                record["deviceExecuted"] = True
+                record["timings"] = re.findall(
+                    r"VMP fusion timing name=(\S+) calls=(\d+) ns=(\d+) checksum=(\d+)", device.stdout)
+                assert len(record["timings"]) == 8, record["timings"]
+            finally:
+                command(*adb, "shell", "rm", "-f", remote + "/fusion-test", remote + "/libfusion.so")
+                command(*adb, "shell", "rmdir", remote)
+        for clone, groups in structures.items():
+            name = re.fullmatch(r"vm_interpreter_(\w+)_k[0-9a-f]{16}", clone)[1]
+            assert len(groups) == len(FUSIONS[name]), (name, len(groups))
+            for index, group in enumerate(groups):
+                first, second, width = FUSIONS[name][index]
+                assert group.get("width", width) == width, (name, index)
+                if iteration >= 0:
+                    seen[name, index].add((group["handler"], group["layout"]))
+                else:
+                    assert group["handler"] == group["layout"] == 0, "baseline is not the p24 native/layout0 chain"
+        rounds.append(record)
+        (folder / "structure.json").write_text(json.dumps(record, indent=2) + "\n")
+        complete = all(seen[key] >= values for key, values in expected.items())
+        print("[variants] build={} observed={} complete={} device={}".format(
+            iteration, sum(map(len, seen.values())), complete, bool(args.serial)), flush=True)
+        if complete:
+            break
+    assert complete, "fusion variant/layout coverage incomplete after 32 builds"
+    result = {"passed": True, "buildCount": iteration + 1, "deviceExecuted": bool(args.serial),
+              "coverage": {name + ":" + str(index): sorted(values) for (name, index), values in seen.items()},
+              "rounds": rounds}
+    (out / "results.json").write_text(json.dumps(result, indent=2) + "\n")
 
 
 def main():
@@ -412,13 +596,24 @@ def main():
     parser.add_argument("--ndk", required=True, type=Path)
     parser.add_argument("--serial")
     parser.add_argument("--baseline-clang", type=Path)
+    parser.add_argument("--output", type=Path, help="new evidence directory; preserve previous runs")
+    parser.add_argument("--variant-coverage", action="store_true",
+                        help="release builds until each fusion pair covers both handlers/layouts (at most 32)")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[2]
     (root / "work").mkdir(exist_ok=True)
     base, resource = resource_dir(args.ndk)
-    with tempfile.TemporaryDirectory(prefix="vmp-fusion-", dir=root / "work") as folder:
+    if args.output:
+        if args.output.exists():
+            raise ValueError("--output must be new; preserve previous evidence")
+        args.output.mkdir(parents=True)
+    context = nullcontext(args.output) if args.output else tempfile.TemporaryDirectory(prefix="vmp-fusion-", dir=root / "work")
+    with context as folder:
         out = Path(folder)
+        if args.variant_coverage:
+            run_variant_coverage(args, out, base, resource)
+            return
         source = out / "fusion.ll"
         protected_ir = out / "protected.ll"
         final_ir = out / "final.ll"

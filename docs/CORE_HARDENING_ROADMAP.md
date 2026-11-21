@@ -1,14 +1,14 @@
 # 核心增强路线图
 
-LLVM 21 的 M1 多组 VM 指令融合实现、专项验证与 Java/native 样例已完成，让同一函数可以执行多组独立的融合指令。随后逐步增加
-handler 和操作数布局的变化，缩短敏感数据的驻留时间，把完整性检查接到实际共享库入口，最后进入
+LLVM 21 的 M1 多组 VM 指令融合及 M2 首批 handler/操作数布局变体已完成本地专项与 Java/native 样例验证。
+随后缩短敏感数据的驻留时间，把完整性检查接到实际共享库入口，最后进入
 AArch64 机器码层。每批交付一个可在业务产物上启用和验证的行为。
 
 ## 当前基线与范围
 
 规划保留 p22 的 `19506a4531cbe722e13df9b8625bd8b53f121c4e` 基线；本轮实现以 `dev` 的
-`ad6d19d367445be83ad5f5577caad4d89ad09b56` 为冻结对照。`PATCHSET_VERSION=p24` 在 p23 LLVM 21
-多组融合之上增加 dex2c 纯整数区段标量化。p23 承接 p20 的 `523c466` 单对融合；p21/p22 和其后
+`b9c71b78bb11358a49f6dc6f59d61d2a8f452a78` 的 p24 为冻结对照。`PATCHSET_VERSION=p25` 在既有
+多组融合与 dex2c 纯整数区段标量化之上增加每组计算与字段布局变体。p23 承接 p20 的 `523c466` 单对融合；p21/p22 和其后
 提交还修复了严格编译、Windows 证书兼容和 QSEG 测试路径。以当前源码和候选构建为准，早期性能数据
 只对应当时的样本。
 [补丁集版本](../config/patchset.env) · [设计记录](../DESIGN.md)
@@ -20,7 +20,7 @@ AArch64 机器码层。每批交付一个可在业务产物上启用和验证的
 
 | 维度 | 仓库已有实现 | 核心缺口 |
 | --- | --- | --- |
-| VM 指令 | LLVM 21 逐方法系统随机 opcode 映射与私有解释器 clone、ChaCha 字节码、strict 选择、post 原生间接分支。p23 支持每函数最多四组融合；p24 让 dex2c 纯整数区段进入该路径，Java/native 样例的真实 raw/post 与真机语义通过。 | 融合收益依赖实际整数候选；完整业务覆盖、性能预算以及 handler 结构和操作数布局变化仍待后续验证。 |
+| VM 指令 | LLVM 21 逐方法随机 opcode、私有 clone、ChaCha 字节码、strict 与 post 间接分支。p23/p24 形成多组融合与 Java lowering；p25 每组首个 add/sub 可用同宽 carry/borrow，并支持 target 前后两种布局，实际 raw/post、SO 与设备语义通过。 | 当前仅有限整数融合族；完整业务覆盖、发布预算与隔离性能评估尚未完成。 |
 | 敏感数据和状态 | CSE hardened 使用 ChaCha20-Poly1305 与 HKDF-SHA-256。QSEG 按需恢复，保留 VM 内层编码，`acquire/release` 与 1 MiB LRU 约束空闲借用缓存。只有原函数为 `nounwind` 才生成 VM 主借用，原生展开未证实的路径仍固定驻留。 | CSE 和 QSEG 交付的业务字符串仍有静态存储期，Java 字符串仍可被缓存或 `intern()`。需另建受控数据接口并缩短 VM 密钥、缓存和调用帧残留。 |
 | 完整性 | CSE/QSEG 可度量本 SO 全部可执行 `PT_LOAD` 的实时映射字节，已覆盖其中的解释器。已有显式低频 `integrityRecheck`。SelfCheck 的 FNV 只校验 VM 字节码。完整 APK 验签与证书提取绑定有不同覆盖。 | 让没有 CSE pool 的翻译单元也能通过本库已认证的上下文接入加载与业务入口检查。 |
 | 共享库与机器码 | 多个反分析 pass 只查 `main`，无 `main` 的共享库会跳过相应注入。已有原生间接分支由 IR pass 生成。 | 面向共享库的明确接线、AArch64 后端变换。函数级 SO 机器码按需加密尚未实现。 |
@@ -35,12 +35,12 @@ AArch64 机器码层。每批交付一个可在业务产物上启用和验证的
 | 顺序 | 阶段 | 生产交付 | 技术依赖 |
 | --- | --- | --- | --- |
 | 1，已完成样例闭环 | M1 多组 VM 融合 | 每函数有上限的多组标量融合和独立 handler；p24 Java lowering 在真实样例中各产生四组融合。 | LLVM 21 p20 编码、私有 clone 和 post 链。 |
-| 2 | M2 handler 与操作数布局变体 | 小范围指令族具有编译期选择的等价实现和布局。 | 共用 M1 之后的 opcode 分配与对应解码规则。 |
+| 2，已完成首批本地验证 | M2 handler 与操作数布局变体 | p25 每融合组最多一个 add/sub 的等价 carry/borrow 计算与两种字段排列。 | 共用 M1 opcode、系统随机源和私有 clone；编码与解码共享规格。 |
 | 3 | M3 敏感数据借用与 VM 状态回收 | 缩短显式敏感数据、已退出帧及失效缓存的驻留时间。 | 现有 CSE/QSEG 和调用帧契约，可独立于 M1/M2。 |
 | 4 | M4 共享库完整性与自保护 | 真正零 CSE pool 的翻译单元可接入加载和显式业务检查点。 | 现有验签、RX 度量和 recheck。重用 M3 借用时才依赖相应生命周期。 |
 | 5 | M5 AArch64 机器码保护 | 指定函数获得真正的目标后端变换。 | 对应 NDK 的精确 LLVM 21 基线。组合 M4 时须保证最终代码摘要仍有效。 |
 
-顺序是开发优先级。M1 首批已完成，后续批次按实际收益和代价另行安排。
+顺序是开发优先级。M1 与 M2 本批范围已完成本地验证，M3 及后续批次按实际收益和代价另行安排。
 LLVM 20 如需移植，单独在相应 NDK `Base revision` 上验证。解释器改动使用对应 major、已配置
 Android sysroot 的 Clang 生成 `vm.h`。脚本用法为 `gen_vm_bitcode.sh <clang> [abi_tag] [20|21|all]`。
 LLVM 21 的 arm64 阶段使用 `bash scripts/gen_vm_bitcode.sh /path/to/clang aarch64 21`。
@@ -70,7 +70,8 @@ fixture 与 O1 定向 fixture 的 `-Xcheck:jni` 宿主差分，覆盖同 local �
 `[x]` 仓库内 `dex2c/samples/core-hardening/` 已完成 `ProtectedArithmetic.calculate(III)I` 与
 `accumulate(JI)J` 的 strict VMP、post、hardened CSE、证书绑定和入口自检；最终签名 APK 的两项关键
 方法静态检查通过。算法、39 项断言与非 README 样例源码/配置均与冻结基线相同。真实打包 raw/post
-IR 的每个私有 clone 均有四组融合，字节码在 raw/post 相同且存在于最终 dex2c SO：
+IR 的每个私有 clone 均有四组融合，字节码在 raw/post 相同且存在于最终 dex2c SO；本节历史对照为
+`ad6d19d367445be83ad5f5577caad4d89ad09b56`：
 
 | 方法 | 基线融合组 | p24 raw/post 融合组 | 基线→p24 字节码 |
 | --- | --- | --- | --- |
@@ -91,7 +92,7 @@ IR 的每个私有 clone 均有四组融合，字节码在 raw/post 相同且存
 [复现步骤与回执位置](../dex2c/samples/core-hardening/README.md)。
 
 M1 专项与 Java/native 样例已满足同一函数实际生成并执行多组融合、正常算术与独立参考结果一致的
-标准，专用化失败终止编译由专项覆盖。当前 host/module APK 分别为 878174/335372 字节，dex2c SO
+标准，专用化失败终止编译由专项覆盖。p24 host/module APK 分别为 878174/335372 字节，dex2c SO
 从 258536 增至 267048 字节；字节码缩减不代表整体体积或耗时收益。覆盖限于本例选中的整数区段，
 QDReadHook 完整业务覆盖及同分母性能比较仍待单独验收。上述 `work/` 文件为本地取证，不由 Gradle
 自动生成，也不随 Git 提供。
@@ -99,16 +100,64 @@ QDReadHook 完整业务覆盖及同分母性能比较仍待单独验收。上述
 
 ### M2 handler 与操作数布局变体
 
-从 M1 的整数融合和少量标量 handler 中选一个指令族，给编译器生成的 clone 两种语义等价的实现，
-并让编码器和对应读取端支持至少两种操作数排列。可以先在融合指令的同样四个字段内调整编码顺序，
-再按实际收益决定是否扩大到共享解释器的其他操作。变体由编译期系统随机源选择，并与函数自身的
-handler 匹配。这样改变的是执行结构与字段解释，p12 的 opcode 随机映射只改变分发编号。
-[aVMP.cpp](../obfuscation/llvm-21/Transforms/Obfuscation/aVMP/aVMP.cpp) · [解释器](../obfuscation/aVMPInterpreter/aVMPInterpreter.cpp)
+`[x]` p25 的每组 `VMPFusionSpec` 用现有 `getRandomBytes` 独立选择 handler 与布局。H0 为原生运算；
+H1 只替换该组首个 add/sub，其余运算和第二条左右顺序保持既有语义。计算全程使用原 `i8/i16/i32/i64`：
+以操作数初始化 Accum/Pending，Pending 为零时直接退出，否则同时计算 `nextAccum = Accum ^ Pending`，
+加法用 `(Accum & Pending) << 1`、减法用 `(~Accum & Pending) << 1` 更新 Pending，最多执行位宽次计算。结果按原位宽取模，
+不附加 `nsw/nuw/exact`。无 add/sub 的组仅用 H0。没有伪 volatile 工作或运行期变体选择。
 
-扩展 `opcode_diversity.py` 的跨方法、跨构建断言。规范化分发编号和符号名后，同一指令族的两种
-等价 handler 实现和字段消费顺序须在 post 后及最终 SO 中仍可区分，防止变体被优化合并。用设备
-差分执行两种变体，确认业务语义一致。按 `.text`、字节码和热调用开销决定是否扩大。分析者需要
-适配不同实现及布局，运行时观察和逐 handler 分析仍可行。
+布局 L0 为 target/LHS/RHS/third，L1 为 LHS/RHS/third/target。target 仍为指针宽度原始字段，
+其余仍用原 stateful `packValue`；编码器和 clone 解码器按同一 `fieldOrder()` 顺序依次发出与读取。
+共享解释器和生成的 `vm.h` 未改。保持无开关不变换、strict 失败关闭、post 链与默认保护。
+[aVMP.cpp](../obfuscation/llvm-21/Transforms/Obfuscation/aVMP/aVMP.cpp)
+
+`[x]` Release 专项未启用 `-irobf-debug`。14 个随机候选与冻结 p24 基线均执行同一 11 函数参考驱动，
+16 个融合组累计覆盖 60 种有效 H/L 组合；包括首条或次条 sub、左右顺序、窄整数、B=0、溢出、循环和
+64 位最坏传播。`opcode_diversity.py` 从实际 reader CFG/数据流识别 H/L，raw/post 记录完全一致。
+每轮的真实 post.s 只组装一次为 post.o，该对象直接产生设备执行的 SO。固定同一个 64 位 add/xor
+组核对四种 H/L：H0 的 native add/eor 与 H1 的 and/eor/lsl/零判断/回边在实际反汇编中可区分，
+对象与 SO 的整个对应 clone 非重定位指令全相等，reader 出口用实际局部符号对应；结构判断不依赖
+符号名、opcode 编号或整个 clone 的哈希差异。专项库总字节码每轮均为 1585 字节。
+
+审查发现旧 i64 向量的最终 `& y` 会掩掉部分高位错误，已补两个高位可见向量；只重编语义 driver，
+复用原 15 份 SO 全部通过，设备核对的 SO 哈希未变。结果为 `semantic-highbits/results.json`。
+
+`[x]` 未改 Java/native 样例的真实 raw/post 中，两个 dex2c 方法和 native 方法各为四组融合、一个
+carry/borrow 循环。字节码分别保持 p24 的 4158/1351/363 字节，raw/post 相同且位于最终封装库。
+两个 Java clone 和 native clone 的全部非重定位指令与真实对象一致，链接库与封装库对应代码全相同。
+sample 对象直接从真实 final IR 编译。样例主/worker 的
+启用、禁用、恢复结果分别为各 39 PASS、均 module not active、各 39 PASS，安装 APK 哈希一致。
+22 个非 README 样例源文件、算法、断言和配置未改。
+
+| 同一专项输入 / 库 | p24 | p25 本批 |
+| --- | --- | --- |
+| 专项 SO（保留局部符号） | 298624 字节 | 14 个候选 298384–301536 字节 |
+| 专项 `.s0` 代码节 | 125236 字节 | 124372–126492 字节；`.text` 3540、`.plt` 304 不变 |
+| dex2c 封装 SO / 可执行节合计 | 267048 / 209420 字节 | 268056 / 210468 字节 |
+| native SO / 可执行节合计 | 31456 / 23152 字节 | 31544 / 23232 字节 |
+
+样例 dex2c 的 `.text` 为 102392→102600，`.s0` 为 105664→106504 字节；native `.s0` 为
+21852→21932 字节。随机编译还会改变原有 dispatch 和块布局，上述尺寸不作为隔离算法增量。
+
+`[x]` 五轮固定产物交错复测使用相同 driver（哈希一致）、100 次预热和每项 2000 次调用，八项 checksum
+与基线一致。计时使用冻结的原 driver；审查后补入的两个高位可见向量只做追加语义回归，不覆盖该 driver
+或复测记录。下表是 CLOCK_MONOTONIC_RAW 的整段 VM 调用中位数，单位微秒：
+
+| i64 输入 | p24 H0/L0 | p25 build2 H1/L0 | p25 build3 H0/L0 | p25 build5 H0/L1 |
+| --- | --- | --- | --- | --- |
+| 典型 | 3.203 | 4.270 | 4.136 | 3.805 |
+| 64 轮 carry | 3.211 | 4.167 | 4.144 | 3.826 |
+| 64 轮 borrow | 3.224 | 4.184 | 4.075 | 3.807 |
+
+H1/L0 相对 p24 为 1.333/1.298/1.298 倍，但同布局 H0 也有明显差异；未绑核或锁频，整段 VM
+粗计时受原有随机分发和设备状态影响，不能把约 30% 全归因 carry/borrow。八项、三个候选相对 p24 的
+中位比值范围为 0.822–1.348，原始区间见报告；不据此声称性能改善或整体保护强度提升。当前预算
+仅允许本批每函数原上限四组、每组最多替换一个 add/sub，未设全业务耗时 SLA；完整业务和隔离评估
+通过前不扩大指令族或选择上限。运行时观察和逐 handler 分析仍可行。
+
+本地证据在 `work/m2-variants-p25/`：`fusion-device/results.json`、`semantic-highbits/results.json`、`timing-repeat/results.json`、
+`sol/machine-evidence.json` 和 `validation-report.json`；候选与 p24 对照分别在 `candidate/` 与
+`baseline/`，不随 Git 提供。M3–M5 未开始。
 [随机映射回归](../tests/vmp/opcode_diversity.py) · [post 回归](../tests/vmp/post.py)
 
 ### M3 敏感数据借用与 VM 状态回收
@@ -192,9 +241,10 @@ lifetime/copy 与 VM 调用帧用例，覆盖递归、跨线程、native 回调�
 修改 overlay 按贡献指南核对精确基线 `git apply --check`、最小 Clang 构建和受影响的现有套件。
 真机语义、宿主兼容和设备上的篡改拒绝以真实结果为准。`--compile-only` 只覆盖编链及静态路径。
 
-影响产物的实现批次按贡献指南递增 patchset；本轮 Java lowering 改动已递增为 p24。历史 p23 Windows
+影响产物的实现批次按贡献指南递增 patchset；本轮 handler/布局改动已递增为 p25。历史 p23 Windows
 完整 Clang [工作流 44894484357](https://github.com/xihan123/A-LLVM/actions/runs/44894484357) 已成功完成，
-对应 `8cb3f4c`，不作为本轮 p24 的 CI 结果。完整业务覆盖和性能比较仍保留上述边界。自动发布仍受全部 Host artifact 齐备、聚合
-`SHA256SUMS`、现有发布门槛和所需设备验证约束，已有 Release 保持不可变。M2 及后续阶段不包含在
+对应 `8cb3f4c`，不作为本轮 p25 的 CI 结果；当前本地构建与设备结果也不替代本批提交后的 CI。
+完整业务覆盖和性能比较仍保留上述边界。自动发布仍受全部 Host artifact 齐备、聚合
+`SHA256SUMS`、现有发布门槛和所需设备验证约束，已有 Release 保持不可变。M3 及后续阶段不包含在
 本轮实现中，发布留待当前批次通过全部门槛后按既有流程进行。
 [贡献指南](../CONTRIBUTING.md) · [仓库约定](../AGENTS.md) · [聚合发布](../.github/workflows/discover.yml)

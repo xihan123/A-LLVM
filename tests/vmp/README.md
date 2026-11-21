@@ -67,6 +67,37 @@ python tests/vmp/fusion.py --clang "$CLANG" --ndk "$NDK" \
   --baseline-clang path/to/baseline/clang
 ```
 
+## p25 handler 与操作数布局变体
+
+LLVM 21 每融合组在编译期选择 H0 原生运算或 H1 同宽 carry/borrow；H1 只替换该组首个
+add/sub。布局 L0 依次读取 target/LHS/RHS/third，L1 读取 LHS/RHS/third/target；无 add/sub
+的组仅有 H0。生产编译仍使用已有 VMP 开关，无新增变体参数。
+
+专项模式不传 `-irobf-debug`，从真实 decoder CFG/计算数据流识别变体，核对 raw/post 结构与
+字节码相同。它至多编译 32 次，直到 16 个融合组的 60 种有效 H/L 组合全部出现，未齐则失败。
+实际 post.s 只组装一次成 post.o，再由该对象链接 SO；设备驱动加载同一库。
+
+```bash
+python tests/vmp/fusion.py --clang "$CLANG" --ndk "$NDK" \
+  --variant-coverage --baseline-clang "$P24_CLANG" \
+  --serial "$SERIAL" --output <新的证据目录>
+```
+
+`--baseline-clang` 在此模式要求 p24 H0/L0 编译器；该基线不计入候选覆盖。省略 `--serial`
+只验证编链与结构，不代表运行语义通过。`--output` 必须是新目录，保留每轮 IR、汇编、真实对象、
+SO、结构与设备日志，完成后写 `results.json`。默认模式仍为原编译/诊断回归，不执行粗计时。
+
+设备驱动有窄位宽、B=0、非交换次条运算、循环 PHI 和 i64 边界差分。新增两项高位可见向量
+使长链 carry/borrow 的错误无法被最终 `& y` 掩掉，预期分别为 `0x8000000000000000` 和
+`0x8000000000000001`。p25 原 14 候选和一个 p24 SO 另用追加 driver 做语义复验，15/15 通过且
+设备 SO 哈希不变，结果为 `semantic-highbits/results.json`；五轮计时
+继续使用已冻结的原 driver/hash，新增向量不计入旧计时证据。计时是每项预热 100 次、调用 2000 次
+的整段 VM 粗测，无绑核或锁频，不能隔离 carry/borrow 的成本。
+
+本地报告位于 `work/m2-variants-p25/` 的 `fusion-device/results.json`、
+`timing-repeat/results.json` 与 `sol/machine-evidence.json`，不随 Git 提供。
+实现边界和成本见 [M2 验收](../../docs/CORE_HARDENING_ROADMAP.md#m2-handler-与操作数布局变体)。
+
 ## 既有覆盖
 
 测试将受保护函数与独立编译的原生实现比较，覆盖：

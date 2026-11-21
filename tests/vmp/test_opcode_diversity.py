@@ -30,7 +30,51 @@ def log(first=1, second=2):
         for name, shift in (("first", first), ("second", second)))
 
 
+def fusion_ir(handler, layout):
+    readers = ["target", "value0", "value1", "value2"]
+    if layout:
+        readers = readers[1:] + readers[:1]
+    labels = ["vmp_fusion_read_target.exit" if field == "target" else
+              "vmp_fusion_read_value.exit" + field[-1] for field in readers]
+    body = ["vmp.fusion.0123456789abcdef:\n  br label %" + labels[0]]
+    for index, label in enumerate(labels):
+        target = labels[index + 1] if index < 3 else "vmp.fusion.carry" if handler else "done"
+        body.append(label + ":\n  br label %" + target)
+    if handler:
+        body += ["""vmp.fusion.carry:
+  %a = phi i8 [ 0, %before ], [ %next, %vmp.fusion.carry.step ]
+  %b = phi i8 [ 0, %before ], [ %shift, %vmp.fusion.carry.step ]
+  %zero = icmp eq i8 %b, 0
+  br i1 %zero, label %done, label %vmp.fusion.carry.step
+vmp.fusion.carry.step:
+  %bits = and i8 %a, %b
+  %shift = shl i8 %bits, 1
+  %next = xor i8 %a, %b
+  br label %vmp.fusion.carry"""]
+    body.append("done:\n  ret void")
+    return "define void @vm_interpreter_first_k0000000000000007() {\n" + "\n".join(body) + "\n}\n"
+
+
 class OpcodeDiversityTests(unittest.TestCase):
+    def test_fusion_structure_reads_actual_cfg_and_carry_width(self):
+        for handler in range(2):
+            for layout in range(2):
+                result = diversity.inspect_fusion_structure(fusion_ir(handler, layout))
+                group, = result["vm_interpreter_first_k0000000000000007"]
+                self.assertEqual((group["handler"], group["layout"]), (handler, layout))
+                if handler:
+                    self.assertEqual(group["width"], 8)
+                    self.assertIn("shl i8 %v, 1", group["carryDataflow"])
+
+    def test_fusion_structure_rejects_bad_width_flags_and_exit(self):
+        good = fusion_ir(1, 0)
+        for bad in (good.replace("%b = phi i8", "%b = phi i16"),
+                    good.replace("shl i8", "shl nuw i8"),
+                    good.replace("icmp eq i8 %b, 0", "icmp ne i8 %b, 0"),
+                    good.replace("  br label %vmp_fusion_read_value.exit0", "  ret void", 1)):
+            with self.assertRaises(ValueError):
+                diversity.inspect_fusion_structure(bad)
+
     def test_three_builds_and_all_legacy_semantics_fail(self):
         builds = [diversity.inspect_variant(log(index * 2 + 1, index * 2 + 2), IR) for index in range(3)]
         diversity.compare_variants(builds)

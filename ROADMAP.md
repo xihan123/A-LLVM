@@ -2,20 +2,20 @@
 
 `[x]` 已完成，`[~]` 已实现但未完成端到端验证，`[ ]` 未开始。
 
-当前开发主线从 LLVM 21 的多组 VM 指令融合开始，随后推进指令处理逻辑（handler）与操作数布局变体、运行期数据生命周期、共享库完整性和 AArch64 机器码保护。计划和首批验收见 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md)。
+LLVM 21 的多组 VM 指令融合及首批 handler/操作数布局变体已完成本地专项与样例验证，后续推进运行期数据生命周期、共享库完整性和 AArch64 机器码保护。计划和各批验收见 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md)。
 
 下面各阶段为历史记录，具体环境和验证范围见 [验证记录](./tests/VALIDATION.md)。
 
-## 当前状态：p24 / M1
+## 当前状态：p25 / M2
 
-- [x] p23 的 LLVM 21 VMP 已支持每函数最多四组不重叠的相邻标量整数融合，并为每组保留独立语义 opcode、位宽和操作数顺序。p24 在 dex2c 的纯整数区段内使用标量临时值，使 Java 算术进入现有融合路径；`config/patchset.env` 当前为 `p24`。
-- [x] `tests/vmp/fusion.py` 已覆盖多组、预留 opcode 占用、重叠与零候选、窄整数、非交换运算、循环 PHI 和 `i64` 链，并检查 protected IR、post IR、ELF 对象、基线字节码长度及 ARM64 原生参考驱动。
-- [x] 仓库内 [core-hardening 示例](./dex2c/samples/core-hardening/README.md) 的两个 Java/dex2c 方法在真实打包 raw/post IR 中各有 4/4 组融合；`accumulate`、`calculate` 的字节码相对 `ad6d19d` 冻结基线分别为 7013→4158、3848→1351 字节，raw/post 字节码相同且存在于最终 SO。strict VMP、post、hardened CSE、证书绑定、入口自检与最终签名 APK 的两项关键方法静态检查均通过。同模块原生样例仍为四组融合，其 SO 与 p23 全字节相同。
-- [x] p24 候选在 OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 上主/worker 两进程各 39 项通过（8 dex2c int、21 long、8 native、2 异常）；禁用模块后两进程明确 `FAIL`，恢复启用后再次各 39 项通过。已安装 APK 哈希与候选一致。证据为 `work/dex2c-primitive-lowering-p24/validation-report.json`，候选 APK/IR/回执冻结于同目录的 `candidate/`，原样例算法、39 项断言和配置未改。
-- [x] 核心 45 项测试通过，含原有宿主 CheckJNI 差分与新增 `-O1` primitive 回归，覆盖引用/int/long 复用、category2、异常 handler、IINC、分支合流与循环。
-- [ ] QDReadHook 完整业务覆盖和同分母性能比较仍待单独验收。当前 dex2c SO 为 258536→267048 字节，不能据字节码缩减声称整体体积下降或耗时收益。
+- [x] p23 每函数最多四组整数融合、p24 dex2c 纯整数区段标量化保持生效。p25 在每组编译期独立选择原生运算或同宽 carry/borrow 循环，并选择 target 在前三个值之前或之后的布局；每组最多替换首个 add/sub，沿用系统随机源，无新增启用开关。`config/patchset.env` 当前为 `p25`。
+- [x] `tests/vmp/fusion.py --variant-coverage` 的 14 个候选和一个冻结 p24 基线全部通过 ARM64 设备参考差分；16 组覆盖 60 种有效 handler/布局组合。raw/post 的真实字段消费顺序和计算结构相同，专项总字节码均为 1585 字节；固定 64 位 add/xor 的四组合已从真实对象核到最终 SO 的原生运算或 carry 循环。
+- [x] 仓库内 [core-hardening 示例](./dex2c/samples/core-hardening/README.md) 的两个未改 Java 方法仍各有四组融合，raw/post 各保留一个 carry/borrow 循环；字节码为 4158/1351 字节。同模块 native 为四组、一个循环、363 字节。真实对象、链接库和封装库的代码对应已核对，最终签名 APK 的两项关键方法静态检查通过。
+- [x] p25 在 OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 上主/worker 各 39 项通过，禁用模块后两进程明确失败，恢复后再次通过；安装包哈希与冻结候选一致。证据在本地 `work/m2-variants-p25/validation-report.json`；样例算法、断言、配置及 22 个非 README 源文件未改。
+- [x] 固定产物和冻结 driver 完成五轮交错复测，八项 checksum 一致；审查后新增两项高位可见向量，在原 15 份 SO 上追加语义复验全部通过。i64 H1/L0 的典型、64 轮 carry/borrow 输入中位数为 4.270/4.167/4.184 微秒，p24 为 3.203/3.211/3.224 微秒；同布局 H0 也有 4.136/4.144/4.075 微秒。整段 VM 粗计时未绑核或锁频，差异不能全部归于新增算法。
+- [ ] 完整 QDReadHook 业务覆盖、发布预算与性能验收仍待单独完成。本轮保持每组最多一个 add/sub 变体，不扩大指令族；dex2c/native SO 相对 p24 为 267048→268056 / 31456→31544 字节，无整体体积或性能收益结论。
 
-规划和对照仍保留 p22 基线；p23 的 LLVM 融合与 p24 的 Java/dex2c 样例闭环均已完成。后续阶段另行排期。
+规划保留 p22 基线，p25 实现以 `b9c71b7` 的 p24 为冻结对照。M1 与 M2 本批范围的本地验证已完成，M3 及后续阶段另行排期。
 
 ## 阶段 0 — 骨架
 
@@ -91,7 +91,7 @@
 
 ## 当前优先事项
 
-1. M1 多组融合的实现、专项与 Java/native 样例闭环已完成；p24 已在未改的 Java 算法上验证多组融合，完整业务覆盖与性能预算另行验收。
+1. M1 多组融合与 M2 首批 handler/布局变体已在未改 Java/native 样例上完成本地验证；保持当前选择上限，完整业务覆盖与性能预算另行验收。
 2. 后续批次按 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md) 另行安排。构建加速仍有独立的 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md)。
 
 ## 发版前必做

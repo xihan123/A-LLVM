@@ -315,11 +315,13 @@ python tests/dex2c/gradle.py --gradle .\dex2c\gradlew.bat --sdk F:\Android\Sdk -
 
 真实 LibXposed 102 样例位于 `samples/xposed`。使用 `-Pdex2c.certificate=<debug签名的公开证书.der>` 构建 `:module:assembleRelease` 和 `:host:assembleDebug`，安装两个 APK，在 LSPosed 中仅选择测试宿主作用域后重启宿主进程。主进程和 `:worker` 均应输出 `calculate=37 exception=-99`、`isolated-loader=OK existing-native=102`；样例重复调用 install，测试独立宿主 ClassLoader、参数/结果修改、异常及既有 native 库。
 
-LLVM 21 M1 的双进程验收样例见 [core-hardening](samples/core-hardening/README.md)。p24 在无调用的 int/long 区段内使用标量临时值，JNI/helper、真实跳转与异常 handler 入口处同步；引用、浮点与可抛异常运算保留原路径。未改的 `accumulate`、`calculate` 在实际打包 raw/post IR 中各有 4/4 组融合，字节码相对 `ad6d19d` 冻结基线分别为 7013→4158、3848→1351 字节；raw/post 字节码相同且存在于最终 SO。两项关键方法的 strict VMP、post、hardened CSE、证书绑定、入口自检及签名 APK 静态检查通过。同模块原生 JNI 仍为四组融合，其 SO 与 p23 全字节相同，仅验收 strict VMP/post。
+LLVM 21 M1/M2 的双进程验收样例见 [core-hardening](samples/core-hardening/README.md)。p24 的 int/long 区段标量化保留：JNI/helper、真实跳转与异常入口前同步，引用、浮点与可抛异常运算沿用原路径。p25 用系统随机源在编译期为每融合组选择原生运算或同宽 carry/borrow，以及 target 前/后两种字段布局；每组最多替换首个 add/sub，无新增开关。未改的 `accumulate`、`calculate` 在实际 raw/post 中仍各四组融合、各一个循环，字节码保持 p24 的 4158/1351 字节。strict VMP、post、hardened CSE、证书绑定、入口自检和签名 APK 静态检查通过。native JNI 为四组、一个循环、363 字节，仅验收 strict VMP/post；真实对象、链接库与封装 SO 的代码对应已核对。
 
-p24 候选在 OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 上主/worker 各 39 项通过，禁用模块后均失败，恢复启用后再次通过；安装包哈希与冻结候选一致，算法、断言和配置未改。核心 45 项测试通过，含原有及新增 O1 CheckJNI 宿主差分。证据为本地 `work/dex2c-primitive-lowering-p24/validation-report.json`，候选 APK/真实 IR/回执在其 `candidate/` 下。dex2c SO 从 258536 增至 267048 字节，当前不声称整体体积或耗时收益；完整 QDReadHook 覆盖与同分母性能比较尚未完成。
+p25 在 OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 上主/worker 各 39 项通过，禁用模块后均失败，恢复后再次通过；安装包哈希一致，算法、断言和配置未改。独立专项的 14 个候选覆盖 16 组共 60 种有效 H/L 组合并通过设备参考差分。证据为本地 `work/m2-variants-p25/validation-report.json`。dex2c/native SO 相对 p24 为 267048→268056 / 31456→31544 字节；五轮固定产物粗计时中，i64 H1/L0 相对 p24 的中位耗时约为 1.30–1.33 倍，同布局 H0 也有明显变化。计时未绑核或锁频，不能隔离 carry/borrow 成本或声称性能收益；保持当前范围，完整 QDReadHook 覆盖与业务预算另行验收。详情见 [M2 验收与成本](../docs/CORE_HARDENING_ROADMAP.md#m2-handler-与操作数布局变体)。
 
 启用作用域后可运行 `python tests/dex2c/xposed.py --sdk F:\Android\Sdk --serial <adb-serial> --report work/dex2c-xposed.json`，自动安装样例 APK、启动宿主并检查两个进程的结果。
+
+审查补入的两个 i64 高位可见向量已复用原 15 份 SO 完成追加设备语义复验，全部通过且 SO 哈希未变；结果在同目录 `semantic-highbits/results.json`。原五轮计时保留冻结 driver/hash，未把新向量算入旧计时证据。
 
 CI 的 `checks` 验证 ASM/Kotlin 选择和插件；LLVM 21 工具链构建额外运行 strict/cast 及 Windows JNI/VMP 编译测试。真机与 LSPosed 验收须在显式指定的设备执行。
 

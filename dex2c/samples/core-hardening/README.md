@@ -69,28 +69,28 @@ With the module active, look for `hooks-installed package=io.github.xihan123.cor
 
 ## Verified result and artifact checks
 
-The p24 build in `work/dex2c-primitive-lowering-p24/build-sample.log` succeeded. The comparison starts at `ad6d19d367445be83ad5f5577caad4d89ad09b56`; the sample algorithms, 39 assertions, source files and configuration are unchanged. On 2026-11-21, the candidate APKs produced these results on OnePlus 7 / API 37 / ARM64 / 4 KiB pages / LSPosed 2.2.1 API 102:
+The p25 build in `work/m2-variants-p25/build-sample.log` succeeded. The frozen comparison is p24 commit `b9c71b78bb11358a49f6dc6f59d61d2a8f452a78`; the sample algorithms, 39 assertions, configuration and 22 non-README source files are unchanged. On 2026-11-21, the candidate APKs produced these results on OnePlus 7 / API 37 / ARM64 / 4 KiB pages / LSPosed 2.2.1 API 102:
 
-| Run | Main / worker PID | Result per process | Log under `work/dex2c-primitive-lowering-p24/` |
+| Run | Main / worker PID | Result per process | Log under `work/m2-variants-p25/` |
 | --- | --- | --- | --- |
-| Enabled, 20:53 | 8315 / 8342 | 39 PASS | `device-enabled.log` |
-| Disabled, 20:54 | 8392 / 8410 | FAIL, module not active | `device-disabled.log` |
-| Restored, 20:54 | 8465 / 8490 | 39 PASS | `device-restored.log` |
+| Enabled, 21:32 | 8892 / 8919 | 39 PASS | `device-enabled.log` |
+| Disabled, 21:33 | 9039 / 9057 | FAIL, module not active | `device-disabled.log` |
+| Restored, 21:33 | 9111 / 9137 | 39 PASS | `device-restored.log` |
 
 The 39 checks comprise 8 dex2c integer cases, 21 dex2c long cases, 8 native integer cases, and 2 invalid-`rounds` exception cases. The common `Entry` hook helper explicitly sets API 102 `ExceptionMode.PASSTHROUGH`; `rounds=-1` and `129` assert both the exception type and message. Installed APK SHA-256 values match the frozen candidates, and the module is enabled at the end of the test.
 
 The dex2c protection receipt is `module/build/intermediates/dex2c/release/native/protection.json`; the final signed APK check is `module/build/reports/dex2c/release/apk-verification.json`, both relative to this sample. Its two `criticalMethods` passed the signed-APK static check. The dex2c methods use strict VMP, post, hardened CSE, certificate binding and entry self-check. `segmentedData` and runtime `apkSignatureVerification` are disabled.
 
-p24 lowers call-free int/long regions to scalar temporaries. It writes values back before helpers, JNI calls and real control-flow boundaries, including exception handlers. Dead numeric slots still release old JNI references and clear their uninitialized tags through the original runtime helpers. Floating-point, reference and throwing operations keep their existing lowering. Both unchanged Java methods now have four fusion groups in the actual raw and post IR used to produce the packaged SO:
+p24's call-free int/long scalar lowering remains active. Values synchronize before helpers, JNI calls and real control-flow boundaries, including exception handlers; reference cleanup, floating-point and throwing operations retain their original paths. p25 independently chooses native or same-width carry/borrow computation and target-first or target-last field order for each fusion group at compile time. At most the first add/sub in each group is replaced; zero pending bits exit immediately and propagation takes at most the original bit width in rounds. Both unchanged Java methods retain four groups in the actual raw/post IR used to produce the packaged SO:
 
-| Method | Baseline groups | p24 raw / post groups | Baseline → p24 bytecode |
+| Method | p24 → p25 groups | p25 raw / post carry loops | p24 → p25 bytecode |
 | --- | --- | --- | --- |
-| `accumulate(JI)J` | 0 | 4 / 4 | 7013 → 4158 bytes |
-| `calculate(III)I` | 0 | 4 / 4 | 3848 → 1351 bytes |
+| `accumulate(JI)J` | 4 → 4 | 1 / 1 | 4158 → 4158 bytes |
+| `calculate(III)I` | 4 → 4 | 1 / 1 | 1351 → 1351 bytes |
 
-Each method's raw/post bytecode is identical and is present in the final dex2c SO. `NativeCompiler` now passes `-fno-discard-value-names` on the actual protected raw/post steps, so fusion counts can be checked on the packaged compilation chain. The baseline's zero groups were confirmed by its separate named inspection IR; that historical inspection is not used to establish the p24 result.
+Each method's raw/post bytecode is identical and present in the final dex2c SO. `NativeCompiler` retains value names on the actual protected steps, so counts come from the packaged compilation chain. Each actual `protected.o` clone matches all non-relocated instructions in `linked.so`; the corresponding 41080/36896 code bytes match the packaged SO. This uses the real directly compiled objects.
 
-The native `core_fusion_calculate` still has four groups and 363 bytes of bytecode. Its 31456-byte `lib/arm64-v8a/libcore_fusion.so` is byte-for-byte identical to p23. This native path uses strict VMP/post and does not claim dex2c CSE or certificate protection. The release build does not pass `-irobf-debug`, and the post IR contains no runtime debug helpers.
+The native `core_fusion_calculate` has four groups, one carry/borrow loop and 363 bytes of bytecode. Its `lib/arm64-v8a/libcore_fusion.so` is 31544 bytes versus p24's 31456; its actual `arithmetic.o` clone matches all non-relocated instructions in the final library. This path uses strict VMP/post and does not claim dex2c CSE or certificate protection. Release builds do not pass `-irobf-debug`, and post IR contains no runtime debug helpers.
 
 The native build IR is at `module/.cxx/RelWithDebInfo/<configuration-id>/arm64-v8a/arithmetic.raw.ll` and `arithmetic.ll`; dex2c build IR is at `module/build/intermediates/dex2c/release/native/protected.raw.ll` and `protected.ll`. After rebuilding, inspect the current Gradle outputs from the repository root:
 
@@ -132,6 +132,8 @@ foreach ($file in 'protected.raw.ll', 'protected.ll') {
 
 Expect `FusionGroups=4` for each of the four Java rows. The current protection receipt also records bytecode lengths under `methodBytecodeBytes` and `bytecodeVerifiedInLibrary=true`; the signed-APK report binds the packaged SO to that receipt.
 
-Local evidence is under `work/dex2c-primitive-lowering-p24/`: `baseline/` preserves the original generated sources, raw/post IR, named inspection and APKs; `candidate/` contains the current generated source, actual raw/post IR, APKs and receipts. `artifact-evidence.json` records per-method fusion and bytecode correspondence, and `validation-report.json` joins the build, artifact and device results. These archives are not checked into Git or generated by Gradle; a fresh clone will not contain them. The older p23 archive under `work/core-hardening-sample/` remains a historical record.
+Review added two i64 vectors whose high-bit results survive the final `& y`. New semantic drivers passed against all 15 original shared libraries, with device SO hashes unchanged; `work/m2-variants-p25/semantic-highbits/results.json` records this separate check without timing.
 
-The current host/module APK sizes are 878174/335372 bytes. The dex2c SO grew from 258536 to 267048 bytes while the two VM bytecode blobs became shorter; this is not evidence of an overall size or performance improvement. The 45 core tests passed, including the existing host differential fixture and a separate O1 `-Xcheck:jni` fixture for shared reference/int/long locals, category-2 copies, exception-handler locals and control-flow boundaries. M1 Java/native sample validation is complete; full QDReadHook business coverage and performance comparisons remain outstanding. Device validation covers the ARM64 API 37 device with 4 KiB pages stated above.
+Local p25 evidence is under `work/m2-variants-p25/`: `baseline/` freezes the p24 compiler, sample APK/IR and receipts; `candidate/` contains the actual current objects, IR, SOs, APKs and receipts. `artifact-evidence.json` records per-method fusion/bytecode correspondence, `sol/machine-evidence.json` binds the actual code, and `validation-report.json` joins the build, artifact and device results. The release-only `fusion-device/results.json` records 14 candidates covering 16 groups and all 60 valid handler/layout combinations with independent device references. These archives are not checked into Git or generated by Gradle; a fresh clone will not contain them. The p23/p24 archives remain historical records.
+
+The current host/module APK sizes are 878174/336380 bytes. The dex2c SO is 267048→268056 bytes versus p24, with executable sections totaling 209420→210468 bytes; bytecode lengths are unchanged. Five interleaved repeats of fixed standalone VM artifacts use identical frozen drivers, 100 warmup calls and 2000 calls per metric; checksums match. The two high-bit-observing vectors added after review are a separate semantic regression and do not replace these timing drivers or records. The i64 H1/L0 representative has 4.270/4.167/4.184 microsecond medians for typical/worst carry/worst borrow inputs versus p24's 3.203/3.211/3.224. A p25 H0/L0 representative also changes to 4.136/4.144/4.075. These are coarse whole-VM timings without CPU affinity or frequency locks, so the roughly 30% difference cannot be attributed entirely to the new loop. This keeps the current one-add/sub-per-group scope; full QDReadHook business coverage and a production performance budget remain outstanding. See the [M2 cost record](../../../docs/CORE_HARDENING_ROADMAP.md#m2-handler-与操作数布局变体). Device validation covers the ARM64 API 37 device with 4 KiB pages stated above.

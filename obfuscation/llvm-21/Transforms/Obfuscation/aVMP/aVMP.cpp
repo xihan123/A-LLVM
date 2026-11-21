@@ -379,7 +379,20 @@ struct VMPFusionSpec {
     unsigned SecondOpcode = 0;
     unsigned Width = 0;
     bool FirstIsLHS = false;
+    uint8_t HandlerVariant = 0;
+    uint8_t OperandLayout = 0;
+
+    ArrayRef<unsigned> fieldOrder() const {
+        static const unsigned Orders[2][4] = {{0, 1, 2, 3}, {1, 2, 3, 0}};
+        if (OperandLayout > 1)
+            report_fatal_error("VMP: invalid fusion operand layout");
+        return Orders[OperandLayout];
+    }
 };
+
+static bool isVMPFusionCarryOpcode(unsigned Opcode) {
+    return Opcode == Instruction::Add || Opcode == Instruction::Sub;
+}
 
 static bool isVMPFusionBinaryOpcode(unsigned Opcode) {
     switch (Opcode) {
@@ -1927,6 +1940,13 @@ void GOVMTranslator::selectFusionCandidates() {
             Spec.SecondOpcode = Second->getOpcode();
             Spec.Width = Bits;
             Spec.FirstIsLHS = IsLHS;
+            uint8_t Choices;
+            if (getRandomBytes(&Choices, sizeof(Choices)))
+                report_fatal_error("VMP: cannot obtain fusion variant randomness");
+            Spec.HandlerVariant = (isVMPFusionCarryOpcode(Spec.FirstOpcode) ||
+                                   isVMPFusionCarryOpcode(Spec.SecondOpcode))
+                                      ? Choices & 1 : 0;
+            Spec.OperandLayout = (Choices >> 1) & 1;
             fusion_specs.push_back(Spec);
             SelectedInstructions.insert(First);
             SelectedInstructions.insert(Second);
@@ -1940,7 +1960,9 @@ void GOVMTranslator::selectFusionCandidates() {
                    << " first=" << Spec.First->getOpcodeName()
                    << " second=" << Spec.Second->getOpcodeName()
                    << " width=" << Spec.Width
-                   << " first_is_lhs=" << (Spec.FirstIsLHS ? 1 : 0) << "\n";
+                   << " first_is_lhs=" << (Spec.FirstIsLHS ? 1 : 0)
+                   << " handler=" << (unsigned)Spec.HandlerVariant
+                   << " layout=" << (unsigned)Spec.OperandLayout << "\n";
         }
     }
 }
@@ -1955,15 +1977,16 @@ void GOVMTranslator::handle_fused_binary(const VMPFusionSpec &Spec) {
     if (Entry.second)
         curr_data_offset += modDataLayout->getTypeAllocSize(Inst->getType());
 
-    std::vector<uint8_t> PackedTarget = pack(ResultOffset, pointer_size);
-    std::vector<uint8_t> PackedFirstLHS = GET_PACK_VALUE(Spec.First->getOperand(0));
-    std::vector<uint8_t> PackedFirstRHS = GET_PACK_VALUE(Spec.First->getOperand(1));
+    std::vector<uint8_t> Fields[4];
+    Fields[0] = pack(ResultOffset, pointer_size);
+    Fields[1] = GET_PACK_VALUE(Spec.First->getOperand(0));
+    Fields[2] = GET_PACK_VALUE(Spec.First->getOperand(1));
     Value *ThirdOperand = Inst->getOperand(Spec.FirstIsLHS ? 1 : 0);
-    std::vector<uint8_t> PackedThird = GET_PACK_VALUE(ThirdOperand);
+    Fields[3] = GET_PACK_VALUE(ThirdOperand);
 
-    std::vector<uint8_t> HexCode;
-    ins_to_hex(HexCode, pack_op(Spec.SemanticOpcode), PackedTarget,
-               PackedFirstLHS, PackedFirstRHS, PackedThird);
+    std::vector<uint8_t> HexCode = pack_op(Spec.SemanticOpcode);
+    for (unsigned Field : Spec.fieldOrder())
+        HexCode.insert(HexCode.end(), Fields[Field].begin(), Fields[Field].end());
     vm_code.insert(vm_code.end(), HexCode.begin(), HexCode.end());
 }
 
@@ -4663,6 +4686,9 @@ static bool specializeFusionOpcode(Function *Clone,
         Spec.SemanticOpcode > OP_TOTAL || !UsedOpcodes[Spec.SemanticOpcode] ||
         !isVMPFusionBinaryOpcode(Spec.FirstOpcode) ||
         !isVMPFusionBinaryOpcode(Spec.SecondOpcode) ||
+        Spec.HandlerVariant > 1 || Spec.OperandLayout > 1 ||
+        (Spec.HandlerVariant && !isVMPFusionCarryOpcode(Spec.FirstOpcode) &&
+         !isVMPFusionCarryOpcode(Spec.SecondOpcode)) ||
         (Spec.Width != 8 && Spec.Width != 16 && Spec.Width != 32 && Spec.Width != 64))
         FusionFailure();
 
@@ -4713,24 +4739,48 @@ static bool specializeFusionOpcode(Function *Clone,
         Ctx, "vmp.fusion." + vmpHex64(FunctionKey), Clone, Continuation);
     IRBuilder<> Builder(FusionBB);
     SmallVector<CallBase *, 5> PendingBridgeCalls;
-    CallInst *TargetCall = Builder.CreateCall(ReadTarget, {}, "vmp.fusion.target");
-    Value *Target = TargetCall;
-    PendingBridgeCalls.push_back(TargetCall);
-    CallInst *LHSCall = Builder.CreateCall(ReadValue, {}, "vmp.fusion.lhs");
-    Value *RawLHS = LHSCall;
-    PendingBridgeCalls.push_back(LHSCall);
-    CallInst *RHSCall = Builder.CreateCall(ReadValue, {}, "vmp.fusion.rhs");
-    Value *RawRHS = RHSCall;
-    PendingBridgeCalls.push_back(RHSCall);
-    CallInst *ThirdCall = Builder.CreateCall(ReadValue, {}, "vmp.fusion.third");
-    Value *RawThird = ThirdCall;
-    PendingBridgeCalls.push_back(ThirdCall);
+    Value *Fields[4] = {};
+    static const char *FieldNames[] = {
+        "vmp.fusion.target", "vmp.fusion.lhs", "vmp.fusion.rhs", "vmp.fusion.third"};
+    for (unsigned Field : Spec.fieldOrder()) {
+        CallInst *Read = Builder.CreateCall(Field == 0 ? ReadTarget : ReadValue,
+                                            {}, FieldNames[Field]);
+        Fields[Field] = Read;
+        PendingBridgeCalls.push_back(Read);
+    }
+    Value *Target = Fields[0];
 
     IntegerType *ValueTy = IntegerType::get(Ctx, Spec.Width);
-    Value *LHS = Builder.CreateTrunc(RawLHS, ValueTy);
-    Value *RHS = Builder.CreateTrunc(RawRHS, ValueTy);
-    Value *Third = Builder.CreateTrunc(RawThird, ValueTy);
+    Value *LHS = Builder.CreateTrunc(Fields[1], ValueTy);
+    Value *RHS = Builder.CreateTrunc(Fields[2], ValueTy);
+    Value *Third = Builder.CreateTrunc(Fields[3], ValueTy);
+    bool UsedCarry = false;
     auto BuildBinary = [&](unsigned Opcode, Value *A, Value *B) -> Value * {
+        if (Spec.HandlerVariant && !UsedCarry && isVMPFusionCarryOpcode(Opcode)) {
+            UsedCarry = true;
+            BasicBlock *Before = Builder.GetInsertBlock();
+            BasicBlock *Loop = BasicBlock::Create(Ctx, "vmp.fusion.carry", Clone, Continuation);
+            BasicBlock *Done = BasicBlock::Create(Ctx, "vmp.fusion.carry.done", Clone, Continuation);
+            Builder.CreateBr(Loop);
+            Builder.SetInsertPoint(Loop);
+            PHINode *Accum = Builder.CreatePHI(ValueTy, 2, "vmp.fusion.accum");
+            PHINode *Carry = Builder.CreatePHI(ValueTy, 2, "vmp.fusion.pending");
+            Accum->addIncoming(A, Before);
+            Carry->addIncoming(B, Before);
+            BasicBlock *Step = BasicBlock::Create(Ctx, "vmp.fusion.carry.step", Clone, Done);
+            Builder.CreateCondBr(Builder.CreateIsNull(Carry), Done, Step);
+            Builder.SetInsertPoint(Step);
+            // Each round moves the remaining carry/borrow one bit left, so
+            // modulo-2^Width arithmetic terminates in at most Width rounds.
+            Value *Bits = Opcode == Instruction::Sub ? Builder.CreateNot(Accum) : Accum;
+            Value *NextCarry = Builder.CreateShl(Builder.CreateAnd(Bits, Carry), 1);
+            Value *NextAccum = Builder.CreateXor(Accum, Carry);
+            Builder.CreateBr(Loop);
+            Accum->addIncoming(NextAccum, Step);
+            Carry->addIncoming(NextCarry, Step);
+            Builder.SetInsertPoint(Done);
+            return Accum;
+        }
         switch (Opcode) {
         case Instruction::Add: return Builder.CreateAdd(A, B);
         case Instruction::Sub: return Builder.CreateSub(A, B);
@@ -4808,7 +4858,9 @@ static bool specializeFusionOpcode(Function *Clone,
                << " semantic=" << (unsigned)Spec.SemanticOpcode
                << " width=" << Spec.Width
                << " first=" << Spec.FirstOpcode
-               << " second=" << Spec.SecondOpcode << "\n";
+               << " second=" << Spec.SecondOpcode
+               << " handler=" << (unsigned)Spec.HandlerVariant
+               << " layout=" << (unsigned)Spec.OperandLayout << "\n";
     }
     return true;
 }

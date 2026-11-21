@@ -87,6 +87,68 @@ def check_plain(ir):
             "no-flag compilation unexpectedly transformed IR")
 
 
+def inspect_fusion_structure(ir):
+    """Read actual decoder CFG and carry dataflow, without debug diagnostics."""
+    result = {}
+    for name, body in re.findall(r"^define [^\n]*@(vm_interpreter_\w+)\([^\n]*\n(.*?)^}", ir, re.M | re.S):
+        blocks = dict(re.findall(r"^([\w.$-]+):[^\n]*\n(.*?)(?=^[\w.$-]+:|\Z)", body, re.M | re.S))
+        entries = [label for label in blocks if re.fullmatch(r"vmp\.fusion\.[0-9a-f]+", label)]
+        groups = []
+        for entry in entries:
+            current = entry
+            readers = []
+            for _ in range(4):
+                pending = re.findall(r"label %([\w.$-]+)", blocks[current])
+                seen = {current}
+                exits = set()
+                while pending:
+                    label = pending.pop()
+                    if label in seen:
+                        continue
+                    seen.add(label)
+                    match = re.fullmatch(r"vmp_fusion_read_(target|value)\.exit\d*", label)
+                    if match:
+                        exits.add(label)
+                        continue
+                    require(label in blocks, "missing decoder CFG block: " + label)
+                    pending.extend(re.findall(r"label %([\w.$-]+)", blocks[label]))
+                require(len(exits) == 1, "decoder does not have a unique next reader: " + current)
+                current = exits.pop()
+                readers.append("target" if "_target." in current else "value")
+            require(readers in (["target", "value", "value", "value"],
+                                ["value", "value", "value", "target"]),
+                    "unexpected fusion field consumption: " + str(readers))
+            carry = [label for label in re.findall(r"label %([\w.$-]+)", blocks[current])
+                     if re.fullmatch(r"vmp\.fusion\.carry\d*", label)]
+            record = {"entry": entry, "layout": int(readers[0] != "target"),
+                      "readers": readers, "handler": int(bool(carry))}
+            if carry:
+                require(len(carry) == 1, "multiple carry headers")
+                header = blocks[carry[0]]
+                phis = re.findall(r"(%[\w.$-]+) = phi i(8|16|32|64) ", header)
+                require(len(phis) == 2 and phis[0][1] == phis[1][1], "carry PHI widths differ")
+                width = phis[0][1]
+                steps = [label for label in re.findall(r"label %([\w.$-]+)", header)
+                         if label.startswith("vmp.fusion.carry.step")]
+                require(len(steps) == 1, "missing carry step")
+                step = blocks[steps[0]]
+                require(re.search(r"icmp eq i" + width + r" " + re.escape(phis[1][0]) + r", 0", header),
+                        "carry does not terminate on zero pending bits")
+                for opcode in ("and", "xor", "shl"):
+                    require(re.search(r" = " + opcode + " i" + width + " ", step),
+                            "carry operation/width missing: " + opcode)
+                require("label %" + carry[0] in step and not re.search(r"\b(nsw|nuw|exact)\b", step),
+                        "carry lost its backedge or acquired wrap flags")
+                record.update(width=int(width), carryHeader=carry[0], carryStep=steps[0],
+                              carryDataflow=re.sub(r"%[\w.$-]+", "%v", "\n".join(
+                                  line.strip() for line in step.splitlines()
+                                  if re.search(r" = (and|xor|shl) ", line))))
+            groups.append(record)
+        if groups:
+            result[name] = groups
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--clang', type=Path, required=True)
