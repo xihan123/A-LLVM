@@ -181,7 +181,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_stale_output_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "new"; self.assertEqual(scoped.fresh_output(output), output)
+            output = Path(directory) / "new"; self.assertEqual(scoped.fresh_output(output), output.resolve())
             (output / "evidence").write_bytes(b"old")
             with self.assertRaises(ValueError):
                 scoped.fresh_output(output)
