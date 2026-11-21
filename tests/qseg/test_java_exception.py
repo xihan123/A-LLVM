@@ -747,6 +747,7 @@ class FinalWrapperPathTests(unittest.TestCase):
 
 
 def device_report_fixture(root):
+    root = root.resolve()
     fixture, sdk, java = root / 'fixture', root / 'sdk', root / 'jdk/bin/java.exe'
     fixture.mkdir(); java.parent.mkdir(parents=True); java.write_bytes(b'host-test-java-identity')
     serial, port, remote = 'host-test-serial', 5041, '/data/local/tmp/dex2c-' + TOKEN
