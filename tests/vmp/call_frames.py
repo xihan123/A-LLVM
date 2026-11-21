@@ -52,6 +52,77 @@ define hidden i64 @ndkp_test_frame_padding_end() {{
 '''
 
 
+def observe_caches(ir, semantic_only):
+    regions = []
+    for name, kind in (("vm_chacha_cache", r"%struct\.vm_chacha_cache_t(?:\.\d+)?"),
+                       ("vm_opcode_variant_key", "i64"),
+                       ("vm_opcode_decode_map", r"\[\d+ x i8\]"),
+                       ("vm_layout_variant_key", "i64"),
+                       ("vm_trace_layout_id", "i8"),
+                       ("vm_fault_layout_id", "i8"),
+                       ("vm_debug_layout_id", "i8")):
+        matches = re.findall(r"^(@_ZL\d+" + name + r"(?:\.\d+)?) = .*thread_local .*global ("
+                             + kind + r") ", ir, re.M)
+        assert len(matches) <= 1, name
+        assert matches or "layout" in name, name
+        regions.append(matches[0] if matches else (None, None))
+    cache, cache_type = regions[0]
+    # Read the actual structure layout, including ABI padding, instead of a test copy.
+    for field, kind in ((4, "i32"), (5, "i64"), (7, "i8"), (10, "[64 x i8]"),
+                        (6, "i8"), (8, "[8 x i32]"), (9, "[3 x i32]")):
+        regions.append((cache, kind, field))
+    cases, blocks = [], []
+    for index, region in enumerate(regions):
+        symbol, kind, *field = region
+        cases.append(f"i32 {index}, label %part{index}")
+        blocks.append(f"part{index}:")
+        if symbol:
+            blocks.append(f"  %base{index} = call ptr @llvm.threadlocal.address.p0(ptr {symbol})")
+            address = f"%base{index}"
+            if field:
+                address = f"%address{index}"
+                blocks.append(f"  {address} = getelementptr {cache_type}, ptr %base{index}, i64 0, i32 {field[0]}")
+            size = f"ptrtoint (ptr getelementptr ({kind}, ptr null, i64 1) to i64)"
+        else:
+            address, size = "null", "0"
+        blocks += [f"  store i64 {size}, ptr %size, align 8", f"  ret ptr {address}"]
+
+    name = "_ZL16chacha20_byte_atP17vm_chacha_cache_tmmmjj"
+    body = function(ir, name)
+    if not semantic_only:
+        assert "store volatile i8 0" in body, "retired keystream wipe missing"
+    observed = "  call void @ndkp_test_cache_event(i32 0, ptr %0)\n" + body
+    for phase, callee in ((1, "_ZL22derive_chacha_materialmmmjPjS_"),
+                          (2, "_ZL14chacha20_blockPKjjS0_Ph")):
+        observed, count = re.subn(r"^(  (?:tail )?call void @" + callee + r"\([^\n]*)$",
+                                  f"  call void @ndkp_test_cache_event(i32 {phase}, ptr %0)\n" + r"\1",
+                                  observed, flags=re.M)
+        assert count == 1, callee
+    observed, count = re.subn(r"^(  ret i8 [^\n]*)$",
+                              "  call void @ndkp_test_cache_event(i32 3, ptr %0)\n" + r"\1",
+                              observed, flags=re.M)
+    assert count == 1
+    ir = ir.replace(body, observed, 1)
+    # The callback records observations in driver TLS, beyond the cache argument.
+    definition = re.search(r"^define [^\n]*@" + name + r"\([^\n]* #\d+[^\n]*", ir, re.M)[0]
+    group = re.search(r"#(\d+)", definition)[1]
+    attributes = re.search(r"^attributes #" + group + r" = \{ (.*) \}", ir, re.M)[1]
+    attributes = re.sub(r"memory\([^)]*\)|\b(?:mustprogress|nofree|norecurse|nosync|nounwind|willreturn)\b",
+                        "", attributes)
+    observed_group = max(map(int, re.findall(r"^attributes #(\d+) =", ir, re.M))) + 1
+    ir = ir.replace(definition, definition.replace("#" + group, "#" + str(observed_group)), 1)
+    ir += f"\nattributes #{observed_group} = {{ {attributes} }}\n"
+    return ir + "\ndeclare void @ndkp_test_cache_event(i32, ptr)\n" + f'''
+define hidden ptr @ndkp_test_cache_region(i32 %index, ptr %size) {{
+  switch i32 %index, label %missing [ {' '.join(cases)} ]
+{chr(10).join(blocks)}
+missing:
+  store i64 0, ptr %size, align 8
+  ret ptr null
+}}
+'''
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ndk", type=Path, required=True)
@@ -59,7 +130,7 @@ def main():
     parser.add_argument("--serial")
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--semantic-only", action="store_true",
-                        help="Skip new IR assertions; still observe retired bytes on old compilers")
+                        help="Skip new IR assertions; still observe retired frame/cache bytes on old compilers")
     args = parser.parse_args()
     host = "windows-x86_64" if os.name == "nt" else "linux-x86_64"
     base = args.ndk.resolve() / "toolchains/llvm/prebuilt" / host
@@ -122,7 +193,7 @@ def main():
                         assert "!ndkp.vmp.post" in ir
                     if observed:
                         ir_path = out / f"{mode}-{suffix}.observed.ll"
-                        ir_path.write_text(observe_frames(ir, args.semantic_only))
+                        ir_path.write_text(observe_caches(observe_frames(ir, args.semantic_only), args.semantic_only))
                     case = out / f"{mode}-{suffix}.o"
                     backend = ["-Oz", "-Xclang", "-disable-llvm-passes"] if observe_wipe else []
                     run(clang, *common, *backend, "-c", ir_path, "-o", case)
@@ -140,6 +211,7 @@ def main():
                         assert result.returncode == 0 and "VMP call frames OK" in result.stdout, log.read_text()
                         if observed:
                             assert "VMP retired frames OK" in result.stdout, log.read_text()
+                            assert "VMP caches OK" in result.stdout, log.read_text()
                     chain = "+post" if post else ""
                     print(f"[ok] {mode}/{opt}{chain}: call frames, {'device semantics' if args.serial else 'compile only'}", flush=True)
         finally:

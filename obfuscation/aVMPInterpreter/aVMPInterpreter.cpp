@@ -493,7 +493,7 @@ static uint8_t vm_debug_layout_id;
 // 故按“元组”做记忆化即对递归/重入/每函数克隆全部正确：元组变化（新 BB 或
 // vm_push/restore_call_frame 换 seed）自动失效重算，两个不同上下文绝不会在同一元组上
 // 却需要不同字节。material_valid=key/nonce 对当前元组有效；block_valid=block 对
-// (元组, block_index) 有效。存储类与其它 VM 状态一致（非 TLS，单次调用模型）。
+// (元组, block_index) 有效。导入后与其它 VM 状态一样采用 TLS；缓存失效及离开 VM 时擦除。
 typedef struct {
 	uint64_t fn_key;
 	uint64_t payload_seed;
@@ -508,6 +508,22 @@ typedef struct {
 	uint8_t block[64];
 } vm_chacha_cache_t;
 static vm_chacha_cache_t vm_chacha_cache;
+
+static __attribute__((always_inline)) inline void vm_wipe_bytes(void *address, size_t size) {
+	volatile uint8_t *bytes = (volatile uint8_t *)address;
+	for (size_t i = 0; i < size; ++i)
+		bytes[i] = 0;
+}
+
+static __attribute__((always_inline)) inline void vm_clear_decode_caches(void) {
+	vm_wipe_bytes(&vm_chacha_cache, sizeof(vm_chacha_cache));
+	vm_wipe_bytes(&vm_opcode_variant_key, sizeof(vm_opcode_variant_key));
+	vm_wipe_bytes(vm_opcode_decode_map, sizeof(vm_opcode_decode_map));
+	vm_wipe_bytes(&vm_layout_variant_key, sizeof(vm_layout_variant_key));
+	vm_wipe_bytes(&vm_trace_layout_id, sizeof(vm_trace_layout_id));
+	vm_wipe_bytes(&vm_fault_layout_id, sizeof(vm_fault_layout_id));
+	vm_wipe_bytes(&vm_debug_layout_id, sizeof(vm_debug_layout_id));
+}
 
 #define VM_LAYOUT_VARIANT_COUNT 24
 static const uint8_t vm_layout_permutations[VM_LAYOUT_VARIANT_COUNT][4] = {
@@ -538,6 +554,10 @@ static void vm_prepare_layout_variant(void) {
 	if (vm_layout_variant_key == vm_function_key && vm_layout_variant_key != 0) {
 		return;
 	}
+	vm_wipe_bytes(&vm_layout_variant_key, sizeof(vm_layout_variant_key));
+	vm_wipe_bytes(&vm_trace_layout_id, sizeof(vm_trace_layout_id));
+	vm_wipe_bytes(&vm_fault_layout_id, sizeof(vm_fault_layout_id));
+	vm_wipe_bytes(&vm_debug_layout_id, sizeof(vm_debug_layout_id));
 	uint64_t mixed = vm_layout_mix64(vm_function_key ^ 0x8cb92ba72f3d8dd7ULL);
 	vm_trace_layout_id = (uint8_t)(mixed % VM_LAYOUT_VARIANT_COUNT);
 	vm_fault_layout_id = (uint8_t)((mixed >> 8) % VM_LAYOUT_VARIANT_COUNT);
@@ -1032,9 +1052,8 @@ static void vm_prepare_opcode_variant(void) {
 		return;
 	}
 
-	for (unsigned i = 0; i <= OP_TOTAL; ++i) {
-		vm_opcode_decode_map[i] = 0;
-	}
+	vm_wipe_bytes(&vm_opcode_variant_key, sizeof(vm_opcode_variant_key));
+	vm_wipe_bytes(vm_opcode_decode_map, sizeof(vm_opcode_decode_map));
 	for (unsigned i = 1; i <= OP_TOTAL; ++i) {
 		vm_opcode_decode_map[i] = (uint8_t)i;
 	}
@@ -1248,6 +1267,9 @@ static VMP_RUNTIME_CRYPTO_ATTR uint8_t chacha20_byte_at(vm_chacha_cache_t *c, ui
 	if (!c->material_valid || c->fn_key != function_key ||
 	    c->payload_seed != payload_seed || c->chain_seed != chain_seed ||
 	    c->bb_offset != bb_offset) {
+		// Invalidated caches are already empty; only a live tuple needs retiring.
+		if (c->material_valid || c->block_valid)
+			vm_wipe_bytes(c, sizeof(*c));
 		derive_chacha_material(function_key, payload_seed, chain_seed, bb_offset,
 		                      c->key_words, c->nonce_words);
 		c->fn_key = function_key;
@@ -1260,6 +1282,12 @@ static VMP_RUNTIME_CRYPTO_ATTR uint8_t chacha20_byte_at(vm_chacha_cache_t *c, ui
 	uint32_t block_index = payload_index >> 6;
 	// 同一 64B 块被相邻 64 个位置共享 —— 仅当 block_index 变化才跑整块 ChaCha20。
 	if (!c->block_valid || c->block_index != block_index) {
+		if (c->block_valid) {
+			vm_wipe_bytes(c->block, sizeof(c->block));
+			vm_wipe_bytes(&c->block_index, sizeof(c->block_index));
+			vm_wipe_bytes(&c->schedule_seed, sizeof(c->schedule_seed));
+			vm_wipe_bytes(&c->block_valid, sizeof(c->block_valid));
+		}
 		chacha20_block(c->key_words, block_index, c->nonce_words, c->block);
 		// The permutation and mask use the same tuple/block seed for all 64 lanes.
 		c->schedule_seed = vmp_schedule_seed(function_key, payload_seed, chain_seed,
@@ -3015,20 +3043,17 @@ void vm_interpreter() {
 			uint32_t expected_tag = derive_bb_tag(vm_function_key, (uint32_t)current_bb_id);
 			if (expected_bb_token != 0 && bb_token != expected_bb_token) {
 				vm_dump_fault_context("vm-bb-token-mismatch", bb_token, expected_bb_token);
-				return;
+				goto cleanup;
 			}
 			if (bb_tag != expected_tag) {
 				vm_dump_fault_context("vm-bb-tag-mismatch", bb_tag, expected_tag);
-				return;
+				goto cleanup;
 			}
 			opcode_xorshift32_state = derive_opcode_seed(bb_token);
 			vm_code_state = derive_vm_seed(vm_function_key, bb_token);
 			vm_block_chain_state = derive_chain_seed(vm_function_key, bb_token,
 			                                        (uint32_t)current_bb_id);
-			// 新 BB：KDF 输入元组已变，主动失效 ChaCha 缓存（清晰/DiD；chacha20_byte_at
-			// 内的元组校验才是正确性所依赖的机制，覆盖 BB 内 CALL 返回换 seed 的情形）。
-			vm_chacha_cache.material_valid = 0;
-			vm_chacha_cache.block_valid = 0;
+			vm_wipe_bytes(&vm_chacha_cache, sizeof(vm_chacha_cache));
 			expected_bb_token = 0;
 			is_a_new_bb = 0;
 			vm_debug_log_ip_stage("vm-new-bb-seeds-ready", ip);
@@ -3093,7 +3118,7 @@ void vm_interpreter() {
 				break;
 			case RESUME_OP:
 				resume_handler();
-				return;
+				goto cleanup;
 			case INDIRECTBR_OP:
 				indirectbr_handler();
 				is_a_new_bb = 1;
@@ -3120,8 +3145,7 @@ void vm_interpreter() {
 				fflush(NULL);
 #endif
 				return_handler();
-				return;
-				break;
+				goto cleanup;
 			case Call_OP: {
 				uint64_t packed_funcid = unpack_code(pointer_size);
 				// packed_res format: {type_size(1), type_id(1), offset(pointer_size)}
@@ -3138,7 +3162,7 @@ void vm_interpreter() {
 				// Dispatch identity survives relocation of segmented bytecode.
 				uintptr_t saved_dispatch_identity = dispatch_code_seg_addr;
 				if (!vm_push_call_frame()) {
-					return;
+					goto cleanup;
 				}
 				vm_trace_push(VM_TRACE_KIND_CALL, (uint32_t)saved_ip, 0, (uint8_t)exception_thrown,
 				             packed_funcid, (uint64_t)saved_ip, offset, (uint64_t)caught_exception_selector);
@@ -3155,6 +3179,7 @@ void vm_interpreter() {
 				         (unsigned long long)saved_vmcode_state);
 				dispatch_code_seg_addr = saved_dispatch_identity;
 				// 使用异常捕获包装函数
+				vm_clear_decode_caches();
 				call_handler_with_exception_handling(packed_funcid);
 				vm_trace_push(VM_TRACE_KIND_CALL, (uint32_t)saved_ip, 1, (uint8_t)exception_thrown,
 				             packed_funcid, (uint64_t)saved_ip, offset, (uint64_t)caught_exception_selector);
@@ -3171,11 +3196,11 @@ void vm_interpreter() {
 				         (unsigned long long)opcode_xorshift32_state,
 				         (unsigned long long)vm_code_state);
 				if (!vm_restore_call_frame()) {
-					return;
+					goto cleanup;
 				}
 				// Personality-bearing functions are excluded by VMP eligibility.
 				// A native exception must leave this VM before further bytecode runs.
-				if (exception_thrown) return;
+				if (exception_thrown) goto cleanup;
 				EH_TRACE("[EH_VM_CALL] restored funcid=%llu restore_ip=%u exception_thrown=%u exception_ptr=%p selector=%d caught_ptr=%p caught_selector=%d opcode_state=0x%016llx vm_state=0x%016llx\n",
 				         (unsigned long long)packed_funcid,
 				         (unsigned)ip,
@@ -3206,18 +3231,19 @@ void vm_interpreter() {
 				// Dispatch identity survives relocation of segmented bytecode.
 				uintptr_t saved_dispatch_identity = dispatch_code_seg_addr;
 				if (!vm_push_call_frame()) {
-					return;
+					goto cleanup;
 				}
 
 				// 调用函数（与 Call_OP 相同）
 				dispatch_code_seg_addr = saved_dispatch_identity;
 				// 使用异常捕获包装函数
+				vm_clear_decode_caches();
 				call_handler_with_exception_handling(packed_funcid);
 
 				if (!vm_restore_call_frame()) {
-					return;
+					goto cleanup;
 				}
-				if (exception_thrown) return;
+				if (exception_thrown) goto cleanup;
 
 				// CallBr 的分支处理在翻译器中已经生成，这里不需要额外处理
 			}
@@ -3562,11 +3588,13 @@ void vm_interpreter() {
 
 			default:
 				vm_dump_fault_context("unknown-opcode", opcode, current_bb_id);
-				return;
+				goto cleanup;
 				// cannot recognize opcode
 
 		}
 	}
+cleanup:
+	vm_clear_decode_caches();
 }
 
 // Main function removed - VM interpreter should be linked, not executed directly

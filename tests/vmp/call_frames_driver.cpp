@@ -78,6 +78,7 @@ unsigned char *ndkp_test_frame_stack();
 unsigned ndkp_test_frame_top();
 size_t ndkp_test_frame_stride();
 size_t ndkp_test_frame_padding_end();
+unsigned char *ndkp_test_cache_region(unsigned, size_t *);
 }
 static thread_local int observation_error;
 static thread_local unsigned observed_callbacks;
@@ -86,8 +87,64 @@ static bool bytes_are(const volatile unsigned char *bytes, size_t size, unsigned
     if (bytes[i] != value) return false;
   return true;
 }
+enum { Cache, OpcodeKey, OpcodeMap, LayoutKey, TraceLayout, FaultLayout, DebugLayout,
+       BlockIndex, ScheduleSeed, BlockValid, Block, MaterialValid, KeyWords, NonceWords };
+static thread_local unsigned cache_errors;
+static thread_local unsigned cache_hits, material_refills, block_refills;
+static thread_local unsigned cache_refilled;
+static thread_local bool saw_opcode_map;
+static thread_local unsigned char cache_snapshot[256];
+static bool caches_are_zero() {
+  for (unsigned part = Cache; part <= DebugLayout; ++part) {
+    size_t size;
+    const volatile unsigned char *bytes = ndkp_test_cache_region(part, &size);
+    if (!bytes_are(bytes, size, 0)) return false;
+  }
+  return true;
+}
+extern "C" void ndkp_test_cache_event(unsigned phase, const volatile unsigned char *cache) {
+  size_t size;
+  unsigned char *actual = ndkp_test_cache_region(Cache, &size);
+  if (cache != actual || size > sizeof(cache_snapshot)) { cache_errors |= 1; return; }
+  if (phase == 0) {
+    cache_refilled = 0;
+    for (size_t i = 0; i < size; ++i) cache_snapshot[i] = cache[i];
+    size_t map_size;
+    const volatile unsigned char *map = ndkp_test_cache_region(OpcodeMap, &map_size);
+    if (map_size > 1 && map[0] == 0 && map[1] && map[1] < map_size) saw_opcode_map = true;
+  } else if (phase == 1) {
+    if (!bytes_are(cache, size, 0)) cache_errors |= 2;
+    ++material_refills;
+    cache_refilled = 1;
+  } else if (phase == 2) {
+    for (unsigned part = BlockIndex; part <= Block; ++part) {
+      size_t count;
+      const volatile unsigned char *bytes = ndkp_test_cache_region(part, &count);
+      if (!bytes_are(bytes, count, 0)) cache_errors |= 4;
+    }
+    if (!cache_refilled) {
+      ++block_refills;
+      for (unsigned part : {KeyWords, NonceWords}) {
+        size_t count;
+        const volatile unsigned char *bytes = ndkp_test_cache_region(part, &count);
+        size_t offset = bytes - cache;
+        for (size_t i = 0; i < count; ++i)
+          if (bytes[i] != cache_snapshot[offset + i]) cache_errors |= 8;
+      }
+    }
+    size_t valid_size;
+    const volatile unsigned char *valid = ndkp_test_cache_region(MaterialValid, &valid_size);
+    if (*valid != 1) cache_errors |= 8;
+    cache_refilled |= 2;
+  } else if (phase == 3 && !cache_refilled) {
+    ++cache_hits;
+    for (size_t i = 0; i < size; ++i)
+      if (cache[i] != cache_snapshot[i]) cache_errors |= 16;
+  }
+}
 static bool observe_active(unsigned expected_top) {
   ++observed_callbacks;
+  if (!caches_are_zero()) cache_errors |= 32;
   if (ndkp_test_frame_top() != expected_top) return false;
   size_t stride = ndkp_test_frame_stride();
   size_t padding_end = ndkp_test_frame_padding_end();
@@ -127,6 +184,7 @@ static int observing_nested(int *out) {
   for (size_t i = 0; i < active_size; ++i) active[i] = stack[i];
   unsigned before = observed_callbacks;
   int result = frame_local(observing_deeper);
+  if (!caches_are_zero()) cache_errors |= 64;
   if (result != 342 || observed_callbacks != before + 1 || ndkp_test_frame_top() != top ||
       !bytes_are(stack + active_size, stride, 0) ||
       !bytes_are(stack + active_size + stride, stride, 0xa5)) observation_error = 5;
@@ -143,6 +201,11 @@ static int check_retired_frames() {
   for (int phase = 0; phase < 3; ++phase) {
     // Prime only inactive slots, including padding that member stores leave alone.
     for (size_t i = 0; i < 3 * stride; ++i) stack[i] = 0xa5;
+    for (unsigned part = Cache; part <= DebugLayout; ++part) {
+      size_t size;
+      volatile unsigned char *bytes = ndkp_test_cache_region(part, &size);
+      for (size_t i = 0; i < size; ++i) bytes[i] = 0xa5;
+    }
     observation_error = 0;
     observed_callbacks = 0;
     if (phase == 0) {
@@ -154,6 +217,7 @@ static int check_retired_frames() {
     } else if (frame_local(observing_nested) != 342) {
       return 35;
     }
+    if (!caches_are_zero()) cache_errors |= 64;
     if (observation_error) return 40 + observation_error;
     if (observed_callbacks != (phase == 2 ? 2u : 1u)) return 36;
     if (ndkp_test_frame_top() != 0) return 37;
@@ -196,7 +260,12 @@ static int check() {
     if (out != 42 || error.what()[0] != 'f') return 16;
   }
 #ifdef NDKP_OBSERVE_FRAMES
-  return check_retired_frames();
+  if (!caches_are_zero()) cache_errors |= 64;
+  int frames = check_retired_frames();
+  if (frames) return frames;
+  if (cache_errors) return 50;
+  if (!cache_hits || !material_refills || !block_refills || !saw_opcode_map) return 51;
+  return 0;
 #else
   return 0;
 #endif
@@ -211,7 +280,14 @@ static void *worker(void *arg) {
 }
 int main() {
   int first = check();
-  if (first) { std::printf("call frames FAIL case %d\n", first); return first; }
+  if (first) {
+#ifdef NDKP_OBSERVE_FRAMES
+    std::printf("VMP caches FAIL: bits=%u hit=%u material=%u block-only=%u opcode=%u\n",
+                cache_errors, cache_hits, material_refills, block_refills, unsigned(saw_opcode_map));
+#endif
+    std::printf("call frames FAIL case %d\n", first);
+    return first;
+  }
   if (live_exceptions.load() != 0) return 17;
   // Warm TLS first, then fail executable malloc calls. A failed native allocation
   // must preserve its out-parameter, and VM recursion must need no heap snapshot.
@@ -241,6 +317,10 @@ int main() {
 #ifdef NDKP_OBSERVE_FRAMES
   std::printf("VMP retired frames OK: stride=%zu padding=%zu normal/unwind/nested, 8 threads\n",
               ndkp_test_frame_stride(), ndkp_test_frame_padding_end() - sizeof(int));
+  size_t cache_size;
+  ndkp_test_cache_region(Cache, &cache_size);
+  std::printf("VMP caches OK: bytes=%zu hit=%u material=%u block-only=%u native/exit/nested, 8 threads\n",
+              cache_size, cache_hits, material_refills, block_refills);
 #endif
   std::puts("VMP call frames OK");
   return failed;

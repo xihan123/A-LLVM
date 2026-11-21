@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/MapVector.h"
@@ -17,8 +18,10 @@
 #include "llvm/Analysis/InlineCost.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/ReplaceConstant.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/GlobalValue.h"
@@ -4604,9 +4607,7 @@ static SwitchInst *findVmOpcodeDispatchSwitch(Function *F) {
 
 static void addPhiIncomingForNewDispatchPred(BasicBlock *Dest,
                                              BasicBlock *OldPred,
-                                             BasicBlock *NewPred,
-                                             Value *DispatchCondition = nullptr,
-                                             uint64_t NopSemantic = NOP_OP) {
+                                             BasicBlock *NewPred) {
     if (!Dest || !OldPred || !NewPred) {
         return;
     }
@@ -4620,20 +4621,9 @@ static void addPhiIncomingForNewDispatchPred(BasicBlock *Dest,
             }
         }
         if (!Incoming) {
-            report_fatal_error("VMP: continuation PHI is missing its NOP edge");
+            report_fatal_error("VMP: PHI is missing its original dispatch edge");
         }
 
-        // The interpreter's is_a_new_bb state is represented by a PHI whose
-        // NOP-edge value can be the opcode selector itself.  A fused handler
-        // reaches the same continuation after consuming its opcode, so it must
-        // carry the NOP semantic value (zero), not the decoded fused opcode.
-        if (DispatchCondition && Incoming == DispatchCondition) {
-            auto *IntegerTy = dyn_cast<IntegerType>(PN.getType());
-            if (!IntegerTy) {
-                report_fatal_error("VMP: selector continuation PHI is not integer typed");
-            }
-            Incoming = ConstantInt::get(IntegerTy, NopSemantic);
-        }
         PN.addIncoming(Incoming, NewPred);
 
         int NewIndex = PN.getBasicBlockIndex(NewPred);
@@ -4675,10 +4665,74 @@ static bool switchHasSuccessor(const SwitchInst *SI, BasicBlock *Dest) {
     return false;
 }
 
+struct VMPFusionContinuation {
+    BasicBlock *Block = nullptr;
+    SmallVector<std::pair<PHINode *, Value *>, 4> Incoming;
+};
+
+static VMPFusionContinuation findFusionContinuation(SwitchInst *SI) {
+    if (!SI)
+        report_fatal_error("VMP: missing fusion dispatch switch");
+
+    VMPFusionContinuation Continuation;
+    BasicBlock *ScalarHandler = nullptr;
+    for (auto Case : SI->cases()) {
+        uint64_t Opcode = Case.getCaseValue()->getZExtValue();
+        if (Opcode == NOP_OP)
+            Continuation.Block = Case.getCaseSuccessor();
+        if (Opcode == BinaryOperator_OP)
+            ScalarHandler = Case.getCaseSuccessor();
+    }
+    if (!Continuation.Block || !ScalarHandler || ScalarHandler == Continuation.Block)
+        report_fatal_error("VMP: missing scalar fusion continuation");
+
+    // NOP is never returned by get_opcode(), so optimization may assign its
+    // unreachable PHI edge any value.  Use the real scalar arithmetic handler's
+    // normal exits instead; they continue in the same BB as a fused handler.
+    SmallVector<BasicBlock *, 32> Pending = {ScalarHandler};
+    SmallPtrSet<BasicBlock *, 32> Visited;
+    SmallPtrSet<BasicBlock *, 8> Exits;
+    while (!Pending.empty()) {
+        BasicBlock *BB = Pending.pop_back_val();
+        if (!Visited.insert(BB).second)
+            continue;
+        if (BB == SI->getParent())
+            report_fatal_error("VMP: scalar handler bypasses its continuation");
+        for (BasicBlock *Successor : successors(BB)) {
+            if (Successor == Continuation.Block)
+                Exits.insert(BB);
+            else
+                Pending.push_back(Successor);
+        }
+    }
+    if (Exits.empty())
+        report_fatal_error("VMP: scalar handler has no normal continuation");
+
+    DominatorTree DT(*SI->getFunction());
+    for (PHINode &PN : Continuation.Block->phis()) {
+        Value *Incoming = nullptr;
+        for (BasicBlock *Pred : Exits) {
+            int Index = PN.getBasicBlockIndex(Pred);
+            if (Index < 0)
+                report_fatal_error("VMP: scalar continuation PHI is missing an edge");
+            Value *ValueOnEdge = PN.getIncomingValue((unsigned)Index);
+            if (Incoming && Incoming != ValueOnEdge)
+                report_fatal_error("VMP: scalar continuation PHI is ambiguous");
+            Incoming = ValueOnEdge;
+        }
+        if (auto *I = dyn_cast<Instruction>(Incoming))
+            if (!DT.dominates(I, SI))
+                report_fatal_error("VMP: scalar continuation value is not available at dispatch");
+        Continuation.Incoming.push_back({&PN, Incoming});
+    }
+    return Continuation;
+}
+
 static bool specializeFusionOpcode(Function *Clone,
                                    uint64_t FunctionKey,
                                    const VMPFusionSpec &Spec,
-                                   const bool *UsedOpcodes) {
+                                   const bool *UsedOpcodes,
+                                   const VMPFusionContinuation &NormalContinuation) {
     auto FusionFailure = []() -> void {
         report_fatal_error("VMP: emitted fusion opcode specialization failed");
     };
@@ -4696,17 +4750,12 @@ static bool specializeFusionOpcode(Function *Clone,
     if (!SI)
         FusionFailure();
 
-    BasicBlock *Continuation = nullptr;
+    BasicBlock *Continuation = NormalContinuation.Block;
     BasicBlock *OldFusionHandler = nullptr;
     unsigned FusionSuccessorIndex = 0;
     unsigned CaseIndex = 0;
     for (auto CaseIt = SI->case_begin(); CaseIt != SI->case_end(); ++CaseIt, ++CaseIndex) {
         uint64_t Semantic = CaseIt->getCaseValue()->getZExtValue();
-        if (Semantic == NOP_OP) {
-            if (Continuation)
-                FusionFailure();
-            Continuation = CaseIt->getCaseSuccessor();
-        }
         if (Semantic == Spec.SemanticOpcode) {
             if (OldFusionHandler)
                 FusionFailure();
@@ -4820,28 +4869,13 @@ static bool specializeFusionOpcode(Function *Clone,
     SI->setSuccessor(FusionSuccessorIndex, FusionBB);
     if (!switchHasSuccessor(SI, OldFusionHandler))
         removePhiIncomingForOldDispatchPred(OldFusionHandler, SI->getParent());
-    addPhiIncomingForNewDispatchPred(Continuation, SI->getParent(),
-                                     ContinueBranch->getParent(),
-                                     SI->getCondition(), NOP_OP);
-
-    // Keep the fused edge structurally equivalent to the NOP edge for every
-    // continuation PHI.  In particular, the selector PHI must be a typed zero
-    // constant rather than the decoded dispatch value.
-    for (PHINode &PN : Continuation->phis()) {
-        int NewIndex = PN.getBasicBlockIndex(ContinueBranch->getParent());
-        int NopIndex = PN.getBasicBlockIndex(SI->getParent());
-        if (NewIndex < 0 || NopIndex < 0)
+    for (auto [PN, Incoming] : NormalContinuation.Incoming) {
+        if (PN->getParent() != Continuation)
             FusionFailure();
-        Value *NopValue = PN.getIncomingValue((unsigned)NopIndex);
-        Value *FusedValue = PN.getIncomingValue((unsigned)NewIndex);
-        if (NopValue == SI->getCondition()) {
-            auto *IntegerTy = dyn_cast<IntegerType>(PN.getType());
-            if (!IntegerTy || !isa<ConstantInt>(FusedValue) ||
-                !cast<ConstantInt>(FusedValue)->isZero())
-                FusionFailure();
-        } else if (FusedValue != NopValue) {
+        PN->addIncoming(Incoming, ContinueBranch->getParent());
+        int Index = PN->getBasicBlockIndex(ContinueBranch->getParent());
+        if (Index < 0 || PN->getIncomingValue((unsigned)Index) != Incoming)
             FusionFailure();
-        }
     }
 
     removeFromUsedLists(*M, [&](Constant *C) {
@@ -5146,8 +5180,13 @@ static Function *cloneVmInterpreterForFunction(Module *M,
     LoadInst *SaltLoad = Builder.CreateLoad(I64Ty, SaltGV, "vmp.clone.salt");
     SaltLoad->setVolatile(true);
 
+    // Snapshot before any reserved opcode replaces the scalar handler itself.
+    VMPFusionContinuation NormalContinuation;
+    if (!FusionSpecs.empty())
+        NormalContinuation = findFusionContinuation(findVmOpcodeDispatchSwitch(Clone));
     for (const VMPFusionSpec &Spec : FusionSpecs)
-        if (!specializeFusionOpcode(Clone, FunctionKey, Spec, UsedOpcodes))
+        if (!specializeFusionOpcode(Clone, FunctionKey, Spec, UsedOpcodes,
+                                    NormalContinuation))
             report_fatal_error("VMP: emitted fusion opcode specialization failed");
 
     if (!randomizeVmOpcodeDispatch(Clone, FunctionKey, SaltGV, DispatchMap, UsedOpcodes))

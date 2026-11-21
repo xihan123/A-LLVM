@@ -67,7 +67,38 @@ Wait for fresh output from both processes before collecting the bounded log wind
 
 With the module active, look for `hooks-installed package=io.github.xihan123.corehardening.sample.host` and fresh `PASS process=main` and `PASS process=worker` lines, each with `cases=39 intCases=8 nativeIntCases=8 longCases=21 exceptionCases=2`. Each process has its own PID. If the worker result has not appeared yet, keep waiting or query the same bounded window again after it completes. Without the module active, both processes should report `FAIL` with `LibXposed module is not active`; this is the host's inactive-hook sentinel.
 
-## p26 verified result and artifact checks
+## p27 verified result and artifact checks
+
+The final p27 build in `work/m3-cache-wipe-p27/build-sample-final.log` succeeded against frozen p26 commit `4e68950401953c81f8501c983c011ba25a96c31a`. The algorithms, 39 assertions, configuration and all 22 non-README sample source files are unchanged. On 2026-11-22, the frozen final candidates passed the following sequence on the same OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 environment:
+
+| Run | Main / worker PID | Result per process | Log under `work/m3-cache-wipe-p27/` |
+| --- | --- | --- | --- |
+| Enabled, 01:20:39 | 11785 / 11819 | 39 PASS | `device-enabled.log` |
+| Disabled, 01:20:43 | 11879 / 11898 | FAIL, module not active | `device-disabled.log` |
+| Restored, 01:20:46 | 11952 / 11981 | 39 PASS | `device-restored.log` |
+
+Installed APK hashes match the final frozen candidates, the scope is unchanged, and the module is enabled at the end. Both critical methods passed the signed-APK static check with strict VMP, post, hardened CSE, certificate binding and entry self-check. `segmentedData` and runtime `apkSignatureVerification` remain disabled.
+
+p27 clears three persistent interpreter cache families immediately before native dispatch and at the common normal/native-exception exit: the 152-byte ChaCha object, including 2 bytes of internal padding; the 8-byte opcode key and 29-byte decode map; and the 8-byte layout key plus three layout IDs. New BBs and live material mismatches clear the full ChaCha object. When only the block changes, offsets 28–39, 41 and 88–151 are cleared, totaling 77 bytes; valid key/nonce bytes at offsets 44–87 remain available. Cache hits keep their existing path.
+
+The pristine final `protected.raw.ll` and real post `protected.ll` retain three full 152-byte loops in each Java interpreter clone, for new BBs, native dispatch and common exit. The other 48 cache bytes are cleared before each native call and return. The call-free native arithmetic clone has new-BB and exit loops. Both actual ChaCha helpers retain the full wipe before KDF and the exact block-only byte stores. These checks use the uninstrumented sample artifacts. The separate runtime observer test reads the real TLS caches and actual helper paths; material refill proves KDF rebuilding but does not establish runtime coverage of a live old-tuple mismatch, since ordinary lifecycle boundaries clear the cache earlier.
+
+All 9630/8639 non-relocated AArch64 instructions in the actual Java clones match `linked.so`; 536/502 relocated instructions are excluded from that comparison. Their complete 40664/36564 bytes match the packed library at the linked addresses. The actual 904-byte ChaCha helper and 444-byte retired-frame helper are also uniquely bound despite duplicate local names, and their full bytes match the packed library. The entire packed library equals its APK entry. In the stripped native library, a unique relocation-free instruction window locates each function before comparing all non-relocated instructions: 4755 for the 19760-byte arithmetic clone and 223 for its 908-byte ChaCha helper.
+
+The 11 caller fields are still restored before the complete 88-byte retired-frame wipe. Both Java methods and the native path retain four fusion groups each, with raw/post field-consumption and carry dataflow matching; bytecode lengths remain 4158/1351/363 bytes. p27 also fixes LLVM 21 fusion continuation state extraction: it snapshots the real scalar handler's normal exits before specializing fusion, requiring equal PHI inputs and valid SSA dominance. This removes the optimized unreachable NOP edge dependency exposed by the `frame_sret` regression.
+
+| Artifact | Frozen p26 bytes | p27 bytes | Change |
+| --- | --- | --- | --- |
+| Host APK | 878174 | 878174 | 0 |
+| Module APK | 337764 | 340260 | +2496 |
+| dex2c SO | 269440 | 271936 | +2496 |
+| Native SO | 31600 | 32640 | +1040 |
+
+Final local evidence is under `work/m3-cache-wipe-p27/`: `candidate/` contains the 15 actual final artifacts, `candidate-artifact-evidence.json` verifies their hashes and all 22 unchanged sample sources, `device-results.json` records the three phases, and `sol/machine-evidence.json` binds pristine IR, objects, libraries and APK. The final compiler hash is recorded in the protection receipt and `clang-candidate.json`; `candidate-initial/` is the earlier diagnostic candidate and is separate from these final artifacts.
+
+All six call-frame device modes passed, including O2 protected with real post. The two frozen p26 controls using the final observer attributes exited 50 with `bits=102`, detecting residual caches before KDF/block generation, at native dispatch and after exit. Strict, post, fusion, string protection, ABI and build-system checks passed, as did device roundtrip's four callback and eight globals/TLS combinations. LLVM 20 passed its six default compile/link modes; this batch ships the wipes and fusion correction for LLVM 21. No separate p27 timing was measured. The three heap inline-constant buffers, crypto locals and scoped CSE/QSEG buffers remain future M3 work. These local evidence archives are not checked into Git or generated by Gradle.
+
+## Historical p26 result and artifact checks
 
 The p26 build in `work/m3-frame-wipe-p26/build-sample.log` succeeded against the frozen p25 tree at `3133e3589e18a11a8cb7b0a534ba7f12cc84fafd`. The sample algorithms, 39 assertions, configuration and all 22 non-README source files are unchanged. On 2026-11-21, the frozen candidates passed this sequence on OnePlus 7 / API 37 / ARM64 / 4 KiB pages / LSPosed 2.2.1 API 102:
 
@@ -90,7 +121,7 @@ Both unchanged Java methods still have four fusion groups in the actual raw/post
 | dex2c SO | 268056 | 269440 | +1384 |
 | Native SO | 31544 | 31600 | +56 |
 
-Local p26 evidence is under `work/m3-frame-wipe-p26/`: `candidate/` retains the 15 actual artifacts; `artifact-evidence.json` records hashes, sizes and unchanged sample sources; `device-results.json` records the three device phases; `sol/machine-evidence.json` and `sol/machine-evidence-notes.md` bind the actual restore code; `validation-report.json` joins the results. The LLVM 21 call-frame regression passed all six device modes, including real O2 protected post, and two frozen p25 negative controls failed with exit 38. The shared test also passed all six default LLVM 20 compile/link modes; the wipe itself is only shipped for LLVM 21 in this batch. No separate p26 wipe timing was measured. Cache cleanup and scoped CSE/QSEG buffers remain later M3 work. These local evidence archives are not checked into Git or generated by Gradle.
+Local p26 evidence is under `work/m3-frame-wipe-p26/`: `candidate/` retains the 15 actual artifacts; `artifact-evidence.json` records hashes, sizes and unchanged sample sources; `device-results.json` records the three device phases; `sol/machine-evidence.json` and `sol/machine-evidence-notes.md` bind the actual restore code; `validation-report.json` joins the results. The LLVM 21 call-frame regression passed all six device modes, including real O2 protected post, and two frozen p25 negative controls failed with exit 38. The shared test also passed all six default LLVM 20 compile/link modes; the wipe itself is only shipped for LLVM 21 in this batch. No separate p26 wipe timing was measured. At that stage, cache cleanup and scoped CSE/QSEG buffers remained later M3 work. These local evidence archives are not checked into Git or generated by Gradle.
 
 ## Historical p25 result and artifact checks
 

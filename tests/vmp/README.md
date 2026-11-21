@@ -19,7 +19,7 @@ python tests/vmp/call_frames.py --ndk "$NDK" --serial "$SERIAL"
 另在预热 TLS 后注入可执行文件的 malloc 失败，验证 native 错误出参与无堆快照的 VM 递归。
 IR 门禁要求真实字节码、TLS 帧指针、无分发器快照 malloc/free、入口复验，以及未被优化掉的
 VM callee/递归调用。支持 `--clang` 和 `--work-dir`；不传序列号仅编链，CI 不含设备验证。
-`--semantic-only` 用于演示旧版 LLVM 21 编译器失败，只跳过新 IR 结构断言，仍观察退休控制帧是否清零。
+`--semantic-only` 用于演示旧版 LLVM 21 编译器失败，只跳过新 IR 结构断言，仍观察退休控制帧和缓存是否清零。
 
 每次入口增加与 VM 数据帧大小成正比的栈空间和清零成本，大帧及深递归需单独测量。
 跨 VM 的 `longjmp`、线程取消、异步信号重入不受支持，原有向量、动态 alloca、过度对齐等
@@ -53,7 +53,7 @@ python tests/vmp/call_frames.py --clang "$P25_CLANG" --ndk "$NDK" --serial "$SER
   --semantic-only --work-dir work/m3-frame-wipe-p26/negative
 ```
 
-第二条命令应在旧版保留退休槽内容时失败。此批只处理退休控制帧，缓存回收和受控敏感数据借用
+第二条命令应在旧版保留退休槽内容时失败。p26 只处理退休控制帧；后续缓存批次见下节，受控敏感数据借用
 仍在 [M3 路线图](../../docs/CORE_HARDENING_ROADMAP.md#m3-敏感数据借用与-vm-状态回收) 中待做。
 
 本轮 LLVM 21 六模式设备验证全部通过，四个观察模式均确认 88 字节完整帧、4 字节 padding、
@@ -61,6 +61,59 @@ python tests/vmp/call_frames.py --clang "$P25_CLANG" --ndk "$NDK" --serial "$SER
 及同名目录。冻结 p25 的 VMP/O0 和 protected/O2+post 动态负例均退出 38，见同根
 `p25-negative-results.json`。实际 LLVM 20 的默认六模式编链通过，未传 `--semantic-only`，
 见 `llvm20-final-call-frames.log`；此项核对共用测试兼容性，不代表 LLVM 20 已加入擦除。
+
+## p27 解释器缓存回收
+
+LLVM 21 在实际 native 分发前和解释器正常、原生异常退出时，清零三类可重建 TLS 缓存：
+ChaCha 的元组、key/nonce、调度种子及 64 字节块，opcode key/解码表，以及调试布局 key/ID。
+BB 失效时擦除完整 ChaCha 对象；材料元组错配时先擦旧对象再重建。同一材料仅切换块时，
+只擦旧块及块元数据，保留仍有效的 key/nonce。冷缓存直接重建，命中路径不增加清理。
+调用者数据帧、返回值、`sret` 和待传播异常沿用既有生命周期。LLVM 20 的生成 bitcode 未更新。
+
+共用 `call_frames.py` 在真实 IR 中追加 TLS 区域访问器，区域大小由实际类型 GEP 计算，
+包括结构体 padding。仅在 VM 未运行时填入 `0xA5` 哨兵；原有正常、异常和嵌套 native 回调
+检查分发边界全零，返回后再次检查完整缓存全零。原生参考差分、递归、结构体返回和八线程保留。
+
+观察器还在真实 `chacha20_byte_at` 的入口、KDF 前、块生成前和返回前插入只读回调：
+材料 refill 前检查完整对象为空；block-only refill 前检查旧块和块元数据为空，key/nonce 与入口快照相同；
+命中返回时检查整个对象未变。每种观察模式必须实际发生材料 refill、block-only refill 和命中，
+并观察到真实 opcode 解码表已经建立。O2 protected 仍先执行真实 post，再插观察点、禁用后续 IR passes。
+材料 refill 计数证明执行了 KDF 重建；正常生命周期通常已在 BB/native/退出边界清空旧材料，
+因此该计数不证明走过“有效旧元组发生错配”的分支。该分支的全对象擦除仍需结合代码与产物检查。
+回调会更新测试驱动的 TLS 记录，插点后的 ChaCha helper 已移除不再成立的内存访问和同步属性。
+
+p27 统一退出 CFG 暴露了 LLVM 21 融合 continuation 对不可达 NOP 边的依赖：真实 `frame_sret`
+在唯一 BB 内的融合运算后误读 BB 头，触发退出 137。同一份冻结 raw IR 只修正三条融合出口状态后，
+普通及缓存观察驱动均通过。正式 pass 在替换任何融合 handler 前，从真实标量二元运算 handler 的
+正常出口提取 continuation PHI；所有出口必须一致，引用的指令必须支配分发点，否则拒绝编译。
+这样不依赖优化后布尔状态的类型或极性。LLVM 20 未实现该融合路径。
+这些插入点用于观察失效策略。最终未插观察器的样例 raw/post、真实对象、链接库、打包库和 APK
+已另外核对：152 字节完整 ChaCha 擦除含 padding，native/退出前其余缓存共 48 字节清零，
+块替换精确擦除 77 字节且保留 key/nonce。三个业务 clone、两个真实 ChaCha helper 及退休帧 helper
+完成全部非重定位指令的对象到链接库匹配，dex2c 函数全部字节与打包库对应，APK 内整库字节一致。
+
+```bash
+python tests/vmp/call_frames.py --clang "$CLANG" --ndk "$NDK" --serial "$SERIAL" \
+  --work-dir work/m3-cache-wipe-p27/final-call-frames
+python tests/vmp/call_frames.py --clang "$P26_CLANG" --ndk "$NDK" --serial "$SERIAL" \
+  --semantic-only --work-dir work/m3-cache-wipe-p27/negative
+```
+
+p26 负例预期退出 50，日志中的 `bits` 可同时记录多类残留：2 为 KDF 前，4 为旧块/块元数据，
+8 为有效 key/nonce 被改或未有效，16 为命中对象改变，32 为 native 边界，64 为退出后；
+1 表示未观察到预期的真实缓存地址或结构大小。退出 51 表示缺少必须实际发生的命中或 refill。
+脚本遇到首个设备失败即停止；四个观察模式的预编译文件可分别运行并保留负例记录。
+
+最终六模式设备验证通过，含 O2 protected 的真实 post；四个受保护观察模式均实际发生命中、材料 refill、
+block-only refill 和 opcode map 建立。使用最终观察器属性的冻结 p26 VMP/O0 与 protected/O2+post
+负例均退出 50、`bits=102`，对应 KDF 前、块替换、native 和退出残留。实际 LLVM 20 的默认六模式
+编链通过，但未移植本批擦除或 LLVM 21 融合路径。未改 core-hardening 样例完成两进程各 39 项、
+禁用 inactive、恢复通过。证据在 `work/m3-cache-wipe-p27/` 的 `final-call-frames.log`、
+`p26-final-negative-results.json`、`candidate-artifact-evidence.json`、`device-results.json`
+及 `sol/machine-evidence.json`；这些本地归档不随 Git 提供。
+
+本批仅回收这三类持久缓存。`store`、`insertvalue`、`extractvalue` 的堆临时常量仍待单独处理；
+未扩展向量 eligibility，也不声称擦除所有栈临时值、寄存器或编译器 spill。
 
 ## p8 定长内存操作
 
