@@ -315,6 +315,8 @@ python tests/dex2c/gradle.py --gradle .\dex2c\gradlew.bat --sdk F:\Android\Sdk -
 
 真实 LibXposed 102 样例位于 `samples/xposed`。使用 `-Pdex2c.certificate=<debug签名的公开证书.der>` 构建 `:module:assembleRelease` 和 `:host:assembleDebug`，安装两个 APK，在 LSPosed 中仅选择测试宿主作用域后重启宿主进程。主进程和 `:worker` 均应输出 `calculate=37 exception=-99`、`isolated-loader=OK existing-native=102`；样例重复调用 install，测试独立宿主 ClassLoader、参数/结果修改、异常及既有 native 库。
 
+LLVM 21 M1 的仓库内双进程验收样例见 [core-hardening](samples/core-hardening/README.md)：最终签名 APK 的两项 Java/dex2c 关键方法静态检查通过；原生 JNI 的 strict VMP/post 路径各有四组融合，363 字节字节码在最终 SO 中保留。OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 上主/worker 两进程各 39 项通过，禁用模块后均失败，恢复启用后再次通过。Java/dex2c 两方法仍为零融合，其 lowering 运行时调用隔开相邻算术；零融合由仅增加 `-fno-discard-value-names` 的独立 inspection IR 确认，该 IR 不是 APK 的生成 IR。原生路径不声明 dex2c 的 CSE/证书保护；完整 QDReadHook 覆盖与性能前后比较尚未完成。
+
 启用作用域后可运行 `python tests/dex2c/xposed.py --sdk F:\Android\Sdk --serial <adb-serial> --report work/dex2c-xposed.json`，自动安装样例 APK、启动宿主并检查两个进程的结果。
 
 CI 的 `checks` 验证 ASM/Kotlin 选择和插件；LLVM 21 工具链构建额外运行 strict/cast 及 Windows JNI/VMP 编译测试。真机与 LSPosed 验收须在显式指定的设备执行。

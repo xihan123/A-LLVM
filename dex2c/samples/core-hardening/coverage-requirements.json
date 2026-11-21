@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "methods": [
+    {
+      "method": "io/github/xihan123/corehardening/sample/module/ProtectedArithmetic.calculate(III)I",
+      "protection": "vmp"
+    },
+    {
+      "method": "io/github/xihan123/corehardening/sample/module/ProtectedArithmetic.accumulate(JI)J",
+      "protection": "vmp"
+    }
+  ]
+}

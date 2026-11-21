@@ -10,9 +10,11 @@
 
 - [x] LLVM 21 VMP 已支持每函数最多四组不重叠的相邻标量整数融合，并为每组保留独立语义 opcode、位宽和操作数顺序；`config/patchset.env` 当前为 `p23`。
 - [x] `tests/vmp/fusion.py` 已覆盖多组、预留 opcode 占用、重叠与零候选、窄整数、非交换运算、循环 PHI 和 `i64` 链，并检查 protected IR、post IR、ELF 对象、基线字节码长度及 ARM64 原生参考驱动。
-- [~] QDReadHook 固定方法清单的端到端产物验证，以及同分母的 dispatch、`.text`、SO 体积和性能测量仍待完成；这些结果不由本 fixture 的专项验证代替。
+- [x] 仓库内 [core-hardening 示例](./dex2c/samples/core-hardening/README.md) 的两个 Java/dex2c 方法已完成 strict VMP、post、hardened CSE、证书绑定和入口自检，最终签名 APK 的两项关键方法静态检查通过。同模块原生 `core_fusion_calculate` 的 release raw/post 均有四个融合块，363 字节字节码完全一致且存在于 APK 的 `libcore_fusion.so` 中；该原生路径仅验收 strict VMP/post。
+- [x] OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 上主/worker 两进程各 39 项通过（8 dex2c int、21 long、8 native、2 异常）；禁用模块后两进程明确 `FAIL`，恢复启用后再次各 39 项通过。证据为 `work/core-hardening-sample/validation-report.json`，APK/IR/回执已冻结至同目录的 `final-artifacts/`。
+- [~] Java/dex2c 两方法仍为零融合：生成的 `d2c_i`、`d2c_j`、`d2c_copy` 运行时调用隔开相邻算术。零融合由同生成源、同编译参数仅增加 `-fno-discard-value-names` 的独立 inspection IR 确认，该 IR 不是 APK 的生成 IR。Java 融合收益、QDReadHook 完整业务覆盖和同分母性能比较仍未完成。
 
-规划和对照仍保留 p22 基线；本轮 p23/M1 的实现与专项验证已记录，后续阶段另行排期。
+规划和对照仍保留 p22 基线；p23/M1 的实现、专项验证和原生样例已完成。本轮仅新增仓库样例，不调整 p23，后续阶段另行排期。
 
 ## 阶段 0 — 骨架
 
@@ -88,8 +90,8 @@
 
 ## 当前优先事项
 
-1. LLVM 21 首批把每函数一对标量整数融合扩为有上限的非重叠多组融合。用固定业务方法清单对比 p22 源码基线，验证新的融合确实生成并执行。
-2. 首批闭环后按 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md) 推进后续小批次。构建加速仍有独立的 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md)。
+1. M1 多组融合的实现、专项与原生样例闭环已完成；Java 路径的核心缺口是 dex2c lowering 隔断相邻算术，当前不声称 Java 获得融合收益。
+2. 后续批次按 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md) 另行安排。构建加速仍有独立的 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md)。
 
 ## 发版前必做
 

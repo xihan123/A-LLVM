@@ -1,0 +1,4 @@
+-keep class io.github.xihan123.corehardening.sample.module.Entry { *; }
+-keep class io.github.xihan123.corehardening.sample.module.ProtectedArithmetic { *; }
+-keep class io.github.xihan123.corehardening.sample.module.NativeFusion { *; }
+-dontwarn io.github.libxposed.**
