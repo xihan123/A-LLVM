@@ -2,13 +2,14 @@
 
 `[x]` 已完成，`[~]` 已实现但未完成端到端验证，`[ ]` 未开始。
 
-LLVM 21 的多组 VM 指令融合、首批 handler/操作数布局变体、p26 退休控制帧擦除及 p27 三类持久解释器缓存回收已完成本地专项与样例验证。M3 后续推进堆临时常量和受控敏感数据生命周期，再进入共享库完整性和 AArch64 机器码保护。计划和各批验收见 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md)。
+LLVM 21 的多组 VM 指令融合、首批 handler/操作数布局变体，以及 M3 的 p26 退休控制帧、p27 持久解释器缓存、p28 堆内联常量三批回收已完成本地专项与样例验证。M3 后续推进受控敏感数据生命周期，再进入共享库完整性和 AArch64 机器码保护。计划和各批验收见 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md)。
 
 下面各阶段为历史记录，具体环境和验证范围见 [验证记录](./tests/VALIDATION.md)。
 
-## 当前状态：p27 / M3 缓存批次
+## 当前状态：p28 / M3 堆内联常量批次
 
-- [x] p27 在 native 分发前、正常/原生异常退出及失效点擦除 ChaCha、opcode 解码表和调试布局缓存；块替换保留有效 key/nonce，命中路径不变。最终六模式设备验证通过，含 O2 protected 的真实 post；冻结 p26 两个动态负例退出 50、残留位均为 102。未插观察器的 raw/post 保留 152 字节 ChaCha 和 48 字节其余缓存清理，真实对象到 APK 内库的代码绑定已核对。未改样例主/worker 各 39 项、禁用失败和恢复通过，22 个非 README 源文件未改。LLVM 21 融合 continuation 同时改为取真实标量 handler 的出口状态。证据在 `work/m3-cache-wipe-p27/`；冻结 p26 对照为 `baseline-manifest.json`，当前补丁集为 `p27`。
+- [x] p28 在 `store`、`insertvalue`、`extractvalue` 最后消费后、`free` 前，按原 `malloc` 长度用 volatile 字节循环擦除 owned 内联常量缓冲；borrowed `data_seg` 保持有效。专用 `noinline optnone` IR 的首 inline payload 以真实编译日志核验后，限定 XOR 成合法非零 VM 输入。O0/O2 真 post 的四个 pristine 和两个 observed 二进制均退出 0；观察分支各六行覆盖 17/24/31 字节与分配失败，释放前残留为 0、guard 完整、业务及后续 marker 正确。冻结 p27 两个负例均退出 60，完整 17/24/31 字节残留且输出仍正确。六个 pristine clone 的 12 个 owned 分配点完成原长度、消费→擦除→合并 free 静态核对，pristine/observed 两组对象到已执行二进制各匹配 31,346 条非重定位 ARM64 指令。这不表示 emitter 新增非零聚合支持，`malloc(0)` 仅静态核对。未改样例主/worker 各 39 项、禁用 inactive 和恢复通过。冻结 p27 对照为 `117ef36e16a13295ec8277ed9682f1f5de775364`，证据在 `work/m3-inline-wipe-p28/`，当前补丁集为 `p28`；无本批新增性能测量。
+- [x] p27 在 native 分发前、正常/原生异常退出及失效点擦除 ChaCha、opcode 解码表和调试布局缓存；块替换保留有效 key/nonce，命中路径不变。最终六模式设备验证通过，含 O2 protected 的真实 post；冻结 p26 两个动态负例退出 50、残留位均为 102。未插观察器的 raw/post 保留 152 字节 ChaCha 和 48 字节其余缓存清理，真实对象到 APK 内库的代码绑定已核对。未改样例主/worker 各 39 项、禁用失败和恢复通过，22 个非 README 源文件未改。LLVM 21 融合 continuation 同时改为取真实标量 handler 的出口状态。证据在 `work/m3-cache-wipe-p27/`；冻结 p26 对照为 `baseline-manifest.json`，该批补丁集为 `p27`。
 - [x] p26 在完整恢复调用者状态后，以 volatile 字节循环清零完整退休控制帧，包括 padding。真实 TLS 槽观察覆盖正常、原生异常、嵌套活跃帧与八线程；O0/O2 六种设备组合通过，含 O2 protected 的真实 post；p25 两个动态负例均退出 38。未改样例完成主/worker 各 39 项、禁用失败和恢复通过；真实对象到 APK 内恢复函数代码绑定已核对，22 个非 README 源文件未改。证据在 `work/m3-frame-wipe-p26/validation-report.json`。
 - [x] 共用调用帧测试对实际 Clang 21 启用擦除观察、post 及其 O0 switch 结构断言；Clang 20 保留条件链分发器。实际 LLVM 20 默认六模式编链通过，TLS、无快照 malloc/free、入口复验与 callee 门禁保留；LLVM 20 未移植退休帧擦除。
 - [x] p23 每函数最多四组整数融合、p24 dex2c 纯整数区段标量化保持生效。p25 在每组编译期独立选择原生运算或同宽 carry/borrow 循环，并选择 target 在前三个值之前或之后的布局；每组最多替换首个 add/sub，沿用系统随机源，无新增启用开关。
@@ -18,7 +19,7 @@ LLVM 21 的多组 VM 指令融合、首批 handler/操作数布局变体、p26 �
 - [x] 固定产物和冻结 driver 完成五轮交错复测，八项 checksum 一致；审查后新增两项高位可见向量，在原 15 份 SO 上追加语义复验全部通过。i64 H1/L0 的典型、64 轮 carry/borrow 输入中位数为 4.270/4.167/4.184 微秒，p24 为 3.203/3.211/3.224 微秒；同布局 H0 也有 4.136/4.144/4.075 微秒。整段 VM 粗计时未绑核或锁频，差异不能全部归于新增算法。
 - [ ] 完整 QDReadHook 业务覆盖、发布预算与性能验收仍待单独完成。本轮保持每组最多一个 add/sub 变体，不扩大指令族；dex2c/native SO 相对 p24 为 267048→268056 / 31456→31544 字节，无整体体积或性能收益结论。
 
-规划保留 p22 基线，p25 实现以 `b9c71b7` 的 p24 为冻结对照，p26 首批以 `3133e358` 的 p25 代码树为冻结对照，p27 以 `4e689504` 的 p26 为冻结对照。M1、M2 本批范围及 M3 退休控制帧、持久缓存两批的本地验证已完成；堆临时常量、受控敏感数据借用和后续阶段仍待实施。
+规划保留 p22 基线，p25 实现以 `b9c71b7` 的 p24 为冻结对照，p26 首批以 `3133e358` 的 p25 代码树为冻结对照，p27 以 `4e689504` 的 p26 为冻结对照，p28 以 `117ef36e` 的 p27 为冻结对照。M1、M2 本批范围及 M3 退休控制帧、持久缓存、堆内联常量三批的本地验证已完成；受控敏感数据借用和后续阶段仍待实施。
 
 ## 阶段 0 — 骨架
 
@@ -95,7 +96,7 @@ LLVM 21 的多组 VM 指令融合、首批 handler/操作数布局变体、p26 �
 ## 当前优先事项
 
 1. M1 多组融合与 M2 首批 handler/布局变体已在未改 Java/native 样例上完成本地验证；保持当前选择上限，完整业务覆盖与性能预算另行验收。
-2. p26 退休控制帧首批已完成本地验证，继续按 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md) 推进 M3 缓存与敏感数据生命周期。构建加速仍有独立的 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md)。
+2. p28 堆内联常量回收已完成本地验证，继续按 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md) 推进 M3 受控敏感数据生命周期。构建加速仍有独立的 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md)。
 
 ## 发版前必做
 

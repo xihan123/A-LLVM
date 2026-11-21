@@ -1636,6 +1636,7 @@ void store_handler() {
 		}
 
 		if (tmp_inline) {
+			vm_wipe_bytes(tmp_inline, var_size);
 			free(tmp_inline);
 		}
 	} else {
@@ -2410,6 +2411,7 @@ void insertvalue_handler() {
 	}
 
 	if (agg_tmp) {
+		vm_wipe_bytes(agg_tmp, agg_size);
 		free(agg_tmp);
 	}
 }
@@ -2470,16 +2472,16 @@ void extractvalue_handler() {
 
 	// 从 data_seg 中读取聚合操作数的数据
 	// agg_offset 是 data_seg 中的偏移量，offset 是结构体中的偏移量
-	uint8_t *src_addr = agg_src + offset;
-
 	// 读取 value_size 字节的数据，存储到结果位置
 	if (agg_src) {
+		uint8_t *src_addr = agg_src + offset;
 		memcpy((uint8_t*)data_seg_addr + res_offset, src_addr, value_size);
 	} else {
 		memset((uint8_t*)data_seg_addr + res_offset, 0, value_size);
 	}
 
 	if (agg_tmp) {
+		vm_wipe_bytes(agg_tmp, agg_size);
 		free(agg_tmp);
 	}
 }

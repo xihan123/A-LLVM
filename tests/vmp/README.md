@@ -112,8 +112,58 @@ block-only refill 和 opcode map 建立。使用最终观察器属性的冻结 p
 `p26-final-negative-results.json`、`candidate-artifact-evidence.json`、`device-results.json`
 及 `sol/machine-evidence.json`；这些本地归档不随 Git 提供。
 
-本批仅回收这三类持久缓存。`store`、`insertvalue`、`extractvalue` 的堆临时常量仍待单独处理；
+本批仅回收这三类持久缓存。`store`、`insertvalue`、`extractvalue` 的堆内联常量由下节 p28 单独处理；
 未扩展向量 eligibility，也不声称擦除所有栈临时值、寄存器或编译器 spill。
+
+## p28 堆内联常量回收
+
+LLVM 21 在 `store`、`insertvalue`、`extractvalue` 最后消费 owned inline 缓冲后、`free` 前，
+按原 `malloc` 长度执行 volatile 字节擦除。borrowed `data_seg`、结果槽和输出保持有效。
+分配失败仍消耗全部 inline payload，随后沿用零结果和正常 marker 返回。`extractvalue` 在实际源非空时才计算地址。
+
+`memory_ops.py` 在原 p8 检查之后、仅对实际 Clang 21 执行 `inline_constants.py`，支持可选 `--work-dir`。
+Clang 20 默认仍只运行原有 O0/O2 编链、拒绝与边界检查，不引入新 fixture、heap observer 或 post。
+独立专项也接受相同的 `--ndk`、`--clang`、`--serial`、`--work-dir` 参数；无 `--serial` 仅编链。
+
+```bash
+python tests/vmp/memory_ops.py --clang "$CLANG" --ndk "$NDK" --serial "$SERIAL" \
+  --work-dir work/m3-inline-wipe-p28/memory-ops
+python tests/vmp/inline_constants.py --clang "$P27_CLANG" --ndk "$NDK" \
+  --work-dir work/m3-inline-wipe-p28/p27-negative
+```
+
+`inline_constants.ll` 是保留 aggregate 指令的 `noinline optnone` 手写 IR，分别令首 opcode 真正进入
+17 字节 store、24 字节 insertvalue、31 字节 extractvalue 的 malloc/read/消费/free 路径。
+本批未修 emitter：部分大 `ConstantDataArray` 会 fallback 成零，`ConstantStruct` 不按所需的 inline 格式编码。
+为避免旧版零常量也能通过观察，脚本冻结 pristine raw 与 O2 真 post，从实际 debug log 验证 opcode、
+size/type、零 payload、function/payload/chain seeds、ChaCha key/nonce 和调度后的 keystream。
+只将每函数唯一首 inline payload 的密文字节 XOR 成合法非零 pattern，前后字节完全相同；
+`mutation-manifest.json` 记录原/改区间、字节、编译材料和 raw/post/观察 IR/字节码 hash。
+LLVM c-string parser 支持 `\HH` 和 `\\`，长度必须与实际数组一致。
+受控 VM 输入不表示 emitter 支持非零聚合初始化。
+
+观察分支关闭 SelfCheck，在后端输入中只放宽 wrapper 会破坏的 allocator 属性，禁用后续 IR passes。
+`--wrap=malloc/free` 返回真实分配内部的对象，仅初始化前后各 16 字节 guard；不向 payload 写 poison。
+在实际 `free` 前读取完整原分配，要求非零残留为 0、guard 完整。
+独立字节 oracle 检查 nonzero 输出与后续 marker，borrowed insert/extract 后源仍被消费，
+两个 borrowed store 之后再 extract 源字段并写入额外 oracle 输出，防止错误擦除借用数据而假通过。
+每路径还做一次 malloc 失败，要求尝试 1 次、free 0 次、失败输出及后续 marker 正确。
+pristine VMP 和 pristine VMP+SelfCheck+Entry 独立运行正常语义，SelfCheck 不与 payload 修改混用。
+`malloc(0)` 只有静态 guard/循环核对，没有动态覆盖；空 aggregate 用例不能触发这里的分配。
+
+正式 O0/O2 真 post 的四个 pristine 和两个 observed 二进制均在设备退出 0。
+`observed-O0` 与 `observed-O2-post` 各六行，覆盖三种长度的正常/失败分配：正常路径尝试 1 次、free 1 次，
+完整原分配残留为 0、guard 完整、输出及 marker 正确；失败路径尝试 1 次、free 0 次，输出及 marker 正确。
+冻结 p27 两个动态负例分别退出 60，正常分配的 17/24/31 字节各全部非零，业务输出和 guard 仍正确，失败分配无 free。
+退出 61 表示业务 oracle 或 marker 失败。设备脚本遇到失败会停止，因此负例先不传 `--serial` 编链，再分别运行这两个文件。
+正式目录 `work/m3-inline-wipe-p28/memory-ops/inline-constants/` 保存四种 pristine 与两种 observed 模式，
+O2 两种 pristine 和 observed 都基于真实 post。`sol/machine-evidence.json` 核对六个 pristine clone 的
+12 个 owned 分配点，从真实解码和消费沿 owned/borrowed PHI 追踪到原 malloc 长度的 volatile wipe 和 free，
+同时保留 nonnull/零长度 guard。O2 IR 和后端可合并 free，汇合指针仍仅来自 owned 分配。
+六组 pristine/observed 对象函数字节完全相同；两种模式合计 136,628 字节，pristine 与 observed
+两组对象到实际执行二进制各匹配 31,346 条非重定位 ARM64 指令。样例四份 IR 不含 malloc/free，只作为整体回归。
+样例在单台 ARM64 设备完成主/worker 各 39 项、禁用 inactive 和恢复通过；无新增性能测量。
+本地证据在 `work/m3-inline-wipe-p28/`，不随 Git 提供，正式 bitcode 无测试 hook。
 
 ## p8 定长内存操作
 
@@ -133,7 +183,7 @@ VM 帧保存/恢复和真实外部调用。最终 strip 会移除这些本地符
 python tests/vmp/memory_ops.py --ndk "$NDK" --serial "$SERIAL"
 ```
 
-支持 `--clang` 核验另一 LLVM major 的本地编译器；不传 `--serial` 仅验证编译和 IR。
+支持 `--clang` 核验另一 LLVM major 的本地编译器，`--work-dir` 保留输出；不传 `--serial` 仅验证编译和 IR。
 覆盖 O0/O2、无符号比较、首差优先、未对齐指针、保护页边界、零长度、返回指针与未选中路径。
 CI 执行编链验证，设备结果单独记录。
 

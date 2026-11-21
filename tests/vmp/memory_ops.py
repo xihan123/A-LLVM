@@ -1,5 +1,6 @@
 """Check VMP memory-operation lowering and differential arm64 semantics."""
 import argparse
+from contextlib import nullcontext
 import os
 from pathlib import Path
 import re
@@ -124,6 +125,7 @@ def main():
     parser.add_argument("--ndk", type=Path, required=True)
     parser.add_argument("--clang", type=Path)
     parser.add_argument("--serial")
+    parser.add_argument("--work-dir", type=Path)
     args = parser.parse_args()
     host = "windows-x86_64" if os.name == "nt" else "linux-x86_64"
     base = args.ndk.resolve() / "toolchains/llvm/prebuilt" / host
@@ -137,7 +139,9 @@ def main():
     source = Path(__file__).parent
     adb = ["adb", "-s", args.serial]
     remote = "/data/local/tmp/ndkp-memory-" + uuid.uuid4().hex
-    with tempfile.TemporaryDirectory() as folder:
+    if args.work_dir:
+        args.work_dir.mkdir(parents=True, exist_ok=True)
+    with (nullcontext(args.work_dir) if args.work_dir else tempfile.TemporaryDirectory()) as folder:
         out = Path(folder)
         try:
             check_rejection(clang, common, out)
@@ -169,6 +173,9 @@ def main():
                     run(*adb, "shell", "chmod", "700", remote)
                     assert "VMP memory operations OK" in run(*adb, "shell", "timeout", "90", remote)
                 print(f"[ok] {opt}: VMP memory operations, {'device semantics' if args.serial else 'compile only'}", flush=True)
+            if int(run(clang, "-dumpversion").split(".", 1)[0]) == 21:
+                from inline_constants import check_inline_constants
+                check_inline_constants(clang, common, out / "inline-constants", args.serial)
         finally:
             if args.serial:
                 run(*adb, "shell", "rm", "-f", remote)
