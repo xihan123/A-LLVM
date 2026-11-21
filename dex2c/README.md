@@ -315,7 +315,9 @@ python tests/dex2c/gradle.py --gradle .\dex2c\gradlew.bat --sdk F:\Android\Sdk -
 
 真实 LibXposed 102 样例位于 `samples/xposed`。使用 `-Pdex2c.certificate=<debug签名的公开证书.der>` 构建 `:module:assembleRelease` 和 `:host:assembleDebug`，安装两个 APK，在 LSPosed 中仅选择测试宿主作用域后重启宿主进程。主进程和 `:worker` 均应输出 `calculate=37 exception=-99`、`isolated-loader=OK existing-native=102`；样例重复调用 install，测试独立宿主 ClassLoader、参数/结果修改、异常及既有 native 库。
 
-LLVM 21 M1 的仓库内双进程验收样例见 [core-hardening](samples/core-hardening/README.md)：最终签名 APK 的两项 Java/dex2c 关键方法静态检查通过；原生 JNI 的 strict VMP/post 路径各有四组融合，363 字节字节码在最终 SO 中保留。OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 上主/worker 两进程各 39 项通过，禁用模块后均失败，恢复启用后再次通过。Java/dex2c 两方法仍为零融合，其 lowering 运行时调用隔开相邻算术；零融合由仅增加 `-fno-discard-value-names` 的独立 inspection IR 确认，该 IR 不是 APK 的生成 IR。原生路径不声明 dex2c 的 CSE/证书保护；完整 QDReadHook 覆盖与性能前后比较尚未完成。
+LLVM 21 M1 的双进程验收样例见 [core-hardening](samples/core-hardening/README.md)。p24 在无调用的 int/long 区段内使用标量临时值，JNI/helper、真实跳转与异常 handler 入口处同步；引用、浮点与可抛异常运算保留原路径。未改的 `accumulate`、`calculate` 在实际打包 raw/post IR 中各有 4/4 组融合，字节码相对 `ad6d19d` 冻结基线分别为 7013→4158、3848→1351 字节；raw/post 字节码相同且存在于最终 SO。两项关键方法的 strict VMP、post、hardened CSE、证书绑定、入口自检及签名 APK 静态检查通过。同模块原生 JNI 仍为四组融合，其 SO 与 p23 全字节相同，仅验收 strict VMP/post。
+
+p24 候选在 OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 上主/worker 各 39 项通过，禁用模块后均失败，恢复启用后再次通过；安装包哈希与冻结候选一致，算法、断言和配置未改。核心 45 项测试通过，含原有及新增 O1 CheckJNI 宿主差分。证据为本地 `work/dex2c-primitive-lowering-p24/validation-report.json`，候选 APK/真实 IR/回执在其 `candidate/` 下。dex2c SO 从 258536 增至 267048 字节，当前不声称整体体积或耗时收益；完整 QDReadHook 覆盖与同分母性能比较尚未完成。
 
 启用作用域后可运行 `python tests/dex2c/xposed.py --sdk F:\Android\Sdk --serial <adb-serial> --report work/dex2c-xposed.json`，自动安装样例 APK、启动宿主并检查两个进程的结果。
 

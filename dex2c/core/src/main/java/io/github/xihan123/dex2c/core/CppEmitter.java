@@ -16,6 +16,11 @@ final class CppEmitter {
     private final Set<String> keep;
     private final Set<String> types;
     private final int base, scratch;
+    private record Scalar(String member, String name, boolean dirty) {}
+    private final Map<Integer, Scalar> scalars = new LinkedHashMap<>();
+    private final Set<Integer> entries = new HashSet<>();
+    private boolean scalarBlock;
+    private int scalarId;
     private int index;
 
     CppEmitter(MethodKey key, MethodNode method, Set<String> keep, Set<String> types) {
@@ -23,6 +28,18 @@ final class CppEmitter {
         base = method.maxLocals; scratch = base + method.maxStack;
         try { frames = new Analyzer<>(new BasicInterpreter()).analyze(key.owner(), method); }
         catch (AnalyzerException e) { throw Selector.error(key, "invalid bytecode: " + e.getMessage()); }
+        for (AbstractInsnNode instruction : method.instructions) {
+            if (instruction instanceof JumpInsnNode jump) entries.add(at(jump.label));
+            if (instruction instanceof TableSwitchInsnNode table) {
+                entries.add(at(table.dflt));
+                for (LabelNode label : table.labels) entries.add(at(label));
+            }
+            if (instruction instanceof LookupSwitchInsnNode table) {
+                entries.add(at(table.dflt));
+                for (LabelNode label : table.labels) entries.add(at(label));
+            }
+        }
+        for (TryCatchBlockNode handler : method.tryCatchBlocks) entries.add(at(handler.handler));
     }
 
     String emit() {
@@ -45,13 +62,20 @@ final class CppEmitter {
         line("if (env->ExceptionCheck()) goto failed;");
         for (index = 0; index < method.instructions.size(); index++) {
             AbstractInsnNode instruction = method.instructions.get(index);
+            // A debug/line label is not a control-flow entry. Real targets must be
+            // outside the C++ scope so a goto cannot bypass scalar initializers.
+            if (entries.contains(index)) flushScalars(index);
             line("L" + index + ":;");
             if (instruction.getOpcode() < 0 || frames[index] == null) continue;
+            if (scalarInstruction(instruction, frames[index])) {
+                if (!scalarBlock) { line("{"); scalarBlock = true; }
+            } else flushScalars(index);
             try { instruction(instruction, frames[index]); }
             catch (IllegalArgumentException e) { throw Selector.error(key, "instruction " + index + ": " + e.getMessage()); }
-            if (requiresExceptionCheck(instruction))
+            if (!scalarBlock && requiresExceptionCheck(instruction))
                 line("if (env->ExceptionCheck()) goto E" + index + ";");
         }
+        flushScalars(method.instructions.size());
         line("goto failed;");
         for (index = 0; index < method.instructions.size(); index++) {
             if (frames[index] == null || !requiresExceptionCheck(method.instructions.get(index))) continue;
@@ -90,11 +114,106 @@ final class CppEmitter {
         return true;
     }
     private static String defaultReturn(Type result) { return result.getSort() == Type.VOID ? "return;" : "return 0;"; }
-    private String v(int slot, String member) { return "f->slots[" + slot + "].v." + member; }
-    private void put(int slot, String member, String expression) {
-        line("d2c_" + member + "(f, " + slot + ", " + expression + ");");
+    private String v(int slot, String member) {
+        String value = "f->slots[" + slot + "].v." + member;
+        if (!scalarBlock) return value;
+        Scalar cached = scalars.get(slot);
+        if (cached != null) {
+            if (!cached.member().equals(member)) throw new IllegalArgumentException("inconsistent primitive slot " + slot);
+            return cached.name();
+        }
+        String name = "p" + scalarId++;
+        line((member.equals("i") ? "jint " : "jlong ") + name + " = " + value + ";");
+        scalars.put(slot, new Scalar(member, name, false));
+        return name;
     }
-    private void copy(int target, int source) { line("d2c_copy(f, " + target + ", " + source + ");"); }
+    private void put(int slot, String member, String expression) {
+        if (scalarBlock) {
+            String name = "p" + scalarId++;
+            line((member.equals("i") ? "jint " : "jlong ") + name + " = " + expression + ";");
+            scalars.put(slot, new Scalar(member, name, true));
+        } else line("d2c_" + member + "(f, " + slot + ", " + expression + ");");
+    }
+    private void copy(int target, int source, String member) {
+        if (scalarBlock) put(target, member, v(source, member));
+        else line("d2c_copy(f, " + target + ", " + source + ");");
+    }
+    /** Cache only integer operations that cannot call JNI/runtime helpers. */
+    private static boolean scalarInstruction(AbstractInsnNode instruction, Frame<BasicValue> frame) {
+        int op = instruction.getOpcode();
+        if (instruction instanceof VarInsnNode) return op == ILOAD || op == LLOAD || op == ISTORE || op == LSTORE;
+        if (instruction instanceof IincInsnNode) return true;
+        if (instruction instanceof LdcInsnNode ldc) return ldc.cst instanceof Integer || ldc.cst instanceof Long;
+        if (op >= DUP && op <= SWAP) {
+            // The stack shuffle may mix references/category-2 values. Fall back
+            // for the entire shuffle unless every participating value is integer.
+            for (int i = 0; i < frame.getStackSize(); i++) {
+                BasicValue value = frame.getStack(i);
+                if (!value.equals(BasicValue.INT_VALUE) && !value.equals(BasicValue.LONG_VALUE)) return false;
+            }
+            return true;
+        }
+        return switch (op) {
+            case NOP, POP, POP2, ICONST_M1, ICONST_0, ICONST_1, ICONST_2, ICONST_3, ICONST_4, ICONST_5,
+                    LCONST_0, LCONST_1, BIPUSH, SIPUSH, IADD, LADD, ISUB, LSUB, IMUL, LMUL, INEG, LNEG,
+                    ISHL, LSHL, ISHR, LSHR, IUSHR, LUSHR, IAND, LAND, IOR, LOR, IXOR, LXOR,
+                    I2L, L2I, I2B, I2C, I2S, LCMP -> true;
+            default -> false;
+        };
+    }
+    private void flushScalars(int next) {
+        if (!scalarBlock) return;
+        int stackSize = next < frames.length && frames[next] != null ? frames[next].getStackSize() : 0;
+        for (var entry : scalars.entrySet()) {
+            int slot = entry.getKey(); Scalar value = entry.getValue();
+            if (!value.dirty()) continue;
+            boolean live = slot < base ? localReadBeforeWrite(next, slot) : slot < base + stackSize;
+            // Even dead numeric writes must release an old ref and clear its
+            // uninitialized tag. All source values are saved before any clear.
+            line("d2c_" + value.member() + "(f, " + slot + ", " + (live ? value.name() : "0") + ");");
+        }
+        line("}");
+        scalarBlock = false;
+        scalars.clear();
+    }
+    /** Conservative local liveness at this exit, including exceptional successors. */
+    private boolean localReadBeforeWrite(int start, int slot) {
+        var pending = new ArrayDeque<Integer>();
+        var visited = new BitSet(method.instructions.size());
+        pending.add(start);
+        while (!pending.isEmpty()) {
+            int cursor = pending.removeLast();
+            if (cursor >= method.instructions.size() || visited.get(cursor)) continue;
+            visited.set(cursor);
+            AbstractInsnNode instruction = method.instructions.get(cursor);
+            int op = instruction.getOpcode();
+            if (requiresExceptionCheck(instruction)) for (TryCatchBlockNode handler : method.tryCatchBlocks) {
+                if (cursor >= at(handler.start) && cursor < at(handler.end)) pending.add(at(handler.handler));
+            }
+            if (instruction instanceof IincInsnNode inc && inc.var == slot) return true;
+            if (instruction instanceof VarInsnNode var && var.var == slot) {
+                if (op >= ILOAD && op <= ALOAD) return true;
+                if (op >= ISTORE && op <= ASTORE) continue;
+            }
+            if (instruction instanceof JumpInsnNode jump) {
+                pending.add(at(jump.label));
+                if (op == GOTO) continue;
+            }
+            if (instruction instanceof TableSwitchInsnNode table) {
+                pending.add(at(table.dflt));
+                for (LabelNode label : table.labels) pending.add(at(label));
+                continue;
+            }
+            if (instruction instanceof LookupSwitchInsnNode table) {
+                pending.add(at(table.dflt));
+                for (LabelNode label : table.labels) pending.add(at(label));
+                continue;
+            }
+            if ((op >= IRETURN && op <= RETURN) || op == ATHROW) continue;
+            pending.add(cursor + 1);
+        }
+        return false;
+    }
     private void line(String s) { out.append(s).append('\n'); }
     private int at(LabelNode label) { return method.instructions.indexOf(label); }
     private void keepClass(String internalName) {
@@ -125,8 +244,8 @@ final class CppEmitter {
     private void instruction(AbstractInsnNode ins, Frame<BasicValue> frame) {
         int op = ins.getOpcode(), n = frame.getStackSize(), top = base + n - 1;
         if (ins instanceof VarInsnNode var) {
-            if (op >= ILOAD && op <= ALOAD) copy(top + 1, var.var);
-            else if (op >= ISTORE && op <= ASTORE) copy(var.var, top);
+            if (op >= ILOAD && op <= ALOAD) copy(top + 1, var.var, new String[]{"i","j","f","d","l"}[op-ILOAD]);
+            else if (op >= ISTORE && op <= ASTORE) copy(var.var, top, new String[]{"i","j","f","d","l"}[op-ISTORE]);
             else throw new IllegalArgumentException("unsupported local instruction " + op);
             return;
         }
@@ -272,7 +391,7 @@ final class CppEmitter {
             default -> throw new IllegalArgumentException("invalid stack instruction");
         };
         int low=Arrays.stream(order).min().orElseThrow();
-        for(int i=low;i<n;i++) copy(scratch+i-low,base+i);
-        for(int i=0;i<order.length;i++) copy(base+low+i,scratch+order[i]-low);
+        for(int i=low;i<n;i++) copy(scratch+i-low,base+i,member(frame.getStack(i).getType()));
+        for(int i=0;i<order.length;i++) copy(base+low+i,scratch+order[i]-low,member(frame.getStack(order[i]).getType()));
     }
 }

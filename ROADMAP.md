@@ -6,15 +6,16 @@
 
 下面各阶段为历史记录，具体环境和验证范围见 [验证记录](./tests/VALIDATION.md)。
 
-## 当前状态：p23 / M1
+## 当前状态：p24 / M1
 
-- [x] LLVM 21 VMP 已支持每函数最多四组不重叠的相邻标量整数融合，并为每组保留独立语义 opcode、位宽和操作数顺序；`config/patchset.env` 当前为 `p23`。
+- [x] p23 的 LLVM 21 VMP 已支持每函数最多四组不重叠的相邻标量整数融合，并为每组保留独立语义 opcode、位宽和操作数顺序。p24 在 dex2c 的纯整数区段内使用标量临时值，使 Java 算术进入现有融合路径；`config/patchset.env` 当前为 `p24`。
 - [x] `tests/vmp/fusion.py` 已覆盖多组、预留 opcode 占用、重叠与零候选、窄整数、非交换运算、循环 PHI 和 `i64` 链，并检查 protected IR、post IR、ELF 对象、基线字节码长度及 ARM64 原生参考驱动。
-- [x] 仓库内 [core-hardening 示例](./dex2c/samples/core-hardening/README.md) 的两个 Java/dex2c 方法已完成 strict VMP、post、hardened CSE、证书绑定和入口自检，最终签名 APK 的两项关键方法静态检查通过。同模块原生 `core_fusion_calculate` 的 release raw/post 均有四个融合块，363 字节字节码完全一致且存在于 APK 的 `libcore_fusion.so` 中；该原生路径仅验收 strict VMP/post。
-- [x] OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 上主/worker 两进程各 39 项通过（8 dex2c int、21 long、8 native、2 异常）；禁用模块后两进程明确 `FAIL`，恢复启用后再次各 39 项通过。证据为 `work/core-hardening-sample/validation-report.json`，APK/IR/回执已冻结至同目录的 `final-artifacts/`。
-- [~] Java/dex2c 两方法仍为零融合：生成的 `d2c_i`、`d2c_j`、`d2c_copy` 运行时调用隔开相邻算术。零融合由同生成源、同编译参数仅增加 `-fno-discard-value-names` 的独立 inspection IR 确认，该 IR 不是 APK 的生成 IR。Java 融合收益、QDReadHook 完整业务覆盖和同分母性能比较仍未完成。
+- [x] 仓库内 [core-hardening 示例](./dex2c/samples/core-hardening/README.md) 的两个 Java/dex2c 方法在真实打包 raw/post IR 中各有 4/4 组融合；`accumulate`、`calculate` 的字节码相对 `ad6d19d` 冻结基线分别为 7013→4158、3848→1351 字节，raw/post 字节码相同且存在于最终 SO。strict VMP、post、hardened CSE、证书绑定、入口自检与最终签名 APK 的两项关键方法静态检查均通过。同模块原生样例仍为四组融合，其 SO 与 p23 全字节相同。
+- [x] p24 候选在 OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 上主/worker 两进程各 39 项通过（8 dex2c int、21 long、8 native、2 异常）；禁用模块后两进程明确 `FAIL`，恢复启用后再次各 39 项通过。已安装 APK 哈希与候选一致。证据为 `work/dex2c-primitive-lowering-p24/validation-report.json`，候选 APK/IR/回执冻结于同目录的 `candidate/`，原样例算法、39 项断言和配置未改。
+- [x] 核心 45 项测试通过，含原有宿主 CheckJNI 差分与新增 `-O1` primitive 回归，覆盖引用/int/long 复用、category2、异常 handler、IINC、分支合流与循环。
+- [ ] QDReadHook 完整业务覆盖和同分母性能比较仍待单独验收。当前 dex2c SO 为 258536→267048 字节，不能据字节码缩减声称整体体积下降或耗时收益。
 
-规划和对照仍保留 p22 基线；p23/M1 的实现、专项验证和原生样例已完成。本轮仅新增仓库样例，不调整 p23，后续阶段另行排期。
+规划和对照仍保留 p22 基线；p23 的 LLVM 融合与 p24 的 Java/dex2c 样例闭环均已完成。后续阶段另行排期。
 
 ## 阶段 0 — 骨架
 
@@ -90,7 +91,7 @@
 
 ## 当前优先事项
 
-1. M1 多组融合的实现、专项与原生样例闭环已完成；Java 路径的核心缺口是 dex2c lowering 隔断相邻算术，当前不声称 Java 获得融合收益。
+1. M1 多组融合的实现、专项与 Java/native 样例闭环已完成；p24 已在未改的 Java 算法上验证多组融合，完整业务覆盖与性能预算另行验收。
 2. 后续批次按 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md) 另行安排。构建加速仍有独立的 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md)。
 
 ## 发版前必做

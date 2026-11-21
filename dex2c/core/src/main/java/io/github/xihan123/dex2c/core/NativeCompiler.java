@@ -91,7 +91,7 @@ public final class NativeCompiler {
         Path rawIr=output.resolve("protected.raw.ll");
         List<Path> stages=new ArrayList<>();
         Path protectedStage=output.resolve("staging/protected");
-        run(command(segmentFlags(hardened,segmented && !symbols.isEmpty(),protectedStage,stages),"-O1","-fno-vectorize","-fno-slp-vectorize","-fno-unroll-loops","-DD2C_VMP",
+        run(command(segmentFlags(hardened,segmented && !symbols.isEmpty(),protectedStage,stages),"-O1","-fno-discard-value-names","-fno-vectorize","-fno-slp-vectorize","-fno-unroll-loops","-DD2C_VMP",
                 "-mllvm","-irobf-vmp","-mllvm","-irobf-vmp-strict","-mllvm","-irobf-selfcheck","-mllvm","-irobf-selfcheck-entry",
                 "-S","-emit-llvm",generated.resolve("protected.cpp").toString(),"-o",rawIr.toString()),output.resolve("vmp.log"));
         IrIndex rawIndex=new IrIndex(Files.readString(rawIr));
@@ -99,7 +99,7 @@ public final class NativeCompiler {
         List<String> vmpRechecks=rechecks.stream().filter(symbols::contains).toList();
         for(String symbol:vmpRechecks)verifyRecheckIr(rawIndex,symbol,segmented);
         // The post pass runs after size optimization; no optimizer may run after verification.
-        run(command(symbols.isEmpty()?common:command(common,"-mllvm","-irobf-vmp-post"),"-Oz","-S","-emit-llvm",rawIr.toString(),"-o",ir.toString()),output.resolve("optimize.log"));
+        run(command(symbols.isEmpty()?common:command(common,"-mllvm","-irobf-vmp-post"),"-Oz","-fno-discard-value-names","-S","-emit-llvm",rawIr.toString(),"-o",ir.toString()),output.resolve("optimize.log"));
         IrIndex index=new IrIndex(Files.readString(ir));
         if(!symbols.isEmpty())verifyHardenedIr(index,symbols);
         Map<String,Integer> postBranches=verifyPostIr(index,symbols);

@@ -69,19 +69,28 @@ With the module active, look for `hooks-installed package=io.github.xihan123.cor
 
 ## Verified result and artifact checks
 
-The final build in `work/core-hardening-sample/build-passthrough.log` succeeded. On 2026-11-21, OnePlus 7 / API 37 / ARM64 / 4 KiB pages / LSPosed 2.2.1 API 102 produced these results:
+The p24 build in `work/dex2c-primitive-lowering-p24/build-sample.log` succeeded. The comparison starts at `ad6d19d367445be83ad5f5577caad4d89ad09b56`; the sample algorithms, 39 assertions, source files and configuration are unchanged. On 2026-11-21, the candidate APKs produced these results on OnePlus 7 / API 37 / ARM64 / 4 KiB pages / LSPosed 2.2.1 API 102:
 
-| Run | Main / worker PID | Result per process | Log under `work/core-hardening-sample/` |
+| Run | Main / worker PID | Result per process | Log under `work/dex2c-primitive-lowering-p24/` |
 | --- | --- | --- | --- |
-| Enabled, 19:55 | 7514 / 7544 | 39 PASS | `final-device-pass.log` |
-| Disabled, 19:55 | 7597 / 7614 | FAIL, module not active | `final-disabled.log` |
-| Restored, 19:57 | 7679 / 7710 | 39 PASS | `final-restored.log` |
+| Enabled, 20:53 | 8315 / 8342 | 39 PASS | `device-enabled.log` |
+| Disabled, 20:54 | 8392 / 8410 | FAIL, module not active | `device-disabled.log` |
+| Restored, 20:54 | 8465 / 8490 | 39 PASS | `device-restored.log` |
 
-The 39 checks comprise 8 dex2c integer cases, 21 dex2c long cases, 8 native integer cases, and 2 invalid-`rounds` exception cases. The common `Entry` hook helper explicitly sets API 102 `ExceptionMode.PASSTHROUGH`; `rounds=-1` and `129` assert both the exception type and message.
+The 39 checks comprise 8 dex2c integer cases, 21 dex2c long cases, 8 native integer cases, and 2 invalid-`rounds` exception cases. The common `Entry` hook helper explicitly sets API 102 `ExceptionMode.PASSTHROUGH`; `rounds=-1` and `129` assert both the exception type and message. Installed APK SHA-256 values match the frozen candidates, and the module is enabled at the end of the test.
 
 The dex2c protection receipt is `module/build/intermediates/dex2c/release/native/protection.json`; the final signed APK check is `module/build/reports/dex2c/release/apk-verification.json`, both relative to this sample. Its two `criticalMethods` passed the signed-APK static check. The dex2c methods use strict VMP, post, hardened CSE, certificate binding and entry self-check. `segmentedData` and runtime `apkSignatureVerification` are disabled.
 
-The final native `core_fusion_calculate` has four fusion blocks in both raw and post IR. Its 363-byte bytecode is identical across those files and is present in the APK's `lib/arm64-v8a/libcore_fusion.so`. This native path uses strict VMP/post and does not claim dex2c CSE or certificate protection. The release build no longer passes `-irobf-debug`, and the post IR contains no runtime debug helpers.
+p24 lowers call-free int/long regions to scalar temporaries. It writes values back before helpers, JNI calls and real control-flow boundaries, including exception handlers. Dead numeric slots still release old JNI references and clear their uninitialized tags through the original runtime helpers. Floating-point, reference and throwing operations keep their existing lowering. Both unchanged Java methods now have four fusion groups in the actual raw and post IR used to produce the packaged SO:
+
+| Method | Baseline groups | p24 raw / post groups | Baseline → p24 bytecode |
+| --- | --- | --- | --- |
+| `accumulate(JI)J` | 0 | 4 / 4 | 7013 → 4158 bytes |
+| `calculate(III)I` | 0 | 4 / 4 | 3848 → 1351 bytes |
+
+Each method's raw/post bytecode is identical and is present in the final dex2c SO. `NativeCompiler` now passes `-fno-discard-value-names` on the actual protected raw/post steps, so fusion counts can be checked on the packaged compilation chain. The baseline's zero groups were confirmed by its separate named inspection IR; that historical inspection is not used to establish the p24 result.
+
+The native `core_fusion_calculate` still has four groups and 363 bytes of bytecode. Its 31456-byte `lib/arm64-v8a/libcore_fusion.so` is byte-for-byte identical to p23. This native path uses strict VMP/post and does not claim dex2c CSE or certificate protection. The release build does not pass `-irobf-debug`, and the post IR contains no runtime debug helpers.
 
 The native build IR is at `module/.cxx/RelWithDebInfo/<configuration-id>/arm64-v8a/arithmetic.raw.ll` and `arithmetic.ll`; dex2c build IR is at `module/build/intermediates/dex2c/release/native/protected.raw.ll` and `protected.ll`. After rebuilding, inspect the current Gradle outputs from the repository root:
 
@@ -94,7 +103,7 @@ Get-Content "$module/build/intermediates/dex2c/release/native/protection.json" |
 Get-ChildItem -LiteralPath "$module/.cxx/RelWithDebInfo" -Filter arithmetic.raw.ll -Recurse
 ```
 
-Choose the current build's configuration directory from that listing, replace `<current-configuration-id>` below, and count its raw/post fusion blocks:
+Choose the current build's configuration directory from that listing, replace `<current-configuration-id>` below, and count the native raw/post fusion blocks:
 
 ```powershell
 $nativeDir = "$module/.cxx/RelWithDebInfo/<current-configuration-id>/arm64-v8a"
@@ -102,14 +111,27 @@ $nativeDir = "$module/.cxx/RelWithDebInfo/<current-configuration-id>/arm64-v8a"
 @(Select-String -Path "$nativeDir/arithmetic.ll" -Pattern '^vmp\.fusion\.[^:]+:').Count
 ```
 
-Expect `protectedMethods=2`, all five protection flags `true`, two `passed` statuses and native fusion counts `4`/`4`. Java/dex2c fusion remains `0`: generated `d2c_i`, `d2c_j` and `d2c_copy` runtime calls separate adjacent arithmetic instructions. To avoid a false zero from LLVM discarding value names, the same generated source and recorded compilation arguments were recompiled with only `-fno-discard-value-names` added. That separate inspection IR is `work/core-hardening-sample/dex2c-inspection.raw.ll`; it is not the IR used to produce the APK.
-
-`work/core-hardening-sample/final-artifacts/` is the local archive of this run's native IR, inspection IR, APKs and receipts. Neither that archive nor the inspection IR is checked into Git or generated by Gradle; a fresh clone will not contain them. If this local archive is available, the historical inspection can be reviewed as follows:
+Expect `protectedMethods=2`, all five protection flags `true`, two `passed` statuses and native fusion counts `4`/`4`. Count Java fusion groups separately in each method's private interpreter clone:
 
 ```powershell
-$artifacts = 'work/core-hardening-sample/final-artifacts'
-Select-String -Path "$artifacts/dex2c-inspection.raw.ll" -Pattern '^define .*@vm_interpreter_d2c_'
-@(Select-String -Path "$artifacts/dex2c-inspection.raw.ll" -Pattern '^vmp\.fusion\.[^:]+:').Count
+$protectedDir = "$module/build/intermediates/dex2c/release/native"
+$symbols = (Get-Content "$protectedDir/protection.json" | ConvertFrom-Json).symbols
+foreach ($file in 'protected.raw.ll', 'protected.ll') {
+    $ir = Get-Content -LiteralPath "$protectedDir/$file" -Raw
+    foreach ($symbol in $symbols) {
+        $pattern = '(?ms)^define [^\r\n]*@vm_interpreter_' + [regex]::Escape($symbol) + '_k[0-9a-f]+\([^\r\n]*\).*?^}'
+        $clone = [regex]::Match($ir, $pattern)
+        if (-not $clone.Success) { throw "Missing interpreter clone: $symbol in $file" }
+        [pscustomobject]@{
+            File = $file; Symbol = $symbol
+            FusionGroups = [regex]::Matches($clone.Value, '(?m)^vmp\.fusion\.[^:]+:').Count
+        }
+    }
+}
 ```
 
-The final host/module APK sizes are 883129/326860 bytes; native/dex2c SO sizes are 31456/258536 bytes. Installed APK hashes match these final APKs. The evidence report is `work/core-hardening-sample/validation-report.json`. Randomized builds can change these sizes and hashes; this single build is not a before/after performance or size comparison. M1-specific tests and the native sample are complete; Java fusion benefits and complete QDReadHook business coverage remain outstanding. Device validation covers the ARM64 API 37 device with 4 KiB pages stated above.
+Expect `FusionGroups=4` for each of the four Java rows. The current protection receipt also records bytecode lengths under `methodBytecodeBytes` and `bytecodeVerifiedInLibrary=true`; the signed-APK report binds the packaged SO to that receipt.
+
+Local evidence is under `work/dex2c-primitive-lowering-p24/`: `baseline/` preserves the original generated sources, raw/post IR, named inspection and APKs; `candidate/` contains the current generated source, actual raw/post IR, APKs and receipts. `artifact-evidence.json` records per-method fusion and bytecode correspondence, and `validation-report.json` joins the build, artifact and device results. These archives are not checked into Git or generated by Gradle; a fresh clone will not contain them. The older p23 archive under `work/core-hardening-sample/` remains a historical record.
+
+The current host/module APK sizes are 878174/335372 bytes. The dex2c SO grew from 258536 to 267048 bytes while the two VM bytecode blobs became shorter; this is not evidence of an overall size or performance improvement. The 45 core tests passed, including the existing host differential fixture and a separate O1 `-Xcheck:jni` fixture for shared reference/int/long locals, category-2 copies, exception-handler locals and control-flow boundaries. M1 Java/native sample validation is complete; full QDReadHook business coverage and performance comparisons remain outstanding. Device validation covers the ARM64 API 37 device with 4 KiB pages stated above.

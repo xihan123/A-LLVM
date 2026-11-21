@@ -41,8 +41,11 @@ class TransformerTest {
         assertTrue(cpp.contains("d2c_catch(f, \"java/lang/ArithmeticException\""));
     }
     Path compileFixture() throws Exception {
+        return compileFixture("/fixtures/Run.java");
+    }
+    Path compileFixture(String resource) throws Exception {
         Path source=temp.resolve("Run.java");
-        try(InputStream input=getClass().getResourceAsStream("/fixtures/Run.java")){Files.copy(Objects.requireNonNull(input),source);}
+        try(InputStream input=getClass().getResourceAsStream(resource)){Files.copy(Objects.requireNonNull(input),source);}
         Path classes=Files.createDirectories(temp.resolve("classes"));
         assertEquals(0,ToolProvider.getSystemJavaCompiler().run(null,null,null,"-g","-classpath",System.getProperty("java.class.path"),"-d",classes.toString(),source.toString()));
         return classes;
@@ -71,14 +74,33 @@ class TransformerTest {
         assertTrue(Files.readString(result.rules()).contains("sample.Parent"));
     }
     @Test void nativeAndJvmSemanticsMatchWithCheckJni() throws Exception {
+        nativeAndJvmSemanticsMatch("/fixtures/Run.java", "-O0");
+    }
+    @Test void primitiveSegmentsMatchJvmWithCheckJni() throws Exception {
+        nativeAndJvmSemanticsMatch("/fixtures/primitive/Run.java", "-O1");
+    }
+    @Test void primitiveFixtureReusesReferenceAndCategoryTwoLocalSlots() throws Exception {
+        Path classes=compileFixture("/fixtures/primitive/Run.java");
+        var node=new ClassNode();
+        new ClassReader(Files.readAllBytes(classes.resolve("sample/PrimitiveLogic.class"))).accept(node,0);
+        var method=node.methods.stream().filter(m->m.name.equals("reuse")).findFirst().orElseThrow();
+        var slots=new HashMap<Integer,Set<String>>();
+        for(var local:method.localVariables)if(local.name.equals("value"))
+            slots.computeIfAbsent(local.index,ignored->new HashSet<>()).add(local.desc);
+        assertTrue(slots.values().stream().anyMatch(types->types.containsAll(Set.of("Ljava/lang/Object;","I","J"))),
+                "the semantic fixture must reuse the same JVM local for reference, int and long values");
+        assertTrue(Arrays.stream(method.instructions.toArray()).anyMatch(i->i.getOpcode()==Opcodes.DUP2),
+                "the fixture must also exercise a primitive category-2 stack copy");
+    }
+    private void nativeAndJvmSemanticsMatch(String resource,String optimization) throws Exception {
         String compiler=System.getProperty("dex2c.hostCompiler","");
         Assumptions.assumeFalse(compiler.isBlank(),"set -Pdex2c.hostCompiler=<clang++> to run JNI differential tests");
-        Path classes=compileFixture();
+        Path classes=compileFixture(resource);
         var result=new Transformer().transform(List.of(classes),temp.resolve("generated"),"dex2c_test");
         boolean windows=System.getProperty("os.name").startsWith("Windows");
         Path jdk=Path.of(System.getProperty("java.home"));
         Path library=temp.resolve(windows?"dex2c_test.dll":"libdex2c_test.so");
-        run(List.of(compiler,"--driver-mode=g++","-std=gnu++17","-shared","-fno-exceptions","-fno-fast-math","-ffp-contract=off",
+        run(List.of(compiler,"--driver-mode=g++","-std=gnu++17",optimization,"-shared","-fno-exceptions","-fno-fast-math","-ffp-contract=off",
                 "-I"+jdk.resolve("include"),"-I"+jdk.resolve("include").resolve(windows?"win32":"linux"),
                 result.nativeSource().toString(),result.registration().toString(),result.nativeSource().resolveSibling("dex2c_runtime.cpp").toString(),"-o",library.toString()));
         String java=jdk.resolve("bin").resolve(windows?"java.exe":"java").toString();
