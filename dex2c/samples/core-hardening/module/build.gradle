@@ -1,21 +1,33 @@
 plugins { id 'com.android.application'; id 'io.github.xihan123.dex2c' }
 
+def cseScopedEnabled = providers.gradleProperty('coreHardening.cseScoped')
+        .map { it.toBoolean() }.getOrElse(false)
+
 android {
     namespace='io.github.xihan123.corehardening.sample.module'
     compileSdk=37
     ndkVersion='30.0.16248370'
+    buildFeatures { buildConfig=true }
     defaultConfig {
         applicationId='io.github.xihan123.corehardening.sample.module'
         minSdk=26
         targetSdk=37
         versionCode=1
         versionName='0.1'
+        buildConfigField 'boolean', 'CSE_SCOPED', cseScopedEnabled.toString()
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_STL=c++_static"
+                arguments "-DCORE_CSE_SCOPED=${cseScopedEnabled ? 'ON' : 'OFF'}"
                 if (providers.gradleProperty('dex2c.clang').isPresent()) {
                     arguments "-DCORE_FUSION_CLANG=${providers.gradleProperty('dex2c.clang').get()}"
+                }
+                if (providers.gradleProperty('dex2c.certificate').isPresent()) {
+                    arguments "-DCORE_CSE_CERTIFICATE=${providers.gradleProperty('dex2c.certificate').get()}"
+                }
+                if (providers.gradleProperty('dex2c.pythonExecutable').isPresent()) {
+                    arguments "-DCORE_CSE_PYTHON=${providers.gradleProperty('dex2c.pythonExecutable').get()}"
                 }
             }
         }

@@ -2,13 +2,17 @@
 
 `[x]` 已完成，`[~]` 已实现但未完成端到端验证，`[ ]` 未开始。
 
-LLVM 21 的多组 VM 指令融合、首批 handler/操作数布局变体，以及 M3 的 p26 退休控制帧、p27 持久解释器缓存、p28 堆内联常量三批回收已完成本地专项与样例验证。p29 QSEG 显式敏感 native 借用首批也已通过独立签名 fixture 与旧路径回归。随后进入共享库完整性和 AArch64 机器码保护。计划和各批验收见 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md)。
+LLVM 21 的多组 VM 指令融合、首批 handler/操作数布局变体，以及 M3 的 p26 退休控制帧、p27 持久解释器缓存、p28 堆内联常量三批回收已完成本地专项与样例验证。p29 QSEG 显式敏感 native 借用与 p30 scoped CSE region 首批也已通过独立签名 fixture 和旧路径回归；p30 的默认关闭独立样例 probe 已完成真实主/worker 验证。随后进入共享库完整性和 AArch64 机器码保护。计划和各批验收见 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md)。
 
 下面各阶段为历史记录，具体环境和验证范围见 [验证记录](./tests/VALIDATION.md)。
 
-## 当前状态：p29 / M3 QSEG 显式敏感借用
+## 当前状态：p30 / M3 scoped CSE region
 
-- [x] p29 通过隐藏的 sensitive acquire/release 借用既有认证 QSEG 资源，使用独立只读映射。非零引用期间允许重入和并发，最后一次配对敏感释放立即擦除全部页取整字节并真实 munmap，不进入普通 1 MiB LRU；普通 get/pinned 无法延长该敏感映射的寿命，stats 仍只计普通缓存。生产只修改 QSEG runtime/header，编译器、CSE region、IR/回执协议及原样例算法和配置不变。OnePlus 7 / API37 / ARM64 / 4 KiB 的签名 native fixture 10 例全部通过，含原样/全页观察正例、拒写与配对/认证/ENOMEM/观察器控制；专项 host 12 项普通/`-O`、QSEG 全套 236 项、旧 lifetime O0/O2、未改样例主/worker 各 39 项及禁用/恢复通过。冻结 p28 基线为 `4715d680b1e4c1efd041ffd595828533be2263b0`，正式证据为 `work/m3-scoped-p29/sol/scoped-fixture-final/` 与 `sol/scoped-device/`。旧样例不执行新 API；清理保证只覆盖敏感映射，CSE region scoped 接线、任意 native unwind、业务宿主及新性能评估留待独立批次。
+- [x] p30 为 LLVM 21 增加默认关闭的 `-irobf-cse-scoped` 与 `NDKP_CSE_SCOPED` 双重启用。原始 nounwind、直接不可变 byte/UTF-16 literal、普通返回的函数通过五字段 guard 与认证 RX region，每次调用独立认证并 RO 发布，普通返回前反序全页擦除、真实 munmap，lease 退休为 state2。未注解同 literal 保持静态 DecGV/once。局部指针存储/逃逸、非 inbounds GEP、对齐超过 4096、EH/非局部出口、业务 VMP/post 和 segmentedData 均拒绝；独立 crypto runtime 的两个 strict VMP 入口与真实 post 保持原链。详见 [生命周期与复现](./runtime/CSE_HARDENED.md#函数作用域明文p30llvm-21可选)。
+- [x] p30 正式 `work/m3-cse-scoped-p30/scoped-fixture-3/` 已通过 O0/O2 native/bound 编链、24 个 IR 拒绝例、实际 C++ 65536 字节对齐拒绝例和两个 return block。OnePlus 7 / GM1901 / API37 / ARM64 / 4 KiB 的 22 个设备 case 全部符合预期，包括五个合法签名 APK、真实全页/RO/unmap 观察与四个遗漏清理的缺陷控制。冻结 p29 为 `81337e0c3d8b7707e2cc600751eb9900d4250a0c`；实际执行绑定 compiler-freeze-3 和 fixture-freeze-4，compiler-freeze-2 仅为 snapshot，失败目录 1/2 及原始日志保留。普通 CSE runtime、descriptor 和 recheck 回归通过。
+- [x] p30 新增默认关闭的独立 `libcore_cse.so` probe，保留原算法、host 检查和 39 项断言。启用/恢复时 main/worker 各 39 PASS 且 probe 返回 0，禁用时均 inactive、无 probe；安装 APK hash 一致、scope 不变、末态 enabled。[样例回执](./dex2c/samples/core-hardening/README.md#p30-scoped-cse-probe) 与专项观察分开记录。清理保证仅覆盖 scoped 映射/lease；无新性能测量、物理 16 KiB/API26或29真机/Linux/完整业务覆盖声明，`NDKP_APK_VERIFY` 未启用。
+
+- [x] p29 通过隐藏的 sensitive acquire/release 借用既有认证 QSEG 资源，使用独立只读映射。非零引用期间允许重入和并发，最后一次配对敏感释放立即擦除全部页取整字节并真实 munmap，不进入普通 1 MiB LRU；普通 get/pinned 无法延长该敏感映射的寿命，stats 仍只计普通缓存。该批生产只修改 QSEG runtime/header，编译器、CSE region、IR/回执协议及原样例算法和配置不变。OnePlus 7 / API37 / ARM64 / 4 KiB 的签名 native fixture 10 例全部通过，含原样/全页观察正例、拒写与配对/认证/ENOMEM/观察器控制；专项 host 12 项普通/`-O`、QSEG 全套 236 项、旧 lifetime O0/O2、未改样例主/worker 各 39 项及禁用/恢复通过。冻结 p28 基线为 `4715d680b1e4c1efd041ffd595828533be2263b0`，正式证据为 `work/m3-scoped-p29/sol/scoped-fixture-final/` 与 `sol/scoped-device/`，历史 [CI 44949515082](https://github.com/xihan123/A-LLVM/actions/runs/44949515082) 已成功。旧样例不执行新 API；清理保证只覆盖敏感映射，p29 未包含 CSE region scoped 接线、任意 native unwind、业务宿主及新性能评估。
 
 - [x] p28 在 `store`、`insertvalue`、`extractvalue` 最后消费后、`free` 前，按原 `malloc` 长度用 volatile 字节循环擦除 owned 内联常量缓冲；borrowed `data_seg` 保持有效。专用 `noinline optnone` IR 的首 inline payload 以真实编译日志核验后，限定 XOR 成合法非零 VM 输入。O0/O2 真 post 的四个 pristine 和两个 observed 二进制均退出 0；观察分支各六行覆盖 17/24/31 字节与分配失败，释放前残留为 0、guard 完整、业务及后续 marker 正确。冻结 p27 两个负例均退出 60，完整 17/24/31 字节残留且输出仍正确。六个 pristine clone 的 12 个 owned 分配点完成原长度、消费→擦除→合并 free 静态核对，pristine/observed 两组对象到已执行二进制各匹配 31,346 条非重定位 ARM64 指令。这不表示 emitter 新增非零聚合支持，`malloc(0)` 仅静态核对。未改样例主/worker 各 39 项、禁用 inactive 和恢复通过。冻结 p27 对照为 `117ef36e16a13295ec8277ed9682f1f5de775364`，证据在 `work/m3-inline-wipe-p28/`，该批补丁集为 `p28`；无本批新增性能测量。
 - [x] p27 在 native 分发前、正常/原生异常退出及失效点擦除 ChaCha、opcode 解码表和调试布局缓存；块替换保留有效 key/nonce，命中路径不变。最终六模式设备验证通过，含 O2 protected 的真实 post；冻结 p26 两个动态负例退出 50、残留位均为 102。未插观察器的 raw/post 保留 152 字节 ChaCha 和 48 字节其余缓存清理，真实对象到 APK 内库的代码绑定已核对。未改样例主/worker 各 39 项、禁用失败和恢复通过，22 个非 README 源文件未改。LLVM 21 融合 continuation 同时改为取真实标量 handler 的出口状态。证据在 `work/m3-cache-wipe-p27/`；冻结 p26 对照为 `baseline-manifest.json`，该批补丁集为 `p27`。
@@ -21,7 +25,7 @@ LLVM 21 的多组 VM 指令融合、首批 handler/操作数布局变体，以�
 - [x] 固定产物和冻结 driver 完成五轮交错复测，八项 checksum 一致；审查后新增两项高位可见向量，在原 15 份 SO 上追加语义复验全部通过。i64 H1/L0 的典型、64 轮 carry/borrow 输入中位数为 4.270/4.167/4.184 微秒，p24 为 3.203/3.211/3.224 微秒；同布局 H0 也有 4.136/4.144/4.075 微秒。整段 VM 粗计时未绑核或锁频，差异不能全部归于新增算法。
 - [ ] 完整 QDReadHook 业务覆盖、发布预算与性能验收仍待单独完成。本轮保持每组最多一个 add/sub 变体，不扩大指令族；dex2c/native SO 相对 p24 为 267048→268056 / 31456→31544 字节，无整体体积或性能收益结论。
 
-规划保留 p22 基线，p25 实现以 `b9c71b7` 的 p24 为冻结对照，p26 首批以 `3133e358` 的 p25 代码树为冻结对照，p27 以 `4e689504` 的 p26 为冻结对照，p28 以 `117ef36e` 的 p27 为冻结对照，p29 以 `4715d680` 的 p28 为冻结对照。M1、M2 本批范围及 M3 退休控制帧、持久缓存、堆内联常量三批与 QSEG 敏感借用首批的本地验证已完成；CSE region 借用和后续阶段仍待实施。
+规划保留 p22 基线，p25 实现以 `b9c71b7` 的 p24 为冻结对照，p26 首批以 `3133e358` 的 p25 代码树为冻结对照，p27 以 `4e689504` 的 p26 为冻结对照，p28 以 `117ef36e` 的 p27 为冻结对照，p29 以 `4715d680` 的 p28 为冻结对照，p30 以 `81337e0c` 的 p29 为冻结对照。M1、M2 本批范围及 M3 退休控制帧、持久缓存、堆内联常量三批与 QSEG/CSE 敏感借用首批的本地验证已完成；局部 crypto 状态回收、共享库完整性和后端阶段仍待实施。
 
 ## 阶段 0 — 骨架
 
@@ -98,7 +102,7 @@ LLVM 21 的多组 VM 指令融合、首批 handler/操作数布局变体，以�
 ## 当前优先事项
 
 1. M1 多组融合与 M2 首批 handler/布局变体已在未改 Java/native 样例上完成本地验证；保持当前选择上限，完整业务覆盖与性能预算另行验收。
-2. p29 QSEG 显式敏感借用首批已完成本地验证，按 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md) 推进后续批次；CSE region 借用需独立的 guard/region 接线。构建加速仍有独立的 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md)。
+2. p29 QSEG 与 p30 scoped CSE 借用首批已完成本地验证，按 [核心增强路线图](./docs/CORE_HARDENING_ROADMAP.md) 推进后续批次；局部 crypto 状态、M4/M5 和完整业务覆盖仍独立验收。当前本地证据不替代 p30 提交后的 CI。构建加速仍有独立的 [预构建复用计划](./BUILD_ACCELERATION_PLAN.md)。
 
 ## 发版前必做
 

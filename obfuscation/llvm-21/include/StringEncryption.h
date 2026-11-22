@@ -15,6 +15,7 @@ struct CseRecheckPreparePass : public PassInfoMixin<CseRecheckPreparePass> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
 };
 void removeCseRecheckMarkers(Module &M);
+void rejectCseScopedVmp(Module &M, bool Post);
 
 }
 

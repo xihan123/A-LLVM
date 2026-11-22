@@ -41,27 +41,262 @@
 using namespace llvm;
 
 static constexpr const char *RecheckMarker = "ndkp.cse.recheck.prepare";
+static constexpr const char *ScopedMarker = "ndkp.cse.scoped.prepare";
+static constexpr const char *ScopedAttr = "ndkp.cse.scoped";
+static constexpr const char *ScopedNounwind = "ndkp.cse.scoped.original-nounwind";
+static constexpr const char *ScopedLowered = "ndkp.cse.scoped.lowered";
+
+static bool hasCseScopedAnnotation(Function &F) {
+  for (const std::string &A : readAnnotate(&F))
+    if (StringRef(A).rtrim('\0') == "ndkp.cse_scoped") return true;
+  return false;
+}
+
+static void rejectScoped(Function &F, StringRef Reason) {
+  report_fatal_error(Twine("NDKP_CSE_SCOPED ") + F.getName() + ": " + Reason);
+}
+
+void llvm::rejectCseScopedVmp(Module &M, bool Post) {
+  if (!isVMProtectEnabled() && !Post) return;
+  std::string List = getVMFunctionsList();
+  SmallVector<StringRef, 8> Names;
+  StringRef(List).split(Names, ';');
+  for (Function &F : M) {
+    if (F.isDeclaration() ||
+        !(F.hasFnAttribute(ScopedAttr) || (isCseScopedEnabled() && hasCseScopedAnnotation(F))))
+      continue;
+    std::string Annotations;
+    for (const std::string &A : readAnnotate(&F)) Annotations += StringRef(A).lower() + " ";
+    // Match the VMP selector, including novmp precedence and exact name-list entries.
+    bool Selected = Annotations.find("novmp") == std::string::npos &&
+        (Annotations.find("vmp") != std::string::npos || llvm::is_contained(Names, F.getName()));
+    if (Selected || F.getMetadata("ndkp.vmp.protected"))
+      rejectScoped(F, "business-function VMP/post is unsupported; compile the crypto runtime separately");
+  }
+}
+
+static bool scopedIntrinsicSupported(IntrinsicInst &I) {
+  if (isa<DbgInfoIntrinsic>(I) || isa<MemIntrinsic>(I)) return true;
+  switch (I.getIntrinsicID()) {
+  case Intrinsic::sideeffect:
+  case Intrinsic::assume:
+  case Intrinsic::lifetime_start:
+  case Intrinsic::lifetime_end:
+  case Intrinsic::expect:
+  case Intrinsic::expect_with_probability:
+  case Intrinsic::abs:
+  case Intrinsic::smax:
+  case Intrinsic::smin:
+  case Intrinsic::umax:
+  case Intrinsic::umin:
+  case Intrinsic::bswap:
+  case Intrinsic::ctpop:
+  case Intrinsic::ctlz:
+  case Intrinsic::cttz:
+    return true;
+  default:
+    return false;
+  }
+}
+
+template <typename RegionFor>
+static SmallVector<GlobalVariable *, 8> validateScopedUses(Function &F, RegionFor Region) {
+  Type *Return = F.getReturnType();
+  if (!Return->isVoidTy() && !Return->isIntegerTy() && !Return->isFloatingPointTy())
+    rejectScoped(F, "only scalar or void returns are supported");
+  if (F.hasPersonalityFn() || F.hasFnAttribute(Attribute::ReturnsTwice) ||
+      F.hasFnAttribute(Attribute::NoReturn))
+    rejectScoped(F, "EH and nonlocal exits are unsupported");
+  for (Instruction &I : instructions(F)) {
+    if (I.isEHPad() || isa<InvokeInst>(I) || isa<ResumeInst>(I) ||
+        isa<CatchReturnInst>(I) || isa<CleanupReturnInst>(I) || isa<CallBrInst>(I) ||
+        isa<IndirectBrInst>(I) || isa<UnreachableInst>(I))
+      rejectScoped(F, "only ordinary function exits are supported");
+    if (auto *Call = dyn_cast<CallBase>(&I)) {
+      if (!isa<CallInst>(Call) || Call->isInlineAsm() || !Call->getCalledFunction() ||
+          Call->hasOperandBundles() || Call->isMustTailCall() ||
+          Call->hasFnAttr(Attribute::ReturnsTwice) || Call->doesNotReturn() || !Call->doesNotThrow())
+        rejectScoped(F, "calls must be direct, nounwind, and return normally (no bundles/musttail/returns_twice)");
+      if (auto *Intrinsic = dyn_cast<IntrinsicInst>(Call))
+        if (!scopedIntrinsicSupported(*Intrinsic))
+          rejectScoped(F, "unsupported intrinsic");
+    }
+  }
+
+  LowerConstantExpr(F);
+  using RegionKey = decltype(Region(static_cast<GlobalVariable *>(nullptr)));
+  std::map<Value *, std::set<RegionKey>> Origins;
+  SmallVector<GlobalVariable *, 8> Roots;
+  SmallPtrSet<GlobalVariable *, 8> RootSet;
+  SmallVector<Value *, 16> Work;
+  auto ReferencesRegion = [&](auto &&Self, Constant *C, SmallPtrSetImpl<Constant *> &Seen) -> bool {
+    if (!Seen.insert(C).second) return false;
+    if (auto *GV = dyn_cast<GlobalVariable>(C))
+      if (Region(GV)) return true;
+    for (Value *Op : C->operands())
+      if (auto *Nested = dyn_cast<Constant>(Op))
+        if (Self(Self, Nested, Seen)) return true;
+    return false;
+  };
+  for (Instruction &I : instructions(F)) {
+    for (Value *Op : I.operands()) {
+      auto *C = dyn_cast<Constant>(Op);
+      if (!C) continue;
+      SmallPtrSet<Constant *, 32> Seen;
+      if (!ReferencesRegion(ReferencesRegion, C, Seen)) continue;
+      auto *GV = dyn_cast<GlobalVariable>(C);
+      if (!GV || !Region(GV) || GV->getAddressSpace() != 0 || GV->isThreadLocal())
+        rejectScoped(F, "indirect global-pointer/aggregate string access is unsupported");
+      if (GV->getAlign().valueOrOne() > Align(4096))
+        rejectScoped(F, "literal alignment exceeds the supported 4096-byte minimum page alignment");
+      if (RootSet.insert(GV).second) {
+        Roots.push_back(GV);
+        Origins[GV].insert(Region(GV));
+        Work.push_back(GV);
+      }
+    }
+  }
+  if (Roots.empty()) rejectScoped(F, "requires direct protected constants in this function");
+  while (!Work.empty()) {
+    Value *P = Work.pop_back_val();
+    for (Use &U : P->uses()) {
+      auto *I = dyn_cast<Instruction>(U.getUser());
+      if (!I || I->getFunction() != &F) continue;
+      bool Derived = (isa<GetElementPtrInst>(I) && U.getOperandNo() == 0) ||
+          (isa<BitCastInst>(I) && I->getType()->isPointerTy()) || isa<PHINode>(I) ||
+          (isa<SelectInst>(I) && U.getOperandNo() != 0);
+      if (!Derived) continue;
+      auto &Target = Origins[I];
+      size_t Before = Target.size();
+      Target.insert(Origins[P].begin(), Origins[P].end());
+      if (Target.size() != Before) Work.push_back(I);
+    }
+  }
+  auto FromRegion = [&](auto &&Self, Value *V, RegionKey Key, SmallPtrSetImpl<Value *> &Seen) -> bool {
+    if (!Seen.insert(V).second) return true;
+    if (auto *GV = dyn_cast<GlobalVariable>(V)) return Region(GV) == Key;
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) return Self(Self, GEP->getPointerOperand(), Key, Seen);
+    if (auto *Cast = dyn_cast<BitCastInst>(V)) return Self(Self, Cast->getOperand(0), Key, Seen);
+    if (auto *Phi = dyn_cast<PHINode>(V)) {
+      for (Value *Incoming : Phi->incoming_values())
+        if (!Self(Self, Incoming, Key, Seen)) return false;
+      return true;
+    }
+    if (auto *Select = dyn_cast<SelectInst>(V))
+      return Self(Self, Select->getTrueValue(), Key, Seen) && Self(Self, Select->getFalseValue(), Key, Seen);
+    return false;
+  };
+  for (auto &[P, Regions] : Origins) {
+    for (Use &U : P->uses()) {
+      auto *I = dyn_cast<Instruction>(U.getUser());
+      if (!I || I->getFunction() != &F) continue;
+      if (auto *GEP = dyn_cast<GetElementPtrInst>(I)) {
+        if (U.getOperandNo() == 0) {
+          if (!GEP->isInBounds()) rejectScoped(F, "scoped pointer GEP must be inbounds");
+          continue;
+        }
+      }
+      if ((isa<BitCastInst>(I) && I->getType()->isPointerTy()) || isa<PHINode>(I) ||
+          (isa<SelectInst>(I) && U.getOperandNo() != 0)) continue;
+      if (auto *Load = dyn_cast<LoadInst>(I)) {
+        if (Load->getPointerOperand() == P &&
+            !Load->getType()->isPtrOrPtrVectorTy() && !Load->getType()->isAggregateType()) {
+          if (Load->getAlign() > Align(4096))
+            rejectScoped(F, "load alignment exceeds the supported 4096-byte minimum page alignment");
+          continue;
+        }
+      }
+      if (auto *Compare = dyn_cast<ICmpInst>(I)) {
+        Value *Other = Compare->getOperand(1 - U.getOperandNo());
+        auto It = Origins.find(Other);
+        SmallPtrSet<Value *, 32> Seen;
+        if (Compare->isEquality() && (isa<ConstantPointerNull>(Other) ||
+            (Regions.size() == 1 && It != Origins.end() && It->second == Regions &&
+             FromRegion(FromRegion, P, *Regions.begin(), Seen) &&
+             FromRegion(FromRegion, Other, *Regions.begin(), Seen)))) continue;
+        rejectScoped(F, "pointer comparisons require null or values derived from the same region");
+      }
+      if (auto *Call = dyn_cast<CallBase>(I)) {
+        if (Call->isArgOperand(&U) && Call->doesNotCapture(Call->getArgOperandNo(&U))) {
+          unsigned ArgNo = Call->getArgOperandNo(&U);
+          Function *Callee = Call->getCalledFunction();
+          if (Call->getParamAlign(ArgNo).valueOrOne() > Align(4096) ||
+              (ArgNo < Callee->arg_size() && Callee->getParamAlign(ArgNo).valueOrOne() > Align(4096)))
+            rejectScoped(F, "consumer alignment exceeds the supported 4096-byte minimum page alignment");
+          if (auto *Memory = dyn_cast<MemIntrinsic>(Call)) {
+            if (Memory->getRawDest() == P) rejectScoped(F, "writes to scoped literals are unsupported");
+          } else if (isa<IntrinsicInst>(Call)) {
+            rejectScoped(F, "intrinsics may not consume scoped pointers");
+          }
+          continue;
+        }
+      }
+      rejectScoped(F, "scoped pointers may only be read or passed to captures(none) consumers; stores/returns/ptrtoint are unsupported");
+    }
+  }
+  for (Instruction &I : instructions(F))
+    if (auto *Call = dyn_cast<CallInst>(&I)) Call->setTailCallKind(CallInst::TCK_None);
+  return Roots;
+}
+
+static GlobalVariable *originalScopedRegion(GlobalVariable *GV) {
+  if (!GV || !GV->hasInitializer()) return nullptr;
+  auto *Data = dyn_cast<ConstantDataSequential>(GV->getInitializer());
+  if (!Data || (!Data->isString() && !Data->getElementType()->isIntegerTy(16))) return nullptr;
+  if (!GV->isConstant()) report_fatal_error("NDKP_CSE_SCOPED requires immutable literal globals");
+  return GV;
+}
+
+static void clearCseEffects(Module &M, bool PreserveNoUnwind = false) {
+  const Attribute::AttrKind Effects[] = {Attribute::Memory, Attribute::NoSync,
+      Attribute::NoFree, Attribute::WillReturn, Attribute::MustProgress,
+      Attribute::Speculatable, Attribute::NoRecurse, Attribute::NoUnwind};
+  for (Function &F : M) {
+    if (F.isDeclaration()) continue;
+    for (auto Kind : Effects)
+      if (!PreserveNoUnwind || Kind != Attribute::NoUnwind) F.removeFnAttr(Kind);
+    for (Instruction &I : instructions(F))
+      if (auto *Call = dyn_cast<CallBase>(&I))
+        for (auto Kind : Effects)
+          if (!PreserveNoUnwind || Kind != Attribute::NoUnwind) Call->removeFnAttr(Kind);
+  }
+}
 
 PreservedAnalyses llvm::CseRecheckPreparePass::run(Module &M,
                                                   ModuleAnalysisManager &) {
+  rejectCseScopedVmp(M, false);
   SmallVector<GlobalValue *, 8> Marked;
+  bool HasScoped = false;
   for (Function &F : M) {
     if (F.isDeclaration()) continue;
-    for (const std::string &A : readAnnotate(&F)) {
-      if (StringRef(A).rtrim('\0') != "ndkp.cse_recheck") continue;
+    bool Recheck = false;
+    for (const std::string &A : readAnnotate(&F))
+      Recheck |= StringRef(A).rtrim('\0') == "ndkp.cse_recheck";
+    bool Scoped = isCseScopedEnabled() && hasCseScopedAnnotation(F) && !F.hasFnAttribute(ScopedLowered);
+    if (Scoped) {
+      if (!F.hasFnAttribute(ScopedNounwind) && !F.doesNotThrow())
+        rejectScoped(F, "requires an original nounwind contract");
+      validateScopedUses(F, originalScopedRegion);
+      F.addFnAttr(ScopedAttr);
+      F.addFnAttr(ScopedNounwind);
+      F.addFnAttr("disable-tail-calls", "true");
+      HasScoped = true;
+    }
+    if (Recheck || Scoped) {
       F.removeFnAttr(Attribute::AlwaysInline);
       F.addFnAttr(Attribute::NoInline);
       // noinline alone still permits DCE/CSE of calls with unused results.
       IRBuilder<> B(&*F.getEntryBlock().getFirstInsertionPt());
       B.CreateCall(Intrinsic::getDeclaration(&M, Intrinsic::sideeffect))
-          ->setMetadata(RecheckMarker, MDNode::get(M.getContext(), {}));
+          ->setMetadata(Scoped ? ScopedMarker : RecheckMarker, MDNode::get(M.getContext(), {}));
       Marked.push_back(&F);
-      break;
     }
   }
   if (Marked.empty()) return PreservedAnalyses::all();
   // Prevent IPSCCP from cloning a specialized, unannotated checkpoint body.
   appendToCompilerUsed(M, Marked);
+  // Caller const/pure contracts can otherwise delete scoped calls before lowering.
+  if (HasScoped) clearCseEffects(M, true);
   return PreservedAnalyses::none();
 }
 
@@ -70,7 +305,8 @@ void llvm::removeCseRecheckMarkers(Module &M) {
   for (Function &F : M)
     for (Instruction &I : instructions(F))
       if (auto *Call = dyn_cast<IntrinsicInst>(&I))
-        if (Call->getIntrinsicID() == Intrinsic::sideeffect && I.getMetadata(RecheckMarker))
+        if (Call->getIntrinsicID() == Intrinsic::sideeffect &&
+            (I.getMetadata(RecheckMarker) || I.getMetadata(ScopedMarker)))
           Markers.push_back(&I);
   for (Instruction *I : Markers) I->eraseFromParent();
 }
@@ -268,11 +504,12 @@ namespace {
 		GlobalVariable *HardenedRegions = nullptr;
 		GlobalVariable *HardenedModule = nullptr;
 		Function *HardenedDecode = nullptr;
+		Function *HardenedAcquire = nullptr;
 		uint32_t HardenedSize = 0;
 		std::map<unsigned, std::pair<GlobalVariable *, unsigned>> SegmentEntries;
 		void buildSegmentedTable(Module &M);
 		void buildHardenedTable(Module &M);
-		Function *buildHardenedModuleDecode(Module &M, bool Recheck = false);
+		Function *buildHardenedModuleDecode(Module &M, bool Recheck = false, bool Scoped = false);
 		Function *buildHardenedDecrypt(Module &M, const CSPEntry *Entry);
 		bool UsePerKey = false;   ///< ChaCha8 派生密钥（不内联存储密钥）
 		bool UseBind = false;     ///< 把运行期包名哈希折进 pepper（蕴含 UsePerKey）
@@ -331,6 +568,7 @@ namespace {
 		CSUser *getPointedCSUser(GlobalVariable *GV);
 
 		bool processConstantStringUse(Function *F);
+		bool processScopedConstantStringUse(Function *F);
 
 		void deleteUnusedGlobalVariable();
 
@@ -387,6 +625,16 @@ bool StringEncryption::runOnModule(Module &M) {
           Checkpoints.push_back(&F);
           break;
         }
+    }
+
+  if (isCseScopedEnabled())
+    for (Function &F : M) {
+      if (F.isDeclaration() || F.hasFnAttribute(ScopedLowered)) continue;
+      if (F.hasFnAttribute(ScopedAttr) || hasCseScopedAnnotation(F)) {
+        if (!F.hasFnAttribute(ScopedNounwind))
+          rejectScoped(F, "missing original nounwind contract; compile through the prepare pass");
+        F.addFnAttr(ScopedAttr);
+      }
     }
 	UseBind = isCseBindEnabled() || moduleHasStrBindAnnotation(M);
 	UsePerKey = isCsePerKeyEnabled() || UseBind;
@@ -851,6 +1099,10 @@ bool StringEncryption::runOnModule(Module &M) {
 		if (Entry->DecFunc->use_empty()) {
 			Entry->DecFunc->eraseFromParent();
 		}
+		if (isCseScopedEnabled()) {
+			if (Entry->DecGV->use_empty()) Entry->DecGV->eraseFromParent();
+			if (Entry->DecStatus->use_empty()) Entry->DecStatus->eraseFromParent();
+		}
 	}
 	// 若全部薄封装被擦除，共享解码核心/包名 key 亦无用户，回收之。
 	if (SharedDecodeFunc && SharedDecodeFunc->use_empty()) {
@@ -871,16 +1123,7 @@ bool StringEncryption::runOnModule(Module &M) {
     }
     // Decoding adds writes, synchronization and allocation. Pre-pass inferred
     // effects on callers/calls are stale and would miscompile subsequent LTO.
-    const Attribute::AttrKind Effects[] = {Attribute::Memory, Attribute::NoSync,
-        Attribute::NoFree, Attribute::WillReturn, Attribute::MustProgress,
-        Attribute::Speculatable, Attribute::NoRecurse, Attribute::NoUnwind};
-    for (Function &F : M) {
-      if (F.isDeclaration()) continue;
-      for (auto Kind : Effects) F.removeFnAttr(Kind);
-      for (Instruction &I : instructions(F))
-        if (auto *Call = dyn_cast<CallBase>(&I))
-          for (auto Kind : Effects) Call->removeFnAttr(Kind);
-    }
+    clearCseEffects(M);
     Changed = true;
   }
 	return Changed;
@@ -1446,7 +1689,7 @@ void StringEncryption::buildHardenedTable(Module &M) {
   HardenedDecode = buildHardenedModuleDecode(M);
 }
 
-Function *StringEncryption::buildHardenedModuleDecode(Module &M, bool Recheck) {
+Function *StringEncryption::buildHardenedModuleDecode(Module &M, bool Recheck, bool Scoped) {
   if (isSegmentedDataEnabled()) {
     if (!Recheck) report_fatal_error("unexpected segmented module decode");
     auto *F = Function::Create(FunctionType::get(Type::getVoidTy(M.getContext()), false),
@@ -1460,19 +1703,20 @@ Function *StringEncryption::buildHardenedModuleDecode(Module &M, bool Recheck) {
   }
   LLVMContext &Ctx = M.getContext();
   Type *Ptr = PointerType::get(Ctx, 0);
+  Type *Return = Scoped ? Ptr : Type::getVoidTy(Ctx);
   auto *ModuleTy = cast<StructType>(HardenedModule->getValueType());
   auto *Expected = cast<ConstantStruct>(HardenedModule->getInitializer());
   SmallVector<Type *, 3> Args;
   if (!Recheck) Args = {Ptr, Ptr};
-  Function *F = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), Args, false),
+  Function *F = Function::Create(FunctionType::get(Return, Args, false),
       GlobalValue::PrivateLinkage,
-      Recheck ? "ndkp_cse_module_recheck" : "ndkp_cse_module_decode", &M);
+      Recheck ? "ndkp_cse_module_recheck" : Scoped ? "ndkp_cse_module_acquire" : "ndkp_cse_module_decode", &M);
   F->addFnAttr(Attribute::NoInline);
   F->setMetadata("noobf", MDNode::get(Ctx, {}));
   Args = Recheck ? SmallVector<Type *, 3>{Ptr} : SmallVector<Type *, 3>{Ptr, Ptr, Ptr};
   FunctionCallee Decode = M.getOrInsertFunction(
-      Recheck ? "ndkp_cse_recheck_module_v1" : "ndkp_cse_decode_region_v1",
-      FunctionType::get(Type::getVoidTy(Ctx), Args, false));
+      Recheck ? "ndkp_cse_recheck_module_v1" : Scoped ? "ndkp_cse_acquire_region_v1" : "ndkp_cse_decode_region_v1",
+      FunctionType::get(Return, Args, false));
   if (auto *Helper = dyn_cast<Function>(Decode.getCallee()))
     Helper->setVisibility(GlobalValue::HiddenVisibility);
   BasicBlock *Enter = BasicBlock::Create(Ctx, "entry", F);
@@ -1495,14 +1739,18 @@ Function *StringEncryption::buildHardenedModuleDecode(Module &M, bool Recheck) {
   // Use precisely the checked values; do not reread a mutable descriptor in the runtime.
   Value *LocalModule = B.CreateAlloca(ModuleTy);
   B.CreateStore(Snapshot, LocalModule);
-  if (Recheck)
+  if (Scoped)
+    B.CreateRet(B.CreateCall(Decode, {LocalModule, F->getArg(0), F->getArg(1)}));
+  else if (Recheck)
     B.CreateCall(Decode, {LocalModule});
   else
     B.CreateCall(Decode, {F->getArg(0), LocalModule, F->getArg(1)});
-  B.CreateRetVoid();
+  if (!Scoped) B.CreateRetVoid();
   B.SetInsertPoint(Fail);
   Value *Null = ConstantPointerNull::get(cast<PointerType>(Ptr));
-  if (Recheck)
+  if (Scoped)
+    B.CreateCall(Decode, {Null, Null, F->getArg(1)});
+  else if (Recheck)
     B.CreateCall(Decode, {Null});
   else
     B.CreateCall(Decode, {F->getArg(0), Null, Null});
@@ -1730,7 +1978,60 @@ void StringEncryption::collectReferencedEntries(Constant *CV,
 	}
 }
 
+bool StringEncryption::processScopedConstantStringUse(Function *F) {
+  if (F->hasFnAttribute(ScopedLowered)) return false;
+  if (!ArgsOptions->toObfuscate(ArgsOptions->cseOpt(), F).isEnabled())
+    rejectScoped(*F, "may not disable CSE on a scoped function");
+  SmallVector<GlobalVariable *, 8> Roots = validateScopedUses(*F, [&](GlobalVariable *GV) {
+    return resolveCSPEntryGlobal(GV);
+  });
+  std::map<unsigned, CSPEntry *> Entries;
+  for (GlobalVariable *GV : Roots) Entries[resolveCSPEntryGlobal(GV)->ID] = resolveCSPEntryGlobal(GV);
+  SmallVector<std::pair<Use *, CSPEntry *>, 16> Rewrites;
+  SmallVector<ReturnInst *, 8> Returns;
+  for (Instruction &I : instructions(F)) {
+    if (auto *Return = dyn_cast<ReturnInst>(&I)) Returns.push_back(Return);
+    for (Use &U : I.operands())
+      if (auto *GV = dyn_cast<GlobalVariable>(U.get()))
+        if (CSPEntry *Entry = resolveCSPEntryGlobal(GV)) Rewrites.emplace_back(&U, Entry);
+  }
+  Module &M = *F->getParent();
+  LLVMContext &Ctx = M.getContext();
+  Type *Ptr = PointerType::get(Ctx, 0);
+  StructType *LeaseTy = StructType::get(Ctx, {Ptr, Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)});
+  if (M.getDataLayout().getTypeAllocSize(LeaseTy).getFixedValue() != 24)
+    rejectScoped(*F, "unexpected scoped lease ABI");
+  if (!HardenedAcquire) HardenedAcquire = buildHardenedModuleDecode(M, false, true);
+  auto Release = M.getOrInsertFunction("ndkp_cse_release_region_v1",
+      FunctionType::get(Type::getVoidTy(Ctx), {Ptr}, false));
+  cast<Function>(Release.getCallee())->setVisibility(GlobalValue::HiddenVisibility);
+  std::map<CSPEntry *, Value *> Pointers;
+  SmallVector<Value *, 8> Leases;
+  IRBuilder<> B(&*F->getEntryBlock().getFirstInsertionPt());
+  for (auto &[ID, Entry] : Entries) {
+    auto *Lease = B.CreateAlloca(LeaseTy, nullptr, "cse.scoped.lease." + Twine(ID));
+    Lease->setAlignment(Align(8));
+    B.CreateStore(Constant::getNullValue(LeaseTy), Lease);
+    Value *Region = B.CreateInBoundsGEP(HardenedRegions->getValueType(), HardenedRegions,
+        {B.getInt32(0), B.getInt32(ID)});
+    Pointers[Entry] = B.CreateCall(HardenedAcquire, {Region, Lease}, "cse.scoped.data." + Twine(ID));
+    Leases.push_back(Lease);
+  }
+  for (auto &[Operand, Entry] : Rewrites) {
+    if (Operand->get() != Entry->DecGV)
+      MaybeDeadGlobalVars.insert(cast<GlobalVariable>(Operand->get()));
+    Operand->set(Pointers.at(Entry));
+  }
+  for (ReturnInst *Return : Returns) {
+    IRBuilder<> Cleanup(Return);
+    for (Value *Lease : llvm::reverse(Leases)) Cleanup.CreateCall(Release, {Lease});
+  }
+  F->addFnAttr(ScopedLowered);
+  return true;
+}
+
 bool StringEncryption::processConstantStringUse(Function *F) {
+	if (F->hasFnAttribute(ScopedAttr)) return processScopedConstantStringUse(F);
 	auto opt = ArgsOptions->toObfuscate(ArgsOptions->cseOpt(), F);
 	if (!opt.isEnabled()) {
 		return false;

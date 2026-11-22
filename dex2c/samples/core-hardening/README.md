@@ -67,7 +67,68 @@ Wait for fresh output from both processes before collecting the bounded log wind
 
 With the module active, look for `hooks-installed package=io.github.xihan123.corehardening.sample.host` and fresh `PASS process=main` and `PASS process=worker` lines, each with `cases=39 intCases=8 nativeIntCases=8 longCases=21 exceptionCases=2`. Each process has its own PID. If the worker result has not appeared yet, keep waiting or query the same bounded window again after it completes. Without the module active, both processes should report `FAIL` with `LibXposed module is not active`; this is the host's inactive-hook sentinel.
 
-## p28 verified sample result
+## p30 scoped CSE probe
+
+Add `-PcoreHardening.cseScoped=true` to the build command above to include the independent
+`libcore_cse.so` probe. The property defaults to `false`. It compiles `scoped.cpp` with LLVM 21
+hardened CSE, `-irobf-cse-scoped` and `NDKP_CSE_SCOPED`, binds the library to the host process
+`io.github.xihan123.corehardening.sample.host` (including `:worker`) and the module APK's signer
+certificate, and seals/verifies the linked library before strip and APK signing. The separate CSE
+crypto runtime retains its two strict VMP entries, memops, entry SelfCheck and real post pass.
+The JNI bridge and byte/UTF-16 consumers are ordinary separate translation units; hidden scoped
+runtime helpers are not dynamically exported. The original arithmetic/JNI algorithms, host probes
+and 39 assertions retain their behavior.
+
+When fresh hooks are installed, each active process logs `cse-scoped-probe result=0` with its PID.
+The probe calls a `noexcept` business function that directly consumes immutable byte and UTF-16
+literals. Each invocation authenticates new independent mappings and releases them before its
+ordinary return. It does not turn the existing Java arithmetic methods or their string storage
+into scoped CSE. The supported pointer/exit contract and full mapping cleanup checks are described
+in [CSE hardened](../../../runtime/CSE_HARDENED.md#函数作用域明文p30llvm-21可选).
+
+This sample's native target is Android 26. Its successful linked layout places the runtime's active
+8-byte format Magic in R-X `PT_LOAD` and the real CSE payload in R-W. The independent Android 29
+fixture explicitly links with `--no-rosegment` to obtain that layout: a separate nonexecuting
+read-only segment would make the unchanged strict sealer identify Magic as a malformed payload.
+The actual constant remains authenticated as executable-segment bytes; it is not removed or hidden
+from the sealer. API 26 is a compilation target here, not an API 26 device result.
+
+The p30 build uses frozen p29 baseline `81337e0c3d8b7707e2cc600751eb9900d4250a0c` and the
+compiler-freeze-3 production source. On 2026-11-22, the final signed candidates passed this sequence
+on OnePlus 7 / GM1901 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102:
+
+| Run | Main / worker PID | Original checks per process | Scoped probe per process |
+| --- | --- | --- | --- |
+| Enabled, 15:32:44 | 6852 / 6887 | 39 PASS | 0 |
+| Disabled, 15:32:49 | 7040 / 7058 | FAIL, module not active | Not executed |
+| Restored, 15:32:53 | 7194 / 7228 | 39 PASS | 0 |
+
+The installed host APK SHA-256 is `bd9eb23d71f59c150ac0f2dd81abd3c8352b3b385c6da7f1afb2fabf0a64cd58`;
+the module APK is `aaa898a0ace5c1df781d7253a1014f6ffaf8d826afa9424938197e96507a5c2b`.
+Both use the verified signer SHA-256 `441562e5d5a37c56ec87baec57433ac84208726039b549be177bba67762e37b3`.
+Scope is unchanged and the module is enabled at the end. The final Clang SHA-256 is
+`fa8d40519babab6260ec474bca8132ea4e1872111c34f8a097684c23b0b057a9`.
+
+Local p30 evidence is under `work/m3-cse-scoped-p30/`: `candidate/` retains the final actual artifacts,
+`sample-artifact-evidence.json` binds their build/package bytes, `sample-signature-binding.json`
+records signature and hidden-helper checks, and `sample-device-final/results.json` joins the
+three fresh log windows and installed APK hashes. The independent fixture-freeze-4 execution is
+under `scoped-fixture-3/`, with `build.json`, `results.json` and per-command raw streams. Its 22
+device cases prove real RO publication, full page-padding wipe, actual unmap and observer defect
+detection separately from these sample regression logs; signed O0/O2/main, O2 `:worker`, wrong
+certificate/package and tag/guard cases use five legitimately signed APKs and the real production
+input paths. `NDKP_APK_VERIFY` remains undefined: host apksigner verification is separate from
+runtime certificate extraction/binding. The ordinary CSE runtime, descriptor and recheck device
+regressions also passed with the final compiler.
+
+Source freezes are snapshots, not execution receipts; compiler-freeze-2 has only snapshot evidence.
+The failed `scoped-fixture-1` and `scoped-fixture-2` directories remain separate from the successful
+third build. No new p30 performance measurement, physical 16 KiB device, API 26/29 device, Linux
+runtime or complete QDReadHook business coverage is claimed. Scoped mappings and leases are the
+cleanup boundary; copies, stack/register/spill plaintext and other crypto locals remain outside it.
+These local evidence archives are not checked into Git or generated by Gradle.
+
+## Historical p28 verified sample result
 
 The p28 build in `work/m3-inline-wipe-p28/build-sample.log` succeeded against frozen p27 commit `117ef36e16a13295ec8277ed9682f1f5de775364`. The algorithms, original 39 assertions, configuration and all 22 non-README sample source files are unchanged. On 2026-11-22, the frozen candidates completed this sequence on the same OnePlus 7 / API 37 / ARM64 / 4 KiB / LSPosed 2.2.1 API 102 environment:
 
@@ -92,7 +153,7 @@ The four pristine and two observed O0/O2-post binaries all exited 0. Each observ
 | dex2c SO | 271936 | 270016 | -1920 |
 | Native SO | 32640 | 33096 | +456 |
 
-These are sizes of frozen actual artifacts from randomized builds; they do not establish an overall size or performance benefit. No new p28 timing was measured. The final compiler SHA-256 is `3f7a8140fb439599a69001da01dad4678c9c1d5f2d8c1cdcad08c0326e989c6f`. The LLVM 21 bitcode contains no test hooks. LLVM 20 only receives compile/link compatibility checks of its existing default tests, without the new fixture, heap observer or post. Scoped CSE/QSEG buffers, crypto locals and other M3 lifecycle work remain future batches; stack/register/spill plaintext is outside this batch. Local evidence archives are not checked into Git or generated by Gradle.
+These are sizes of frozen actual artifacts from randomized builds; they do not establish an overall size or performance benefit. No new p28 timing was measured. The final compiler SHA-256 is `3f7a8140fb439599a69001da01dad4678c9c1d5f2d8c1cdcad08c0326e989c6f`. The LLVM 21 bitcode contains no test hooks. LLVM 20 only receives compile/link compatibility checks of its existing default tests, without the new fixture, heap observer or post. At p28, scoped CSE/QSEG buffers, crypto locals and other M3 lifecycle work were future batches; stack/register/spill plaintext is outside that batch. Local evidence archives are not checked into Git or generated by Gradle.
 
 ## Historical p27 result and artifact checks
 

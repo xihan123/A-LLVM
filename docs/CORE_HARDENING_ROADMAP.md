@@ -1,7 +1,7 @@
 # 核心增强路线图
 
 LLVM 21 的 M1 多组 VM 指令融合及 M2 首批 handler/操作数布局变体已完成本地专项与 Java/native 样例验证。
-M3 的 p26 退休控制帧、p27 持久解释器缓存、p28 堆内联常量三批回收与 p29 QSEG 显式敏感 native 借用首批已完成本地专项和未改样例验证。p29 的独立签名 fixture 已通过真实设备验证。随后把完整性检查接到实际共享库入口，最后进入
+M3 的 p26 退休控制帧、p27 持久解释器缓存、p28 堆内联常量三批回收与 p29 QSEG 显式敏感 native 借用首批已完成本地专项和未改样例验证。p30 的 LLVM 21 CSE region 作用域首批已通过独立签名 fixture、旧路径回归及新增独立样例 probe。随后把完整性检查接到实际共享库入口，最后进入
 AArch64 机器码层。每批交付一个可在业务产物上启用和验证的行为。
 
 ## 当前基线与范围
@@ -19,9 +19,13 @@ M3 首批以 `3133e3589e18a11a8cb7b0a534ba7f12cc84fafd` 的 p25 代码树为冻�
 回收三类持久解释器缓存，并修正 LLVM 21 融合 continuation 的出口状态提取。
 `PATCHSET_VERSION=p28` 以 `117ef36e16a13295ec8277ed9682f1f5de775364` 的 p27 为冻结对照，
 在三处 owned 堆内联常量缓冲的最后消费后、释放前擦除完整原分配长度，只更新 LLVM 21 bitcode。
-当前 `PATCHSET_VERSION=p29` 以 `4715d680b1e4c1efd041ffd595828533be2263b0` 的 p28 为冻结对照，
+`PATCHSET_VERSION=p29` 以 `4715d680b1e4c1efd041ffd595828533be2263b0` 的 p28 为冻结对照，
 只在 QSEG runtime/header 增加独立敏感映射与配对借用，继续使用冻结的 p28 Clang；
 编译器、IR/回执协议、CSE 生产路径与原样例算法和配置保持原有行为。
+当前 `PATCHSET_VERSION=p30` 以 `81337e0c3d8b7707e2cc600751eb9900d4250a0c` 的 p29 为冻结对照，
+只在 LLVM 21 显式选中的普通返回、原始 nounwind 函数中接入 scoped CSE region，运行时
+认证后发布独立只读映射，返回前反序全页擦除并真实 unmap。原算法和 39 项断言保持原有行为，
+样例增加默认关闭的独立 `libcore_cse.so` probe；LLVM 20 只同步内部 ABI 头。
 
 对标成熟商业保护的维度是逐方法语义差异、敏感状态驻留、自身完整性、机器码覆盖和部署成本。
 这些维度用本项目的真实产物评估，厂商内部实现和强度百分比不在比较范围内。目标是提升静态分析和
@@ -31,7 +35,7 @@ M3 首批以 `3133e3589e18a11a8cb7b0a534ba7f12cc84fafd` 的 p25 代码树为冻�
 | 维度 | 仓库已有实现 | 核心缺口 |
 | --- | --- | --- |
 | VM 指令 | LLVM 21 逐方法随机 opcode、私有 clone、ChaCha 字节码、strict 与 post 间接分支。p23/p24 形成多组融合与 Java lowering；p25 每组首个 add/sub 可用同宽 carry/borrow，并支持 target 前后两种布局，实际 raw/post、SO 与设备语义通过。 | 当前仅有限整数融合族；完整业务覆盖、发布预算与隔离性能评估尚未完成。 |
-| 敏感数据和状态 | CSE hardened 使用 ChaCha20-Poly1305 与 HKDF-SHA-256。QSEG 按需恢复，保留 VM 内层编码，普通 `acquire/release` 与 1 MiB LRU 约束空闲借用缓存。只有原函数为 `nounwind` 才生成 VM 主借用，原生展开未证实的路径仍固定驻留。p26/p27/p28 回收与 p29 独立 QSEG 敏感映射已通过设备专项和未改样例验证；敏感映射在末次配对 release 立即全页擦除并 unmap。 | CSE region 作用域借用仍需独立接线；既有业务字符串保持静态存储期，Java 字符串可被缓存或 `intern()`。敏感映射之外的副本需由其所有者清理。 |
+| 敏感数据和状态 | CSE hardened 使用 ChaCha20-Poly1305 与 HKDF-SHA-256。QSEG 按需恢复，保留 VM 内层编码，普通 `acquire/release` 与 1 MiB LRU 约束空闲借用缓存。只有原函数为 `nounwind` 才生成 VM 主借用，原生展开未证实的路径仍固定驻留。p26/p27/p28 状态回收与 p29 QSEG 敏感借用已通过设备专项；p30 scoped CSE 每次调用独立认证/映射并在普通返回前反序全页擦除和 unmap，签名专项与独立样例 probe 已通过。 | 普通 CSE 字符串仍为静态存储期，Java 字符串可被缓存或 `intern()`；scoped 仅覆盖显式选中的有限 native 合同。敏感映射之外的副本、crypto 局部值、栈/寄存器/spill 仍需由其所有者处理。 |
 | 完整性 | CSE/QSEG 可度量本 SO 全部可执行 `PT_LOAD` 的实时映射字节，已覆盖其中的解释器。已有显式低频 `integrityRecheck`。SelfCheck 的 FNV 只校验 VM 字节码。完整 APK 验签与证书提取绑定有不同覆盖。 | 让没有 CSE pool 的翻译单元也能通过本库已认证的上下文接入加载与业务入口检查。 |
 | 共享库与机器码 | 多个反分析 pass 只查 `main`，无 `main` 的共享库会跳过相应注入。已有原生间接分支由 IR pass 生成。 | 面向共享库的明确接线、AArch64 后端变换。函数级 SO 机器码按需加密尚未实现。 |
 
@@ -46,11 +50,11 @@ M3 首批以 `3133e3589e18a11a8cb7b0a534ba7f12cc84fafd` 的 p25 代码树为冻�
 | --- | --- | --- | --- |
 | 1，已完成样例闭环 | M1 多组 VM 融合 | 每函数有上限的多组标量融合和独立 handler；p24 Java lowering 在真实样例中各产生四组融合。 | LLVM 21 p20 编码、私有 clone 和 post 链。 |
 | 2，已完成首批本地验证 | M2 handler 与操作数布局变体 | p25 每融合组最多一个 add/sub 的等价 carry/borrow 计算与两种字段排列。 | 共用 M1 opcode、系统随机源和私有 clone；编码与解码共享规格。 |
-| 3，状态回收三批与 QSEG 借用首批已完成本地验证 | M3 敏感数据借用与 VM 状态回收 | p26 擦除退休控制帧，p27 回收持久缓存，p28 回收堆内联常量，p29 增加显式 QSEG 敏感 native 借用。CSE region 借用另行安排。 | 现有 CSE/QSEG 和调用帧契约，可独立于 M1/M2。 |
+| 3，状态回收三批与 QSEG/CSE 借用首批已完成本地验证 | M3 敏感数据借用与 VM 状态回收 | p26 擦除退休控制帧，p27 回收持久缓存，p28 回收堆内联常量，p29 增加显式 QSEG 敏感 native 借用，p30 接入 LLVM 21 普通返回的 scoped CSE region。 | 现有 CSE/QSEG、模块 guard 和调用帧契约，可独立于 M1/M2。 |
 | 4 | M4 共享库完整性与自保护 | 真正零 CSE pool 的翻译单元可接入加载和显式业务检查点。 | 现有验签、RX 度量和 recheck。重用 M3 借用时才依赖相应生命周期。 |
 | 5 | M5 AArch64 机器码保护 | 指定函数获得真正的目标后端变换。 | 对应 NDK 的精确 LLVM 21 基线。组合 M4 时须保证最终代码摘要仍有效。 |
 
-顺序是开发优先级。M1、M2 本批范围与 M3 退休控制帧、持久缓存、堆内联常量三批和 QSEG 借用首批已完成本地验证，其余批次按实际收益和代价另行安排。
+顺序是开发优先级。M1、M2 本批范围与 M3 退休控制帧、持久缓存、堆内联常量三批和 QSEG/CSE 借用首批已完成本地验证，其余批次按实际收益和代价另行安排。
 LLVM 20 如需移植，单独在相应 NDK `Base revision` 上验证。解释器改动使用对应 major、已配置
 Android sysroot 的 Clang 生成 `vm.h`。脚本用法为 `gen_vm_bitcode.sh <clang> [abi_tag] [20|21|all]`。
 LLVM 21 的 arm64 阶段使用 `bash scripts/gen_vm_bitcode.sh /path/to/clang aarch64 21`。
@@ -293,8 +297,8 @@ LLVM 20 不进入新夹具、heap observer 或 post，只验证既有默认编�
 原有字符串 API 保留静态存储期、JNI 与 Java 身份约定；未知原生展开的编译器策略继续
 固定驻留，不表示新 API 自动覆盖任意 native EH。
 
-CSE region 作用域接口留到独立批次。现有 `decode_region_v1` 是依赖生成 guard 的编译器
-内部入口，需要单独验证 region/guard 上下文接线，不能直接作为通用借用接口暴露。
+p29 未包含 CSE region 作用域接口。`decode_region_v1` 是依赖生成 guard 的编译器内部入口；
+p30 的独立接线见下文，仍不能把未经核对的描述表作为通用借用接口输入。
 [CSE runtime](../runtime/ndkp_cse_runtime.cpp) · [QSEG runtime](../runtime/ndkp_qseg_runtime.cpp) · [Java 字符串运行时](../dex2c/runtime/src/main/java/io/github/xihan123/dex2c/runtime/StringRuntime.java)
 
 本批独立签名 fixture 直接执行 native 借用，覆盖完整认证、只读拒写、重入、8 线程与
@@ -313,6 +317,57 @@ mmap ENOMEM 使用独立子进程与实际 waitpid。`NDKP_APK_VERIFY` 未启用
 新 API 的业务宿主、任意 native unwind、API26 真机、物理 16 KiB、Linux 与性能评估
 均未扩展；同进程读内存和 APK-only 恢复仍在保护边界外。
 [QSEG 回归](../tests/qseg/README.md) · [调用帧回归](../tests/vmp/call_frames.py)
+
+#### p30 CSE region 作用域首批
+
+`[x]` LLVM 21 的 `-irobf-cse-scoped` 默认关闭，必须同时有 hardened CSE 与
+`NDKP_CSE_SCOPED` 函数注解。编译器仅接受直接不可变 byte/UTF-16 literal、标量/void 返回、
+原始 nounwind 和普通出口；所有调用须直接 nounwind 且正常返回，scoped 指针消费须
+`captures(none)`。局部指针存储、全局/聚合间接根、指针逃逸/返回/整数化、非 inbounds GEP、
+超过 4096 字节的 literal/load/调用点/callee 对齐、EH/非局部出口、业务 VMP/post 与
+segmentedData 均拒绝。nounwind 不证明隐藏 longjmp、取消、信号等路径；接入者须满足此有限合同。
+独立 crypto runtime 继续使用两个 strict VMP 入口、memops、entry SelfCheck 和真实 post。
+
+每次调用通过仍有五个 volatile 字段比较的共享 guard，使用核对后的 ModuleV1 局部快照及
+本库已认证 RX region 表。认证成功、实际 RO mprotect 后才发布新映射，普通返回前按 acquire
+反序 RW、volatile 擦除全部页取整长度、真实 munmap，再擦除 24 字节 lease 并置 state=2。
+状态偏移 16，fresh(0) → active(1) → retired(2)；退休 lease 的 data/mapped/padding 为零，
+state=2，因此不声称整个 lease 全零。未注解函数共享同 literal 时仍使用静态 DecGV/once。
+模块代码摘要和包名/证书公开输入缓存不变，每次 scoped 调用重新认证其记录。
+早期效果清理保留原 nounwind 证明，防止 const/pure caller 和未使用返回值删除真实生命周期。
+
+正式 `work/m3-cse-scoped-p30/scoped-fixture-3/build.json` 和 `results.json` 来自真实执行：
+O0/O2 native/bound IR、两个 crypto raw/post 入口、24 个 IR 编译拒绝例、实际 C++ 65536 对齐
+拒绝例及两个 return block 的四个反序 release 均通过。OnePlus 7 / GM1901 / API37 /
+ARM64 / 4096 页的 22 case 符合预期：native 七例（含 strip 与三个默认关闭控制）、原生
+guard/tag 四例、四个 observer 缺陷控制，以及签名 O0/O2 主进程、O2 `:worker` 三正例和
+错证书/错包名/tag/guard 四负例。正例退出 0，认证负例退出 127、无发布或业务继续，遗漏
+全页擦除/unmap/RO/release 的四控制均真实触发 observer exit90。普通 observer TU 转发真实
+调用，填充页 padding `0xa7`，fork/write 检查 RO，生产 wipe 后逐字节读完整映射，再检查
+实际 munmap 后 mincore ENOMEM；byte/UTF-16、多 region/分支、递归、两线程及 const/pure
+中继覆盖每轮 13 次映射/发布/退休。同 literal 的未注解 getter 独立保留静态存储期。
+
+五个 APK 都经过实际 zipalign、合法签名和主机 apksigner 验证，最终 native entry 与 stripped
+库全字节一致。生产 runtime 直接从实际 APK/进程双路径读取证书和包名，未启用
+`NDKP_APK_VERIFY`，主机验签不等于设备完整 APK 验签。Android29 fixture 显式使用
+`--no-rosegment`，使真实使用的 8 字节 Magic 与已成功的 Android26 样例一样位于认证 RX，
+真正封装块保持 RW；封装器与生产常量未更改。失败目录 `scoped-fixture-1/2` 及其原始日志保留，
+正式执行只绑定 compiler-freeze-3 和 fixture-freeze-4。compiler-freeze-2 仅为源码 snapshot，
+不能当成执行证据；逐命令 argv/cwd/rc、stdout/stderr 与输入/产物 hash 保存在正式目录。
+
+样例用默认关闭的 `-PcoreHardening.cseScoped=true` 增加独立 `libcore_cse.so`，绑定真实 host
+进程和 module signer；原算法和 39 项断言不变。15:32:44 启用 main/worker 6852/6887 各
+39 PASS + scoped probe 0；15:32:49 禁用 7040/7058 均 inactive、无 probe；15:32:53 恢复
+7194/7228 再次各 39 PASS + probe 0。安装 APK hash 与冻结候选一致、scope 不变、末态 enabled。
+证据为同根 `sample-artifact-evidence.json`、`sample-signature-binding.json`、`candidate/`
+和 `sample-device-final/results.json`。旧普通 CSE runtime、descriptor 和 recheck 设备回归
+也通过最终工具链；[复现与支持边界](../runtime/CSE_HARDENED.md#函数作用域明文p30llvm-21可选)
+及 [样例结果](../dex2c/samples/core-hardening/README.md#p30-scoped-cse-probe) 分开记录。
+
+本批只保证 owned scoped 映射和 lease 的清理。普通 CSE 静态池、Java 字符串/副本、crypto
+局部值、寄存器、栈/spill 与同进程读内存仍不包含在保证内；每次映射与认证增加成本，适合
+低频函数，没有新性能收益声明。API26/29 真机、物理 16 KiB 页、Linux 和完整 QDReadHook
+业务未扩大覆盖。LLVM 20 未移植 scoped 编译器变换；上述 `work/` 为不随 Git 提供的本地证据。
 
 ### M4 共享库完整性与自保护
 
@@ -377,10 +432,13 @@ mmap ENOMEM 使用独立子进程与实际 waitpid。`NDKP_APK_VERIFY` 未启用
 修改 overlay 按贡献指南核对精确基线 `git apply --check`、最小 Clang 构建和受影响的现有套件。
 真机语义、宿主兼容和设备上的篡改拒绝以真实结果为准。`--compile-only` 只覆盖编链及静态路径。
 
-影响产物的实现批次按贡献指南递增 patchset；handler/布局改动使用 p25，退休控制帧擦除递增为 p26，持久缓存回收为 p27，堆内联常量回收为 p28，QSEG 显式敏感借用为 p29。历史 p23 Windows
+影响产物的实现批次按贡献指南递增 patchset；handler/布局改动使用 p25，退休控制帧擦除递增为 p26，持久缓存回收为 p27，堆内联常量回收为 p28，QSEG 显式敏感借用为 p29，LLVM 21 scoped CSE 为 p30。历史 p23 Windows
 完整 Clang [工作流 44894484357](https://github.com/xihan123/A-LLVM/actions/runs/44894484357) 已成功完成，
-对应 `8cb3f4c`，不作为 p25、p26、p27、p28 或 p29 的 CI 结果；当前本地构建与设备结果也不替代本批提交后的 CI。
+对应 `8cb3f4c`，不作为 p25、p26、p27、p28、p29 或 p30 的 CI 结果。p29 的
+[工作流 44949515082](https://github.com/xihan123/A-LLVM/actions/runs/44949515082) 已成功，仍属于
+p29 历史证据；当前本地构建与设备结果不替代 p30 提交后的 CI。
 完整业务覆盖和性能比较仍保留上述边界。自动发布仍受全部 Host artifact 齐备、聚合
-`SHA256SUMS`、现有发布门槛和所需设备验证约束，已有 Release 保持不可变。M3 的 CSE
-region 借用、局部 crypto 临时值回收及 M4/M5 不包含在 p29 QSEG 批次中，发布留待当前批次通过全部门槛后按既有流程进行。
+`SHA256SUMS`、现有发布门槛和所需设备验证约束，已有 Release 保持不可变。p30 仅交付上述
+CSE region 作用域合同，局部 crypto 临时值回收及 M4/M5 仍不在本批范围；发布留待当前批次
+通过全部门槛后按既有流程进行。
 [贡献指南](../CONTRIBUTING.md) · [仓库约定](../AGENTS.md) · [聚合发布](../.github/workflows/discover.yml)

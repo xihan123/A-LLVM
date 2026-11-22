@@ -22,6 +22,12 @@
 /* 字符串常量加密。标签 ndkp.string_encrypt 折叠为 +cse，需配合 -mllvm -irobf-cse。 */
 #define NDKP_STR_ENCRYPT NDKP_ANNOTATE("ndkp.string_encrypt")
 
+/* LLVM 21 CSE v1 函数内明文作用域。注解本身不改变生命周期；需显式开启
+ * -irobf-cse -irobf-cse-hardened -irobf-cse-scoped（Android arm64）。函数需原始
+ * nounwind 合同，指针不能逃逸；普通返回前清零并释放本次调用的独立只读映射。
+ * 不支持 VMP 业务函数、异常/非局部退出或 segmented-data；详见 CSE_HARDENED.md。 */
+#define NDKP_CSE_SCOPED NDKP_ANNOTATE("ndkp.cse_scoped")
+
 /* Hardened CSE 低频完整性检查点。需 -irobf-cse -irobf-cse-hardened，且当前
  * 翻译单元有受保护常量。入口重算本 SO 的 RX 摘要并认证缓存输入；不清除业务
  * 明文，不重读 APK，不检查其他 SO。禁止内联以保留检查边界；不用于信号处理器。 */

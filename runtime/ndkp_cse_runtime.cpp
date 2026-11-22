@@ -12,6 +12,8 @@
 #endif
 #include <elf.h>
 #include <link.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #if defined(NDKP_QSEG)
 #include "qseg.h"
 #endif
@@ -175,16 +177,14 @@ void initialize(const ModuleV1* module) {
     }
   }
 }
-} // namespace
+struct CheckedRegion {
+  const uint8_t* record;
+  uint32_t ordinal, capacity, encoding;
+};
 
-// cache points to aligned {u32 state; u8 actual_code_hash[32]; u8 inputs[48]}.
-// Only public input digests persist; never retain a derived key in this cache.
-extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_decode_region_v1(
-    uint8_t* out, const ndkp_cse::ModuleV1* module, const ndkp_cse::RegionV1* region) {
-  using namespace ndkp_cse;
-  if (!out || !module || !region || !module->blob || !module->cache || !module->regions) fail();
+CheckedRegion checkedRegion(const ModuleV1* module, const RegionV1* region) {
+  if (!module || !region || !module->blob || !module->cache || !module->regions) fail();
   const uint8_t* blob = module->blob;
-  uint8_t* cache = module->cache;
   const uint32_t total = module->total;
   const uintptr_t base = reinterpret_cast<uintptr_t>(module->regions);
   const uintptr_t address = reinterpret_cast<uintptr_t>(region);
@@ -205,6 +205,15 @@ extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_decode_region_v1(
   if (capacity < 32 || capacity > MaxCapacity || (capacity & (capacity - 1)) ||
       capacity > total - offset - 32 || outCapacity != capacity - 16 ||
       load64(record + 4) != 0 || load32(record + 12) != ordinal) fail();
+  return {record, ordinal, capacity, encoding};
+}
+
+void decodeRegion(uint8_t* out, const ModuleV1* module, const CheckedRegion& region) {
+  const uint8_t* blob = module->blob;
+  const uint8_t* cache = module->cache;
+  const uint8_t* record = region.record;
+  const uint32_t ordinal = region.ordinal, capacity = region.capacity, encoding = region.encoding;
+  const uint32_t outCapacity = capacity - 16;
   uint8_t key[32], associated[40];
   derive(blob, cache + 4, cache + 36, key);
   aad(blob, ordinal, capacity, associated);
@@ -218,6 +227,47 @@ extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_decode_region_v1(
   if (!metadata) { wipe(plain.data(), plain.size()); fail(); }
   std::memcpy(out, plain.data() + 16, length);
   wipe(plain.data(), plain.size());
+}
+} // namespace
+
+// cache points to aligned {u32 state; u8 actual_code_hash[32]; u8 inputs[48]}.
+// Only public input digests persist; never retain a derived key in this cache.
+extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_decode_region_v1(
+    uint8_t* out, const ndkp_cse::ModuleV1* module, const ndkp_cse::RegionV1* region) {
+  if (!out) fail();
+  decodeRegion(out, module, checkedRegion(module, region));
+}
+
+extern "C" __attribute__((visibility("hidden"))) uint8_t* ndkp_cse_acquire_region_v1(
+    const ndkp_cse::ModuleV1* module, const ndkp_cse::RegionV1* region,
+    ndkp_cse::ScopedRegionV1* lease) {
+  if (!lease || lease->state != 0 || lease->data || lease->mapped) fail();
+  const CheckedRegion checked = checkedRegion(module, region);
+  const long page = sysconf(_SC_PAGESIZE);
+  if (page <= 0 || (page & (page - 1))) fail();
+  const size_t mapped = (size_t(checked.capacity - 16) + size_t(page) - 1) & ~(size_t(page) - 1);
+  void* allocation = mmap(nullptr, mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (allocation == MAP_FAILED) fail();
+  auto* data = static_cast<uint8_t*>(allocation);
+  decodeRegion(data, module, checked);
+  if (mprotect(data, mapped, PROT_READ) != 0) fail();
+  lease->data = data;
+  lease->mapped = mapped;
+  lease->state = 1;
+  return data;
+}
+
+extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_release_region_v1(
+    ndkp_cse::ScopedRegionV1* lease) {
+  if (!lease || lease->state != 1 || !lease->data || !lease->mapped) fail();
+  const long page = sysconf(_SC_PAGESIZE);
+  if (page <= 0 || (page & (page - 1)) ||
+      reinterpret_cast<uintptr_t>(lease->data) % size_t(page) || lease->mapped % size_t(page)) fail();
+  if (mprotect(lease->data, lease->mapped, PROT_READ | PROT_WRITE) != 0) fail();
+  ndkp_cse::wipe(lease->data, lease->mapped);
+  if (munmap(lease->data, lease->mapped) != 0) fail();
+  ndkp_cse::wipe(lease, sizeof *lease);
+  lease->state = 2;
 }
 
 extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_recheck_module_v1(

@@ -24,6 +24,10 @@ public final class Entry extends XposedModule {
                     args -> ProtectedArithmetic.accumulate((long) args[0], (int) args[1]));
             Log.i(TAG, "hooks-installed package=" + param.getPackageName()
                     + " pid=" + android.os.Process.myPid());
+            if (BuildConfig.CSE_SCOPED) {
+                Log.i(TAG, "cse-scoped-probe result=" + NativeScoped.check()
+                        + " pid=" + android.os.Process.myPid() + " package=" + param.getPackageName());
+            }
         } catch (Throwable error) {
             Log.e(TAG, "hook installation failed package=" + param.getPackageName(), error);
         }

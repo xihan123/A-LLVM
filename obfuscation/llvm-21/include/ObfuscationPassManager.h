@@ -50,6 +50,7 @@ bool isVMProtectStrictEnabled();
 //       bind 蕴含 perkey，期望包名由 -irobf-cse-bind-package 提供。
 bool isCsePerKeyEnabled();
 bool isCseHardenedEnabled();
+bool isCseScopedEnabled();
 bool isCseBindEnabled();
 std::string getCseBindPackage();
 

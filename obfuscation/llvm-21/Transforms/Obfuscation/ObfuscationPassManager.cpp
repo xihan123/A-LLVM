@@ -91,6 +91,9 @@ EnableStrPerKey("irobf-cse-perkey", cl::init(false), cl::NotHidden,
 static cl::opt<bool> EnableStrHardened(
     "irobf-cse-hardened", cl::init(false), cl::NotHidden,
     cl::desc("Opt-in arm64 Android CSE AEAD and post-link code binding."));
+static cl::opt<bool> EnableStrScoped(
+    "irobf-cse-scoped", cl::init(false), cl::NotHidden,
+    cl::desc("Use per-invocation readonly mappings for NDKP_CSE_SCOPED functions (CSE v1)."));
 // bind：把运行期包名（/proc/self/cmdline）哈希折进 pepper；错包名 → 解出乱码
 //       （非分支、无可 patch 的 if）。bind 蕴含 perkey。
 static cl::opt<bool>
@@ -262,6 +265,7 @@ bool llvm::isVMProtectStrictEnabled() { return StrictVMProtect; }
 // bind 蕴含 perkey：开启包名绑定即启用 ChaCha8 派生密钥路径。
 bool llvm::isCsePerKeyEnabled() { return EnableStrPerKey || EnableStrBind || EnableStrHardened; }
 bool llvm::isCseHardenedEnabled() { return EnableStrHardened; }
+bool llvm::isCseScopedEnabled() { return EnableStrScoped; }
 bool llvm::isCseBindEnabled() { return EnableStrBind; }
 std::string llvm::getCseBindPackage() { return StrBindPackage; }
 
@@ -340,7 +344,7 @@ uint64_t llvm::getCertBindHi() {
 bool llvm::isIRObfuscationEnabled() {
   return isSegmentedDataEnabled() || EnableIRObfuscation || EnableIndirectBr || EnableIndirectCall ||
          EnableIndirectGV || EnableIRFlattening || EnableIRStringEncryption ||
-         EnableStrPerKey || EnableStrBind || EnableStrHardened ||
+         EnableStrPerKey || EnableStrBind || EnableStrHardened || EnableStrScoped ||
          EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
          EnableVMProtect || StrictVMProtect || PostVMProtect || EnableIdaDetect || EnableTimeDetect ||
          EnableRootDetect || EnableVmProtectDetect || EnableBanDump ||
@@ -517,7 +521,7 @@ struct ObfuscationPassManager : public ModulePass {
       report_fatal_error("segmented-data requires hardened CSE and certificate binding");
     bool hasObf = isSegmentedDataEnabled() || EnableIndirectBr || EnableIndirectCall || EnableIndirectGV ||
                   EnableIRFlattening || EnableIRStringEncryption ||
-                  EnableStrPerKey || EnableStrBind || EnableStrHardened || EnableStrHardened ||
+                  EnableStrPerKey || EnableStrBind || EnableStrHardened || EnableStrScoped ||
                   EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
                   EnableVMProtect || StrictVMProtect || PostVMProtect ||
                   (HasMain && (EnableIdaDetect || EnableTimeDetect || EnableRootDetect ||
@@ -529,6 +533,14 @@ struct ObfuscationPassManager : public ModulePass {
 
     if (!EnableIRObfuscation)
       return run(M);
+
+    if (EnableStrScoped) {
+      if (!EnableIRStringEncryption || !EnableStrHardened)
+        report_fatal_error("-irobf-cse-scoped requires -irobf-cse and -irobf-cse-hardened");
+      if (isSegmentedDataEnabled())
+        report_fatal_error("-irobf-cse-scoped supports CSE v1, not segmented-data/QSEG CSE v2");
+    }
+    rejectCseScopedVmp(M, PostVMProtect);
 
     if (PostVMProtect)
       prepareVMPostProtection(M);
@@ -548,7 +560,7 @@ struct ObfuscationPassManager : public ModulePass {
     if (Function *Helper = M.getFunction("ndkp_cse_decode_region_v1"))
       if (!Helper->isDeclaration() &&
           (!(EnableVMProtect || PostVMProtect) || EnableIRStringEncryption || EnableStrPerKey ||
-           EnableStrBind || EnableStrHardened || EnableCertBind))
+           EnableStrBind || EnableStrHardened || EnableStrScoped || EnableCertBind))
         report_fatal_error("compile ndkp_cse_runtime.cpp separately with -fno-lto; "
                            "only crypto-core VMP without CSE/cert-bind is allowed");
 
