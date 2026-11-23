@@ -73,6 +73,22 @@ class IntegrityRecheckTest {
                 +"define private void @"+guard+"() {\n"+(segmented?"":" %a = load volatile ptr, ptr @module\n".repeat(5))
                 +" call void @"+(segmented?"ndkp_qseg_recheck()":"ndkp_cse_recheck_module_v1(ptr %module)")+"\n ret void\n}\n";
     }
+    @Test void zeroPoolGuardRequiresOwnAnchorAndLoadConstructor() {
+        String valid="@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 103, ptr @ndkp_cse_image_recheck, ptr null }]\n"
+                +"define void @entry() {\n call void @ndkp_cse_image_recheck()\n ret void\n}\n"
+                +"define private void @ndkp_cse_image_recheck() !noobf !0 {\n call void @ndkp_cse_recheck_image_v1(ptr @ndkp_cse_image_recheck)\n ret void\n}\n";
+        assertEquals("ndkp_cse_image_recheck",NativeCompiler.verifyRecheckIr(valid,"entry",false));
+        assertDoesNotThrow(()->NativeCompiler.verifyCseIr(valid));
+        for(String broken:List.of(valid.replace("i32 103","i32 101"),valid.replace("!noobf !0",""),
+                valid.replaceFirst("@llvm.global_ctors = [^\\n]*", "@llvm.global_ctors = appending global [0 x { i32, ptr, ptr }] zeroinitializer ; i32 103, ptr @ndkp_cse_image_recheck, ptr null"),
+                valid.replace("(ptr @ndkp_cse_image_recheck)","(ptr @foreign)"),
+                valid.replace("(ptr @ndkp_cse_image_recheck)","(ptr @entry) ; call void @ndkp_cse_recheck_image_v1(ptr @ndkp_cse_image_recheck)"),
+                valid.replace(" call void @ndkp_cse_recheck_image_v1"," ;call void @ndkp_cse_recheck_image_v1"))) {
+            assertThrows(IllegalStateException.class,()->NativeCompiler.verifyRecheckIr(broken,"entry",false));
+            assertThrows(IllegalStateException.class,()->NativeCompiler.verifyCseIr(broken));
+        }
+        assertThrows(IllegalStateException.class,()->NativeCompiler.verifyRecheckIr(valid,"entry",true));
+    }
     @Test void receiptRequiresEntryCallAndCorrectRuntimeInBothModes() {
         for(boolean segmented:List.of(false,true)) {
             String valid=ir(segmented);

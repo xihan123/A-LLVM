@@ -44,6 +44,19 @@ static constexpr const char *RecheckMarker = "ndkp.cse.recheck.prepare";
 static constexpr const char *ScopedMarker = "ndkp.cse.scoped.prepare";
 static constexpr const char *ScopedAttr = "ndkp.cse.scoped";
 static constexpr const char *ScopedNounwind = "ndkp.cse.scoped.original-nounwind";
+
+static bool onlyAnnotationUses(Value *V, SmallPtrSetImpl<Value *> &Seen) {
+  if (V->use_empty()) return false;
+  if (!Seen.insert(V).second) return true;
+  for (User *U : V->users()) {
+    if (auto *GV = dyn_cast<GlobalVariable>(U)) {
+      if (GV->getName() != "llvm.global.annotations") return false;
+    } else if (!isa<Constant>(U) || !onlyAnnotationUses(U, Seen)) {
+      return false;
+    }
+  }
+  return true;
+}
 static constexpr const char *ScopedLowered = "ndkp.cse.scoped.lowered";
 
 static bool hasCseScopedAnnotation(Function &F) {
@@ -266,7 +279,6 @@ PreservedAnalyses llvm::CseRecheckPreparePass::run(Module &M,
                                                   ModuleAnalysisManager &) {
   rejectCseScopedVmp(M, false);
   SmallVector<GlobalValue *, 8> Marked;
-  bool HasScoped = false;
   for (Function &F : M) {
     if (F.isDeclaration()) continue;
     bool Recheck = false;
@@ -280,7 +292,6 @@ PreservedAnalyses llvm::CseRecheckPreparePass::run(Module &M,
       F.addFnAttr(ScopedAttr);
       F.addFnAttr(ScopedNounwind);
       F.addFnAttr("disable-tail-calls", "true");
-      HasScoped = true;
     }
     if (Recheck || Scoped) {
       F.removeFnAttr(Attribute::AlwaysInline);
@@ -295,8 +306,8 @@ PreservedAnalyses llvm::CseRecheckPreparePass::run(Module &M,
   if (Marked.empty()) return PreservedAnalyses::all();
   // Prevent IPSCCP from cloning a specialized, unannotated checkpoint body.
   appendToCompilerUsed(M, Marked);
-  // Caller const/pure contracts can otherwise delete scoped calls before lowering.
-  if (HasScoped) clearCseEffects(M, true);
+  // Caller const/pure contracts can otherwise delete marked calls before lowering.
+  clearCseEffects(M, true);
   return PreservedAnalyses::none();
 }
 
@@ -509,7 +520,9 @@ namespace {
 		std::map<unsigned, std::pair<GlobalVariable *, unsigned>> SegmentEntries;
 		void buildSegmentedTable(Module &M);
 		void buildHardenedTable(Module &M);
-		Function *buildHardenedModuleDecode(Module &M, bool Recheck = false, bool Scoped = false);
+		Function *buildHardenedModuleDecode(Module &M, bool Recheck = false, bool Scoped = false,
+                                         bool Register = false);
+		Function *buildImageRecheck(Module &M);
 		Function *buildHardenedDecrypt(Module &M, const CSPEntry *Entry);
 		bool UsePerKey = false;   ///< ChaCha8 派生密钥（不内联存储密钥）
 		bool UseBind = false;     ///< 把运行期包名哈希折进 pepper（蕴含 UsePerKey）
@@ -669,6 +682,14 @@ bool StringEncryption::runOnModule(Module &M) {
 		    GV.hasDLLExportStorageClass() || GV.isDLLImportDependent()) {
 			continue;
 		}
+    // Only private constant strings can be annotation labels/source paths.
+    auto *Annotation = dyn_cast<ConstantDataArray>(GV.getInitializer());
+    SmallPtrSet<Value *, 8> AnnotationUses;
+    if (UseHardened && GV.hasLocalLinkage() && GV.isConstant() &&
+        Annotation && Annotation->isCString() && onlyAnnotationUses(&GV, AnnotationUses)) {
+      GV.setName("ndkp_cse_annotation");
+      continue;
+    }
 		// VMP 产物不得入字符串池：gv_code_seg_* 等字节码 blob 是 SelfCheck 的校验
 		// 对象（.AProtect.data 常量），入池会被加密搬进密文表并删除原常量，SelfCheck
 		// 随后扫不到 blob 而静默 no-op。名单与 isValidToEncrypt 的排除保持一致。
@@ -781,8 +802,18 @@ bool StringEncryption::runOnModule(Module &M) {
 	}
 
 	if (UseHardened && ConstantStringPool.empty()) {
-		if (!Checkpoints.empty())
-			report_fatal_error("NDKP_CSE_RECHECK requires protected constants in the same module");
+		if (!Checkpoints.empty()) {
+      if (isSegmentedDataEnabled())
+        report_fatal_error("NDKP_CSE_RECHECK requires protected constants in a segmented module");
+      Function *Guard = buildImageRecheck(M);
+      for (Function *F : Checkpoints) {
+        IRBuilder<> B(&*F->getEntryBlock().getFirstInsertionPt());
+        fixEH(B.CreateCall(Guard));
+      }
+      clearCseEffects(M);
+      removeCseRecheckMarkers(M);
+      return true;
+    }
 		return false;
 	}
 
@@ -1687,9 +1718,27 @@ void StringEncryption::buildHardenedTable(Module &M) {
   HardenedModule->setAlignment(Align(8));
   HardenedModule->setMetadata("noobf", MDNode::get(Ctx, {}));
   HardenedDecode = buildHardenedModuleDecode(M);
+  appendToGlobalCtors(M, buildHardenedModuleDecode(M, false, false, true), 102);
 }
 
-Function *StringEncryption::buildHardenedModuleDecode(Module &M, bool Recheck, bool Scoped) {
+Function *StringEncryption::buildImageRecheck(Module &M) {
+  LLVMContext &Ctx = M.getContext();
+  auto *F = Function::Create(FunctionType::get(Type::getVoidTy(Ctx), false),
+      GlobalValue::PrivateLinkage, "ndkp_cse_image_recheck", M);
+  F->addFnAttr(Attribute::NoInline);
+  F->setMetadata("noobf", MDNode::get(Ctx, {}));
+  IRBuilder<> B(BasicBlock::Create(Ctx, "entry", F));
+  auto Verify = M.getOrInsertFunction("ndkp_cse_recheck_image_v1",
+      FunctionType::get(B.getVoidTy(), {PointerType::get(Ctx, 0)}, false));
+  cast<Function>(Verify.getCallee())->setVisibility(GlobalValue::HiddenVisibility);
+  B.CreateCall(Verify, {F}); B.CreateRetVoid();
+  // All pool registrations (102) precede zero-pool load/entry checks (103).
+  appendToGlobalCtors(M, F, 103);
+  return F;
+}
+
+Function *StringEncryption::buildHardenedModuleDecode(Module &M, bool Recheck, bool Scoped,
+                                                       bool Register) {
   if (isSegmentedDataEnabled()) {
     if (!Recheck) report_fatal_error("unexpected segmented module decode");
     auto *F = Function::Create(FunctionType::get(Type::getVoidTy(M.getContext()), false),
@@ -1707,15 +1756,15 @@ Function *StringEncryption::buildHardenedModuleDecode(Module &M, bool Recheck, b
   auto *ModuleTy = cast<StructType>(HardenedModule->getValueType());
   auto *Expected = cast<ConstantStruct>(HardenedModule->getInitializer());
   SmallVector<Type *, 3> Args;
-  if (!Recheck) Args = {Ptr, Ptr};
+  if (!Recheck && !Register) Args = {Ptr, Ptr};
   Function *F = Function::Create(FunctionType::get(Return, Args, false),
       GlobalValue::PrivateLinkage,
-      Recheck ? "ndkp_cse_module_recheck" : Scoped ? "ndkp_cse_module_acquire" : "ndkp_cse_module_decode", &M);
+      Register ? "ndkp_cse_module_register" : Recheck ? "ndkp_cse_module_recheck" : Scoped ? "ndkp_cse_module_acquire" : "ndkp_cse_module_decode", &M);
   F->addFnAttr(Attribute::NoInline);
   F->setMetadata("noobf", MDNode::get(Ctx, {}));
-  Args = Recheck ? SmallVector<Type *, 3>{Ptr} : SmallVector<Type *, 3>{Ptr, Ptr, Ptr};
+  Args = Register ? SmallVector<Type *, 3>{Ptr, Ptr} : Recheck ? SmallVector<Type *, 3>{Ptr} : SmallVector<Type *, 3>{Ptr, Ptr, Ptr};
   FunctionCallee Decode = M.getOrInsertFunction(
-      Recheck ? "ndkp_cse_recheck_module_v1" : Scoped ? "ndkp_cse_acquire_region_v1" : "ndkp_cse_decode_region_v1",
+      Register ? "ndkp_cse_register_module_v1" : Recheck ? "ndkp_cse_recheck_module_v1" : Scoped ? "ndkp_cse_acquire_region_v1" : "ndkp_cse_decode_region_v1",
       FunctionType::get(Return, Args, false));
   if (auto *Helper = dyn_cast<Function>(Decode.getCallee()))
     Helper->setVisibility(GlobalValue::HiddenVisibility);
@@ -1741,6 +1790,8 @@ Function *StringEncryption::buildHardenedModuleDecode(Module &M, bool Recheck, b
   B.CreateStore(Snapshot, LocalModule);
   if (Scoped)
     B.CreateRet(B.CreateCall(Decode, {LocalModule, F->getArg(0), F->getArg(1)}));
+  else if (Register)
+    B.CreateCall(Decode, {LocalModule, HardenedModule});
   else if (Recheck)
     B.CreateCall(Decode, {LocalModule});
   else
@@ -1750,6 +1801,8 @@ Function *StringEncryption::buildHardenedModuleDecode(Module &M, bool Recheck, b
   Value *Null = ConstantPointerNull::get(cast<PointerType>(Ptr));
   if (Scoped)
     B.CreateCall(Decode, {Null, Null, F->getArg(1)});
+  else if (Register)
+    B.CreateCall(Decode, {Null, Null});
   else if (Recheck)
     B.CreateCall(Decode, {Null});
   else

@@ -14,6 +14,7 @@
 #include <link.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <pthread.h>
 #if defined(NDKP_QSEG)
 #include "qseg.h"
 #endif
@@ -30,6 +31,9 @@ using Posix = stringarmor::apkio::Posix;
 struct Image {
   uintptr_t anchor, regions;
   size_t regionsSize;
+  uintptr_t base = 0;
+  const Elf64_Phdr* headers = nullptr;
+  unsigned headerCount = 0;
   uint8_t digest[32];
   unsigned matches = 0;
   bool valid = false;
@@ -39,12 +43,17 @@ int hashImage(dl_phdr_info* image, size_t, void* opaque) {
   bool owner = false;
   for (unsigned i = 0; i < image->dlpi_phnum; ++i) {
     const auto& p = image->dlpi_phdr[i];
+    if (p.p_vaddr > UINTPTR_MAX - image->dlpi_addr ||
+        p.p_memsz > UINTPTR_MAX - (image->dlpi_addr + p.p_vaddr)) return 0;
     if (p.p_type == PT_LOAD && result.anchor >= image->dlpi_addr + p.p_vaddr &&
         result.anchor - (image->dlpi_addr + p.p_vaddr) < p.p_memsz) owner = true;
   }
   if (!owner) return 0;
   ++result.matches;
   if (image->dlpi_phnum == 0 || image->dlpi_phnum >= 1024) return 0;
+  result.base = image->dlpi_addr;
+  result.headers = image->dlpi_phdr;
+  result.headerCount = image->dlpi_phnum;
   std::vector<uint8_t> material;
   const char domain[] = "NDKP-CODE-v1";
   material.insert(material.end(), domain, domain + sizeof domain - 1);
@@ -157,6 +166,50 @@ Image measure(const ModuleV1* module) {
   image.regionsSize = size_t(module->count) * sizeof(RegionV1);
   if (dl_iterate_phdr(hashImage, &image) != 0 || image.matches != 1 || !image.valid) fail();
   return image;
+}
+
+Image measureAnchor(const void* anchor) {
+  Image image{};
+  image.anchor = image.regions = reinterpret_cast<uintptr_t>(anchor);
+  image.regionsSize = 1;
+  if (!anchor || dl_iterate_phdr(hashImage, &image) || image.matches != 1 || !image.valid) fail();
+  return image;
+}
+
+bool sameImage(const Image& a, const Image& b) {
+  return a.base == b.base && a.headers == b.headers && a.headerCount == b.headerCount;
+}
+
+bool contains(const Image& image, const void* pointer, size_t length) {
+  if (!pointer || !length) return false;
+  const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+  for (unsigned i = 0; i < image.headerCount; ++i) {
+    const auto& p = image.headers[i];
+    if (p.p_vaddr > UINTPTR_MAX - image.base || p.p_memsz > UINTPTR_MAX - (image.base + p.p_vaddr)) return false;
+    const uintptr_t start = image.base + p.p_vaddr;
+    if (p.p_type == PT_LOAD && address >= start && address - start <= p.p_memsz &&
+        length <= p.p_memsz - (address - start)) return true;
+  }
+  return false;
+}
+
+struct Context {
+  ModuleV1 module;
+  const ModuleV1* descriptor;
+  Image owner;
+};
+pthread_mutex_t contextsMutex = PTHREAD_MUTEX_INITIALIZER;
+thread_local bool checkingImage;
+std::vector<Context>& contexts() { static std::vector<Context> value; return value; }
+
+ModuleV1 checkedSnapshot(const Context& context) {
+  const volatile ModuleV1* source = context.descriptor;
+  ModuleV1 snapshot{source->blob, source->cache, source->regions, source->total, source->count};
+  const ModuleV1& expected = context.module;
+  if (snapshot.blob != expected.blob || snapshot.cache != expected.cache ||
+      snapshot.regions != expected.regions || snapshot.total != expected.total ||
+      snapshot.count != expected.count) fail();
+  return snapshot;
 }
 
 void initialize(const ModuleV1* module) {
@@ -286,6 +339,48 @@ extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_recheck_module_v1
   std::vector<uint8_t> scratch(sentinel->out_capacity);
   ndkp_cse_decode_region_v1(scratch.data(), module, sentinel);
   wipe(scratch.data(), scratch.size());
+}
+
+extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_register_module_v1(
+    const ndkp_cse::ModuleV1* module, const ndkp_cse::ModuleV1* descriptor) {
+  // Authenticate before publishing. Registration runs after the APK verifier's 101 constructor.
+  ndkp_cse_recheck_module_v1(module);
+  const Image owner = measure(module);
+  const Image runtime = measureAnchor(reinterpret_cast<const void*>(&ndkp_cse_register_module_v1));
+  if (!sameImage(owner, runtime) || !contains(owner, descriptor, sizeof *descriptor) ||
+      !contains(owner, module->blob, module->total) || !contains(owner, module->cache, 84)) fail();
+  Context context{*module, descriptor, owner};
+  checkedSnapshot(context);
+  if (checkingImage || pthread_mutex_lock(&contextsMutex)) fail();
+  auto& entries = contexts();
+  for (const auto& entry : entries)
+    if (entry.descriptor == descriptor || entry.module.blob == module->blob) fail();
+  entries.push_back(context);
+  if (pthread_mutex_unlock(&contextsMutex)) fail();
+}
+
+extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_recheck_image_v1(
+    const void* anchor) {
+  if (checkingImage) fail();
+  checkingImage = true;
+  const Image image = measureAnchor(anchor);
+  const Image runtime = measureAnchor(reinterpret_cast<const void*>(&ndkp_cse_recheck_image_v1));
+  if (!sameImage(image, runtime) || pthread_mutex_lock(&contextsMutex)) fail();
+  // Loader iteration and APK checks must not run while holding the registry lock.
+  const auto entries = contexts();
+  if (pthread_mutex_unlock(&contextsMutex)) fail();
+  if (entries.empty()) fail();
+  for (const auto& entry : entries) {
+    if (!sameImage(image, entry.owner)) fail();
+    const ModuleV1 snapshot = checkedSnapshot(entry);
+    ndkp_cse_recheck_module_v1(&snapshot);
+  }
+#if defined(NDKP_APK_VERIFY)
+  // Reuse retained APK/library/directory fd snapshots; no second full APK scan.
+  uint8_t certificate[32]; ndkp_verified_apk(certificate, nullptr);
+  wipe(certificate, sizeof certificate);
+#endif
+  checkingImage = false;
 }
 
 #if defined(NDKP_QSEG)

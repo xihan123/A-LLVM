@@ -147,6 +147,17 @@ def recheck_ir_guard(ir, symbol, segmented):
     runtime = 'ndkp_qseg_recheck' if segmented else 'ndkp_cse_recheck_module_v1'
     if segmented and target == runtime:
         return target
+    if not segmented and re.fullmatch(r'ndkp_cse_image_recheck(?:\.[0-9]+)?', target):
+        runtime = 'ndkp_cse_recheck_image_v1'
+        helper = functions.get(target, '')
+        calls = [line.split(';', 1)[0] for line in helper.splitlines() if direct_ir_call(line) == runtime]
+        ctor = re.search(r'^@llvm\.global_ctors = [^\n]*', ir, re.M)
+        require(re.search(r'^define private void @' + re.escape(target) + r'\([^\n]*!noobf !', ir, re.M) and
+                len(calls) == 1 and
+                re.search(r'^\s*(?:(?:musttail|notail|tail)\s+)?call\b[^%@"\n]*@' + runtime + r'\(ptr @' + re.escape(target) + r'\)', calls[0]) and
+                ctor and re.search(r'i32 103, ptr @' + re.escape(target) + r'[, }]', ctor[0].split(';', 1)[0]) and
+                checked_guard_returns(helper, runtime), 'invalid image integrity recheck guard: ' + symbol)
+        return target
     guard = 'ndkp_cse_module_recheck_v2' if segmented else 'ndkp_cse_module_recheck'
     helper = functions.get(target, '')
     require(re.fullmatch(re.escape(guard) + r'(?:\.[0-9]+)?', target) and

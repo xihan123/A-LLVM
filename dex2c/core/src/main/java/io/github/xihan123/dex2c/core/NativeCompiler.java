@@ -272,6 +272,7 @@ public final class NativeCompiler {
         String runtime=segmented?"ndkp_qseg_recheck":"ndkp_cse_recheck_module_v1";
         // The v2 helper may be inlined by the verified size-optimization stage.
         if(segmented&&target.equals(runtime))return target;
+        if(!segmented&&imageRecheckGuard(ir,target))return target;
         String guard=segmented?"ndkp_cse_module_recheck_v2":"ndkp_cse_module_recheck";
         IrFunction helper=ir.functions.get(target);
         if(!target.matches(Pattern.quote(guard)+"(?:\\.[0-9]+)?") || helper==null
@@ -280,6 +281,20 @@ public final class NativeCompiler {
                 || !checkedGuardReturns(helper.body(),runtime))
             throw new IllegalStateException("dex2c: invalid integrity recheck guard for "+symbol);
         return target;
+    }
+    private static boolean imageRecheckGuard(IrIndex ir,String target) {
+        if(!target.matches("ndkp_cse_image_recheck(?:\\.[0-9]+)?"))return false;
+        IrFunction helper=ir.functions.get(target);
+        String runtime="ndkp_cse_recheck_image_v1";
+        if(helper==null)return false;
+        List<String> calls=helper.body().lines().map(line->line.split(";",2)[0])
+                .filter(line->runtime.equals(directIrCall(line))).toList();
+        return helper.header().contains("define private void @")
+                && helper.header().contains("!noobf !")
+                && calls.size()==1
+                && Pattern.compile("^\\s*(?:(?:musttail|notail|tail)\\s+)?call\\b[^%@\"\\n]*@"+runtime+"\\(ptr @"+Pattern.quote(target)+"\\)").matcher(calls.getFirst()).find()
+                && Pattern.compile("i32 103, ptr @"+Pattern.quote(target)+"[, }]").matcher(ir.globals.getOrDefault("llvm.global_ctors","").split(";",2)[0]).find()
+                && checkedGuardReturns(helper.body(),runtime);
     }
     private static boolean checkedGuardReturns(String body,String runtime) {
         Map<String,List<String>> blocks=new LinkedHashMap<>();String name="";
@@ -412,8 +427,11 @@ public final class NativeCompiler {
     }
     public static void verifyCseIr(String ir) {
         if((!ir.contains("section \".ndkp.cse\"") || !ir.contains("@ndkp_cse_decode_region_v1("))
-                && (!ir.contains("@ndkp_qseg_copy(") || !ir.contains("section \".text.ndkp.qseg.refs\"")))
-            throw new IllegalStateException("dex2c: missing hardened CSE payload/runtime");
+                && (!ir.contains("@ndkp_qseg_copy(") || !ir.contains("section \".text.ndkp.qseg.refs\""))) {
+            IrIndex index=new IrIndex(ir);
+            if(index.functions.keySet().stream().noneMatch(name->imageRecheckGuard(index,name)))
+                throw new IllegalStateException("dex2c: missing hardened CSE payload/runtime");
+        }
         if(Pattern.compile("(?m)^@\\.str[^\\n]*\\bconstant\\b[^\\n]*c\"").matcher(ir).find())
             throw new IllegalStateException("dex2c: plaintext string survived CSE");
     }

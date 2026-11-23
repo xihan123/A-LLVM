@@ -28,9 +28,10 @@
  * 不支持 VMP 业务函数、异常/非局部退出或 segmented-data；详见 CSE_HARDENED.md。 */
 #define NDKP_CSE_SCOPED NDKP_ANNOTATE("ndkp.cse_scoped")
 
-/* Hardened CSE 低频完整性检查点。需 -irobf-cse -irobf-cse-hardened，且当前
- * 翻译单元有受保护常量。入口重算本 SO 的 RX 摘要并认证缓存输入；不清除业务
- * 明文，不重读 APK，不检查其他 SO。禁止内联以保留检查边界；不用于信号处理器。 */
+/* Hardened CSE 低频完整性检查点。需 -irobf-cse -irobf-cse-hardened。LLVM 21
+ * 非分段零 pool TU 复用同 SO 已认证的 CSE 模块，缺失则失败关闭；入口重算本
+ * SO 的 RX 摘要并认证缓存输入，不清除业务明文，不检查其他 SO。完整 APK
+ * 验签启用时零 pool 路径复查保留的文件快照；禁止内联，不用于信号处理器。 */
 #if defined(__clang__)
 #  define NDKP_CSE_RECHECK NDKP_ANNOTATE("ndkp.cse_recheck") __attribute__((noinline))
 #else

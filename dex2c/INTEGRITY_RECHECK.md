@@ -15,12 +15,12 @@ static String commit(String value) { return "committed:" + value; }
 存在至少一个显式复验方法时，生成的 `JNI_OnLoad` 注册边界也标记复验；该注册证据单独记录，
 不能替代业务方法自己的入口覆盖。未标记方法不会增加入口复验。
 
-接线复用现有 `ndkp.cse_recheck`，不增加后台线程、轮询或进程环境探针。必须使用支持该注解的
-A-LLVM；本轮未改变 overlay / pass / 编译参数，patchset 仍为 p19 开发态。每个被标记入口所属的
-translation unit 最终必须形成非空 CSE pool；pool 真正为空时沿用编译器 fail-closed 错误
-`NDKP_CSE_RECHECK requires protected constants in the same module`，不会静默退化为无检查入口。
-不能把“无业务字符串”视为 pool 为空：现有 pass 也可能收入注解、源文件名等编译器生成的常量。
-接线不额外注入虚假业务常量或新 sentinel；复用现有 CSE payload 和认证路径。
+接线复用现有 `ndkp.cse_recheck`，不增加后台线程、轮询或进程环境探针。p31 的 LLVM 21
+非分段 pass 排除 annotation-only 标签与源码路径，允许真正零 CSE pool 的 TU：其入口和
+103 加载构造器以自身 RX guard 地址复用同 SO 中 102 构造器已认证、登记的 CSE 模块。
+不额外造 pool、业务常量或 sentinel。认证上下文缺失、来自其他 SO 或身份不符均失败关闭；
+整个 SO 都没有认证 CSE 模块的显式检查配置不会获准运行。仅同步 runtime 不会使 LLVM 20
+获得此接线；分段空池仍拒绝。详见 [运行时与部署合同](../runtime/CSE_HARDENED.md)。
 
 ## 两种已有运行时路径
 
@@ -29,8 +29,12 @@ translation unit 最终必须形成非空 CSE pool；pool 真正为空时沿用�
   暖态复验不重读 APK/包名，也不重置 once 或清除已有业务明文。
 - 分段：入口 → `ndkp_cse_module_recheck_v2`（可能内联）→ `ndkp_qseg_recheck`。沿用现有 QSEG 路径，
   重新测量本 SO、重新读取公开输入并检查容器摘要；不能将非分段“不重读 APK”的行为套用于此路径。
+- p31 非分段零 pool：入口/103 构造器 → `ndkp_cse_image_recheck` → `ndkp_cse_recheck_image_v1`。
+  runtime 要求自身与 anchor 同库，核对全部登记原描述符、逐个复用 module recheck；完整 APK
+  验签启用时复查原保留的 fd/stat 快照，不重复完整内容验签。runtime OBJECT 必须并入该 SO，
+  不支持公共动态 runtime；多个独立 SO 各自保存本库状态。
 
-两条路径均同步执行，成本随本 SO RX / 对应容器大小增长，不承诺固定时延，不适合热路径或 signal handler。
+这些路径均同步执行，成本随本 SO RX / 对应容器大小和登记模块数增长，不承诺固定时延，不适合热路径或 signal handler。
 检查范围只针对本 SO 及所用保护描述数据；不因 root、LSPosed 或其他 SO 的存在拒绝运行。
 对本 SO 的真实 inline hook / RX 改写或可写执行映射会拒绝，接入方应避免把合法修改本 SO 当成允许项。
 复验不是持续监控；两个入口之间的改写窗口、绕过检查、同进程任意写等边界仍存在。
@@ -45,6 +49,9 @@ invoke 或 inline asm 会拒绝。helper 必须存在可达的对应运行时调
 仅保留注解、声明、无调用的 helper 或错误运行时路径会使构建失败。
 这些检查验证现有 pass 的有限 IR 形状和调用路径；五次 volatile load 计数不是完整的描述符数据流证明，
 也不构成通用 LLVM IR 语义验证器。
+零 pool guard 另要求 private/noobf、唯一一次 image runtime 调用的参数为自身直接地址、以及
+103 构造器接线；元数据并不替代真实调用。回执的 `guard` 区分 image 和 module 路径，顶层
+非分段 `runtime` 仍指最终复用的 module 认证引擎。Java 与最终 APK Python 验证器同步支持此形状。
 最终 IR 使用 `-disable-llvm-passes` 编译，编译前后校验哈希不变。
 `protection.json` schema 6（非分段）/ 7（分段）的 `integrityRecheck` 记录逐符号 guard、translation unit、
 运行时路径和 IR SHA-256。无显式入口时该字段为 `null`。
@@ -98,3 +105,18 @@ JSON、命令日志保留 warm-before / mutation / hot / checkpoint 证据、页
 
 冷启动改文件被旧 CSE 拒绝不能证明新的暖态接线。历史 p7 `recheck_test.py` 的非分段结果也不覆盖
 本轮生成链或 QSEG 设备路径。设备、root/LSPosed 宿主、真实 16 KiB 页面及性能测量结果应按实际执行单独记录。
+
+p31 的纯整数 NATIVE fixture 使用以下测试开关生成，`native.ll` 必须无 CSE payload，
+`registration.ll` 必须保留真实有池 102 登记；实际方法与 `JNI_OnLoad` 各自进入对应 guard：
+
+```powershell
+.\dex2c\gradlew.bat -p dex2c :core:prepareDeviceFixtures `
+  '-Pdex2c.zeroPoolRecheck=true' '-Pdex2c.fixtureDirectory=<absolute-output>' `
+  '-Pdex2c.ndk=<candidate-ndk>' '-Pdex2c.hostCompiler=<candidate-clang>'
+```
+
+本批已有 host 真实 dex2c 编链/封装/strip 回归。独立 image SO 专项在 OnePlus 7 / GM1901 /
+API 37 / ARM64 / 4 KiB 上实测 20 例，覆盖正常与 strip 后加载、缺失上下文、暖态 RX/权限/cache/
+诱饵/描述符篡改、异库 anchor、多 SO 独立状态、外库 RWX 与并发构造器回调；实际退出码见
+`work/m4-image-p31/device-reviewfix-final/results.json`。该结果不替代 dex2c JNI/业务 APK、
+完整 APK 验签、root/LSPosed 宿主、物理 16 KiB/API26/29 或性能验证。

@@ -108,7 +108,7 @@ AAD 绑定模块标识、格式版本、绑定开关、记录序号、容量、�
 
 代码摘要为 SHA-256(`NDKP-CODE-v1` 与按程序头顺序排列的每段相对虚拟地址、文件长度、段 SHA-256)。覆盖全部可执行 `PT_LOAD` 文件字节，包含非 `.text` 的代码段。为兼容 strip，唯一规范化例外为 ELF 头的 `e_shoff`、`e_shentsize`、`e_shnum`、`e_shstrndx`：计算前将这些字段归零。程序头和实际代码字节仍被绑定。拒绝可写/不可读/含非文件字节的可执行段、文本重定位及重叠映射布局。
 
-运行时通过 `dl_iterate_phdr` 定位数据块所属 ELF，并以 volatile 读取实际映射代码计算摘要；不使用头内的期望摘要来派生密钥。每模块以原子 once 缓存实际摘要，默认每条字符串沿用原子 once 发布。包名及证书输入在首次解密该模块时读取并交叉验证；与实际代码摘要一起缓存这些公开输入摘要，派生密钥不缓存。默认路径验证成功后才复制到静态存储期业务缓冲区；临时明文和派生密钥清零。scoped 路径复用模块公开输入缓存，但每次调用独立映射并重新认证所需记录。
+运行时通过 `dl_iterate_phdr` 定位数据块所属 ELF，并以 volatile 读取实际映射代码计算摘要；不使用头内的期望摘要来派生密钥。每模块以原子 once 缓存实际摘要，默认每条字符串沿用原子 once 发布。LLVM 20 沿用首次解密读取公开输入；p31 的 LLVM 21 非分段模块在下述 102 构造器中读取并认证。与实际代码摘要一起缓存这些公开输入摘要，派生密钥不缓存。默认路径验证成功后才复制到静态存储期业务缓冲区；临时明文和派生密钥清零。scoped 路径复用模块公开输入缓存，但每次调用独立映射并重新认证所需记录。
 
 region 表不含重定位，放入 `.text.ndkp.cse.regions`，由上述代码摘要认证；运行时拒绝表未完整落入本库可执行文件字节的布局。含绝对指针的模块表保留在数据段，每模块生成一个共享入口，用 volatile 读取并与代码中的 blob/cache/regions 引用、总长和记录数核对，再传递已核对字段的局部快照。这样既防止模块基址重定向，也避免核对后再次读取被改写的描述表。每串包装函数仍只传指针，不传容量或序号整数。
 
@@ -222,7 +222,7 @@ int sensitive_operation(int value) {
 可写代码映射会被拒绝，部署时必须核实应用的兼容要求。
 
 检查点只认证一个哨兵记录，并非重解密所有业务记录；其他记录仍在首次访问时认证。
-每个检查点只核对所属 LLVM 模块的描述表和缓存，代码摘要覆盖整个 SO。它不校验业务明文、
+有池检查点核对所属 LLVM 模块的描述表和缓存，代码摘要覆盖整个 SO；p31 零池检查点核对同 SO 全部已登记模块。它不校验业务明文、
 全部可写全局或任意函数指针，也不消除检查与使用之间的竞态。绕过检查调用、同时改写检查器
 或同进程任意读写仍在威胁模型内。静态存储期明文和公开证书离线恢复的边界不变。
 
@@ -235,6 +235,69 @@ python tests/cse-hardened/recheck_test.py --ndk "$NDK" --clang "$CLANG" --compil
 `--compile-only` 只验证编链、IR 和封装，不含篡改测试。
 新注解使用额外的 hidden 入口 `ndkp_cse_recheck_module_v1`，需同步 p7 运行时并重新编译。
 CSE v1 格式、原解密 ABI 和默认明文生命周期保持不变。
+
+## 零 pool 翻译单元与加载认证（p31，LLVM 21 非分段）
+
+LLVM 21 的 hardened CSE 排除仅被 `llvm.global.annotations` 引用的标签和源码路径，给这些
+公开元数据命名 `ndkp_cse_annotation`；如果同一常量也被业务指令引用，仍进入原 CSE pool。
+这样只有纯算术代码及 `NDKP_CSE_RECHECK` 的翻译单元可以真正没有 CSE payload、region 或
+额外诱饵。无 CSE/hardened 开关时不增加变换。
+
+每个非空、非分段 CSE 模块生成无参、`noobf` 的 102 构造器：guard 先对原 ModuleV1 五字段
+做 volatile 校验及局部快照，再通过 `ndkp_cse_register_module_v1` 重新度量 RX、认证原最后
+一条诱饵，成功后保存描述符地址、五字段快照和所属 ELF 的 base/phdr 身份。这使公开输入的
+初始化与诱饵认证移到加载阶段；业务明文仍按原 once 或 scoped 路径发布，加载不解密业务记录。
+完整 APK 验签开启时仍由原 101 构造器先验签，保持优先级 101 → 102 → 103。
+
+真正零 pool 的显式入口调用无参、`noinline/noobf` 的 `ndkp_cse_image_recheck`，同时把该
+guard 放入 103 构造器。guard 只把自身直接代码地址传给 hidden `ndkp_cse_recheck_image_v1`。
+运行时确认 anchor 与本 runtime 属于同一个、唯一的 ELF，重测完整 RX 和实时页权限，再核对
+登记的每个原描述符并把局部快照送入原 module recheck，认证其缓存及诱饵。找不到任何本 SO
+认证上下文、anchor 属于另一 SO、描述符身份失配或认证失败均执行 `exit_group(127)`。
+registry 只在锁内复制登记上下文，描述符、module、APK 校验均在锁外执行，避免和 Android
+loader 构造器回调的锁顺序冲突；同线程重入仍拒绝。
+开启完整 APK 验签时还调用原 `ndkp_verified_apk` 复查保留的 APK、解压 SO 与目录 fd/stat
+快照，不重做完整 APK 内容扫描；原有有池 module recheck 的暖态输入行为保持原合同。
+
+runtime 必须作为 OBJECT/static object 链入每个受保护 SO，hidden 入口和匿名命名空间状态
+在该 SO 内绑定；本仓库 CMake 接入和 dex2c 的 `ndkp_cse_runtime.o` 链接均采用此模型。
+多个 SO 各自独立登记、检查本库，普通其他 SO 或其合法修改不会因存在而被拒绝。把 runtime
+部署成公共动态 SO 或进程单例不受支持，会在 owner 身份校验处失败。整个 SO 都没有可认证
+CSE 模块而显式要求零 pool recheck，也会失败；本批支持零 pool TU 复用同 SO 的有池 TU，
+不声称完整无 payload SO 已获得 RX 绑定。定义早于 102/103 的自有构造器也不能提前调用
+依赖此 registry 的零 pool 入口；接入方应在 103 之后或普通加载完成后调用。
+
+blob/cache/原 descriptor 的完整范围必须属于同 ELF 的 PT_LOAD；地址及长度做溢出、跨段
+检查。数据段允许 RW，因为 blob 使用可封装数据、cache 必须写入，descriptor 含重定位。
+数据权限不充当认证依据：描述符由原 guard/保存快照约束，blob 与缓存由原 AEAD/RX 认证约束；
+RX 则仍要求真实页 R-X、不可写。检查不是持续监控或同进程信任根，不保证修改与使用之间
+无竞态。零 pool 检查会复验本库全部登记模块，成本随 RX 大小和模块数增长，只用于低频入口。
+
+本批只改 LLVM 21 非分段 pass；`segmentedData` 沿用原 QSEG 接线和空池拒绝，LLVM 20
+只同步两个 hidden ABI 声明，未移植新加载/零 pool 编译器行为。需要同步 p31 runtime 并
+重新编译；ModuleV1、region、原 decode/recheck ABI 和 CSE v1 线格式均未改。
+
+```powershell
+python tests/cse-hardened/image_recheck_test.py --ndk <ndk> --clang <clang> `
+  --work-dir work/cse-image --compile-only
+python tests/cse-hardened/image_recheck_test.py --ndk <ndk> --clang <clang> `
+  --work-dir work/cse-image-device --serial <serial>
+.\dex2c\gradlew.bat -p dex2c :core:prepareDeviceFixtures `
+  '-Pdex2c.zeroPoolRecheck=true' '-Pdex2c.fixtureDirectory=<absolute-output>' `
+  '-Pdex2c.ndk=<ndk>' '-Pdex2c.hostCompiler=<clang>'
+```
+
+独立 fixture 保留原命令与哈希，核对 O0/O2 真零 pool、无开关对照及业务共享标签仍加密。
+被注解的公开变量保持符号并可跨 TU 引用，只有 local/private 常量 i8 C-string 标签/路径排除入池。
+另核对 102/103 无参构造器、真实 IR codegen、封装和 strip。设备模式检查缺失上下文、原描述符
+五字段、cache、诱饵、RX/权限与外库 anchor，及两个独立 SO 正常并存/外库 RWX 不误杀、
+checkpoint 线程与另一个 SO 构造器回调的并发加载。
+OnePlus 7 / GM1901 / API 37 / arm64-v8a / 4 KiB 的独立 SO 专项已实测 20 例，结果位于
+`work/m4-image-p31/device-reviewfix-final/results.json`：O0/O2 与 strip 后加载、缺失上下文拒绝、
+10 项暖态 RX/权限/cache/诱饵/描述符篡改、异库 anchor、多 SO 并存、外库 RWX 不误杀，以及
+checkpoint 线程与另一个 SO 构造器回调的并发加载均按实际退出码通过。只使用独立临时目录，
+没有安装新 APK 或修改设备全局配置。完整 APK 验签、dex2c JNI/业务 APK、root/LSPosed 宿主、
+API 26/29、物理 16 KiB 页面及性能仍未做本批验证。
 
 ## 验证与边界
 

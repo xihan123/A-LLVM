@@ -20,6 +20,22 @@ def module(symbol, segmented=False):
 
 
 class IntegrityRecheckTest(unittest.TestCase):
+    def test_zero_pool_guard_requires_own_rx_anchor_and_load_constructor(self):
+        ir = ('@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] '
+              '[{ i32, ptr, ptr } { i32 103, ptr @ndkp_cse_image_recheck, ptr null }]\n'
+              'define void @entry() {\n call void @ndkp_cse_image_recheck()\n ret void\n}\n'
+              'define private void @ndkp_cse_image_recheck() !noobf !0 {\n'
+              ' call void @ndkp_cse_recheck_image_v1(ptr @ndkp_cse_image_recheck)\n ret void\n}\n')
+        self.assertEqual('ndkp_cse_image_recheck', recheck_ir_guard(ir, 'entry', False))
+        for changed in (ir.replace('i32 103', 'i32 101'), ir.replace('!noobf !0', ''),
+                        ir.replace(ir.splitlines()[0], '@llvm.global_ctors = appending global [0 x { i32, ptr, ptr }] zeroinitializer ; i32 103, ptr @ndkp_cse_image_recheck, ptr null'),
+                        ir.replace('(ptr @ndkp_cse_image_recheck)', '(ptr @foreign)'),
+                        ir.replace('(ptr @ndkp_cse_image_recheck)', '(ptr @entry) ; call void @ndkp_cse_recheck_image_v1(ptr @ndkp_cse_image_recheck)'),
+                        ir.replace(' call void @ndkp_cse_recheck_image_v1', ' ;call void @ndkp_cse_recheck_image_v1')):
+            with self.subTest(ir=changed), self.assertRaises(ValueError):
+                recheck_ir_guard(changed, 'entry', False)
+        with self.assertRaises(ValueError): recheck_ir_guard(ir, 'entry', True)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         self.native = Path(temporary.name)

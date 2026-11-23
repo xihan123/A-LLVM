@@ -32,6 +32,12 @@ extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_decode_region_v1(
     uint8_t*, const ndkp_cse::ModuleV1*, const ndkp_cse::RegionV1*);
 extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_recheck_module_v1(
     const ndkp_cse::ModuleV1*);
+// Register only a generated guard's checked snapshot, retaining descriptor identity.
+extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_register_module_v1(
+    const ndkp_cse::ModuleV1*, const ndkp_cse::ModuleV1* descriptor);
+// The anchor is the generated checkpoint guard in this DSO's executable image.
+extern "C" __attribute__((visibility("hidden"))) void ndkp_cse_recheck_image_v1(
+    const void* anchor);
 // A compiler-private, zero-initialized lease is used once: fresh(0), active(1), retired(2).
 extern "C" __attribute__((visibility("hidden"))) uint8_t* ndkp_cse_acquire_region_v1(
     const ndkp_cse::ModuleV1*, const ndkp_cse::RegionV1*, ndkp_cse::ScopedRegionV1*);

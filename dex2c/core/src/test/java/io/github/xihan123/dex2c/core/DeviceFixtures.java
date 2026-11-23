@@ -12,9 +12,11 @@ public final class DeviceFixtures {
         Path out=Path.of(args[0]).toAbsolutePath();Files.createDirectories(out);
         boolean nativeOnly=args.length>5&&Boolean.parseBoolean(args[5]);
         boolean recheck=args.length>6&&Boolean.parseBoolean(args[6]);
+        boolean zeroPool=args.length>7&&Boolean.parseBoolean(args[7]);
+        if(zeroPool)recheck=true;
         if(nativeOnly&&recheck)throw new IllegalArgumentException("choose native-only or mixed integrity-recheck fixture");
         Path source=out.resolve("Run.java"),classes=Files.createDirectories(out.resolve("classes"));
-        try(InputStream in=DeviceFixtures.class.getResourceAsStream(recheck?"/fixtures/recheck/Run.java":nativeOnly?"/fixtures/native/Run.java":"/fixtures/Run.java")){Files.copy(Objects.requireNonNull(in),source,StandardCopyOption.REPLACE_EXISTING);}
+        try(InputStream in=DeviceFixtures.class.getResourceAsStream(zeroPool?"/fixtures/recheck-zero/Run.java":recheck?"/fixtures/recheck/Run.java":nativeOnly?"/fixtures/native/Run.java":"/fixtures/Run.java")){Files.copy(Objects.requireNonNull(in),source,StandardCopyOption.REPLACE_EXISTING);}
         int result=ToolProvider.getSystemJavaCompiler().run(null,null,null,"-g","-classpath",System.getProperty("java.class.path"),"-d",classes.toString(),source.toString());
         if(result!=0)throw new IllegalStateException("fixture compilation failed");
         Path kotlin=location(kfixture.Fixture.class);
@@ -22,6 +24,13 @@ public final class DeviceFixtures {
         new NativeCompiler().compile(generated,out.resolve("native"),Path.of(args[1]),Path.of(args[2]),"dex2c_semantics",26,
                 TestSigning.certificate(out),TestSigning.python(),args.length>3&&Boolean.parseBoolean(args[3]),
                 args.length>4&&Boolean.parseBoolean(args[4]));
+        if(zeroPool) {
+            String nativeIr=Files.readString(out.resolve("native/native.ll"));
+            String registrationIr=Files.readString(out.resolve("native/registration.ll"));
+            if(nativeIr.contains("section \".ndkp.cse\"") || !nativeIr.contains("i32 103, ptr @ndkp_cse_image_recheck")
+                    || !registrationIr.contains("section \".ndkp.cse\"") || !registrationIr.contains("i32 102, ptr @ndkp_cse_module_register"))
+                throw new IllegalStateException("fixture requires a real zero-pool native TU and registered sibling pool");
+        }
         Path javaJar=out.resolve("original.jar");
         try(JarOutputStream jar=new JarOutputStream(Files.newOutputStream(javaJar));var files=Files.walk(classes)) {
             for(Path path:files.filter(Files::isRegularFile).toList()) {

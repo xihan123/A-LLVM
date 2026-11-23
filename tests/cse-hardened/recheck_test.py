@@ -183,7 +183,9 @@ def main():
             empty = out / "empty.cpp"
             empty.write_text('#include "ndkp.h"\nNDKP_CSE_RECHECK int checkpoint() { return 1; }\n')
             run(clang, *common, *cse_flags, "-S", "-emit-llvm", empty, "-o", out / "empty.ll")
-            assert "call void @ndkp_cse_module_recheck()" in (out / "empty.ll").read_text()
+            empty_ir = (out / "empty.ll").read_text()
+            guard = "ndkp_cse_module_recheck" if "ndkp_cse_v1_payload" in empty_ir else "ndkp_cse_image_recheck"
+            assert "call void @" + guard + "()" in empty_ir
             print("[ok] prerequisite diagnostics; no flags preserve plain behavior", flush=True)
         finally:
             if not args.compile_only:
